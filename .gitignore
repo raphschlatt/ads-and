@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.csv
+*.pkl
+*.parquet
+*.h5
+*.json
+data/
+models/
+
