@@ -2,3 +2,7 @@ stage: "smoke"
 subset_target_mentions: 1000
 seed: 11
 max_pairs_per_block: 10000
+split_balance:
+  min_neg_val: 10
+  min_neg_test: 10
+  max_attempts: 200

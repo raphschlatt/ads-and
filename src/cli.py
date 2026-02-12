@@ -8,7 +8,7 @@ import pandas as pd
 
 from src.common.config import load_yaml, resolve_paths_config, find_project_root, resolve_existing_path
 from src.common.io_schema import read_parquet, save_parquet
-from src.common.run_report import evaluate_go_no_go, write_go_no_go_report
+from src.common.run_report import evaluate_go_no_go, write_go_no_go_report, load_gate_config
 from src.common.subset_builder import build_stage_subset, write_subset_manifest
 from src.data.prepare_lspo import prepare_lspo_mentions
 from src.data.prepare_ads import prepare_ads_mentions
@@ -196,7 +196,8 @@ def cmd_report(args):
         with open(args.metrics, "r", encoding="utf-8") as f:
             metrics = json.load(f)
 
-    go = evaluate_go_no_go(metrics)
+    gate_cfg = load_gate_config(args.gates_config) if args.gates_config else None
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
     write_go_no_go_report(go, args.output)
     print(f"Go/No-Go: {'GO' if go['go'] else 'NO-GO'} -> {args.output}")
 
@@ -284,6 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("report")
     sp.add_argument("--metrics", required=True)
+    sp.add_argument("--gates-config", default="configs/gates.yaml")
     sp.add_argument("--output", required=True)
     sp.set_defaults(func=cmd_report)
 

@@ -11,7 +11,8 @@ def test_pair_builder_with_labels_and_splits():
             {"mention_id": "p3::0", "bibcode": "p3", "author_idx": 0, "author_raw": "Smith, Jane", "title": "t3", "abstract": "a3", "year": 2003, "source_type": "lspo", "block_key": "j.smith", "orcid": "o2"},
         ]
     )
-    split_df = assign_lspo_splits(df, seed=11)
+    split_df, meta = assign_lspo_splits(df, seed=11, return_meta=True)
     pairs = build_pairs_within_blocks(split_df, require_same_split=True, labeled_only=False, balance_train=False)
     assert len(pairs) >= 1
+    assert "status" in meta
     assert set(["pair_id", "mention_id_1", "mention_id_2", "block_key", "split"]).issubset(set(pairs.columns))

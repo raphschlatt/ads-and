@@ -6,6 +6,7 @@ import unicodedata
 import pandas as pd
 
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+_SURNAME_PARTICLES = {"da", "de", "del", "della", "der", "di", "du", "la", "le", "van", "von"}
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -41,14 +42,19 @@ def create_block_key(author_name: str) -> str:
         parts = [p for p in raw.split() if p]
         if not parts:
             return "unknown"
-        # ADS often stores names as "Lastname IN" without comma.
-        # If trailing tokens look like initials, treat first token as last name.
+        # ADS often stores names as "Lastname [particles] I[...]" without comma.
+        # Detect trailing initials and treat all preceding tokens as surname phrase.
         if len(parts) >= 2:
-            tail_clean = [_clean_token(t) for t in parts[1:]]
-            tail_looks_initials = all(0 < len(t) <= 3 for t in tail_clean)
-            if tail_looks_initials:
-                last_part = parts[0]
-                first_part = parts[1]
+            trailing_initials = 0
+            for token in reversed(parts):
+                cleaned = _clean_token(token)
+                if 0 < len(cleaned) <= 3:
+                    trailing_initials += 1
+                else:
+                    break
+            if 0 < trailing_initials < len(parts):
+                last_part = " ".join(parts[:-trailing_initials]).strip()
+                first_part = parts[-trailing_initials]
             else:
                 last_part = parts[-1]
                 first_part = parts[0]
@@ -65,6 +71,9 @@ def create_block_key(author_name: str) -> str:
     last_tokens = [t for t in re.split(r"\s+", last_part) if t]
     if last_tokens and _clean_token(last_tokens[-1]) in _SUFFIXES and len(last_tokens) > 1:
         last_tokens = last_tokens[:-1]
+    # For particle-based surnames, use the lexical surname token for blocking.
+    if len(last_tokens) > 1 and _clean_token(last_tokens[0]) in _SURNAME_PARTICLES:
+        last_tokens = last_tokens[1:]
     last_name = _clean_token(last_tokens[-1]) if last_tokens else ""
 
     if not first_initial or not last_name:

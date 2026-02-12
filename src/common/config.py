@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -145,3 +146,77 @@ def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_
         "processed": Path(data_cfg["processed_dir"]),
     }
     return dirs
+
+
+def write_latest_run_context(
+    run_id: str,
+    run_dirs: Dict[str, Path],
+    output_path: str | Path,
+    stage: str | None = None,
+    extras: Dict[str, Any] | None = None,
+) -> Path:
+    p = Path(output_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, Any] = {
+        "run_id": run_id,
+        "stage": stage,
+        "run_dirs": {k: str(v) for k, v in run_dirs.items()},
+    }
+    if extras:
+        payload.update(extras)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return p
+
+
+def read_latest_run_context(path: str | Path) -> Dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Latest run context not found: {p}")
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def resolve_run_id(
+    manual_run_id: str | None,
+    latest_context_path: str | Path,
+    allow_placeholder: bool = False,
+) -> str:
+    placeholder = "replace_with_run_id_from_00"
+    if manual_run_id and manual_run_id.strip():
+        candidate = manual_run_id.strip()
+    else:
+        ctx = read_latest_run_context(latest_context_path)
+        candidate = str(ctx.get("run_id") or "").strip()
+
+    if not candidate:
+        raise ValueError(
+            "RUN_ID could not be resolved. Set RUN_ID manually or run notebook 00_setup_and_config first."
+        )
+    if not allow_placeholder and candidate == placeholder:
+        raise ValueError(
+            "RUN_ID is still the placeholder 'replace_with_run_id_from_00'. "
+            "Run notebook 00 and use auto RUN_ID resolution."
+        )
+    return candidate
+
+
+def write_run_consistency(
+    run_id: str,
+    run_stage: str,
+    run_dirs: Dict[str, Path],
+    output_path: str | Path,
+    extras: Dict[str, Any] | None = None,
+) -> Path:
+    p = Path(output_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, Any] = {
+        "run_id": run_id,
+        "run_stage": run_stage,
+        "paths": {k: str(v) for k, v in run_dirs.items()},
+    }
+    if extras:
+        payload.update(extras)
+    with p.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    return p

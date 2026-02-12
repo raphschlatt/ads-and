@@ -50,17 +50,54 @@ def _pairs_to_index_arrays(pairs: pd.DataFrame, mention_index: Dict[str, int], l
     return np.asarray(arr_1, dtype=np.int64), np.asarray(arr_2, dtype=np.int64), np.asarray(labels, dtype=np.int64)
 
 
-def _compute_best_threshold(sim: np.ndarray, labels: np.ndarray) -> tuple[float, Dict[str, float]]:
+def _label_class_counts(labels: np.ndarray) -> Dict[str, int]:
+    if labels is None or len(labels) == 0:
+        return {"pos": 0, "neg": 0}
+    return {"pos": int((labels == 1).sum()), "neg": int((labels == 0).sum())}
+
+
+def _compute_best_threshold(
+    sim: np.ndarray,
+    labels: np.ndarray,
+    default_threshold: float = 0.35,
+) -> tuple[float, Dict[str, float], str, str]:
+    counts = _label_class_counts(labels)
+    has_pos = counts["pos"] > 0
+    has_neg = counts["neg"] > 0
+
+    if not has_pos and not has_neg:
+        return float(default_threshold), {"f1": 0.0, "precision": 0.0, "recall": 0.0, "accuracy": 0.0}, "fallback_no_labels", "fallback_default"
+    if not has_pos:
+        pred = (sim >= default_threshold).astype(int)
+        stats = {
+            "f1": float(f1_score(labels, pred, zero_division=0)),
+            "precision": float(precision_score(labels, pred, zero_division=0)),
+            "recall": float(recall_score(labels, pred, zero_division=0)),
+            "accuracy": float(accuracy_score(labels, pred)),
+        }
+        return float(default_threshold), stats, "fallback_no_positives", "fallback_default"
+    if not has_neg:
+        pred = (sim >= default_threshold).astype(int)
+        stats = {
+            "f1": float(f1_score(labels, pred, zero_division=0)),
+            "precision": float(precision_score(labels, pred, zero_division=0)),
+            "recall": float(recall_score(labels, pred, zero_division=0)),
+            "accuracy": float(accuracy_score(labels, pred)),
+        }
+        return float(default_threshold), stats, "fallback_no_negatives", "fallback_default"
+
     thresholds = np.linspace(-1.0, 1.0, num=2001)
-    best_f1 = -1.0
-    best_thr = 0.0
+    best_key = (-1.0, -1.0)
+    best_thr = float(default_threshold)
     best_stats: Dict[str, float] = {}
 
     for thr in thresholds:
         pred = (sim >= thr).astype(int)
         f1 = f1_score(labels, pred, zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
+        edge_margin = min(float(thr + 1.0), float(1.0 - thr))
+        key = (float(f1), edge_margin)
+        if key > best_key:
+            best_key = key
             best_thr = float(thr)
             best_stats = {
                 "f1": float(f1),
@@ -69,7 +106,7 @@ def _compute_best_threshold(sim: np.ndarray, labels: np.ndarray) -> tuple[float,
                 "accuracy": float(accuracy_score(labels, pred)),
             }
 
-    return best_thr, best_stats
+    return best_thr, best_stats, "ok", "val_f1_opt"
 
 
 def _score_pairs(
@@ -128,6 +165,8 @@ def train_nand_seed(
     train_i1, train_i2, _ = _pairs_to_index_arrays(train_pairs, mindex, labeled_only=True)
     val_i1, val_i2, val_y = _pairs_to_index_arrays(val_pairs, mindex, labeled_only=True)
     test_i1, test_i2, test_y = _pairs_to_index_arrays(test_pairs, mindex, labeled_only=True)
+    val_class_counts = _label_class_counts(val_y)
+    test_class_counts = _label_class_counts(test_y)
 
     if len(train_i1) == 0:
         raise ValueError("No positive train pairs found. Check pair building and split assignment.")
@@ -209,12 +248,19 @@ def train_nand_seed(
     if best_state is not None:
         model.load_state_dict(best_state)
 
+    default_threshold = float(model_config.get("default_cosine_threshold", 0.35))
     if len(val_i1) == 0:
-        threshold = 0.0
+        threshold = float(default_threshold)
         val_stats = {"f1": 0.0, "precision": 0.0, "recall": 0.0, "accuracy": 0.0}
+        threshold_selection_status = "fallback_no_labels"
+        threshold_source = "fallback_default"
     else:
         val_sim = _score_pairs(model, features, val_i1, val_i2)
-        threshold, val_stats = _compute_best_threshold(val_sim, val_y)
+        threshold, val_stats, threshold_selection_status, threshold_source = _compute_best_threshold(
+            val_sim,
+            val_y,
+            default_threshold=default_threshold,
+        )
 
     test_metrics = {"f1": None, "precision": None, "recall": None, "accuracy": None}
     if len(test_i1) > 0:
@@ -235,6 +281,10 @@ def train_nand_seed(
         "state_dict": model.state_dict(),
         "model_config": model_config,
         "threshold": float(threshold),
+        "threshold_selection_status": threshold_selection_status,
+        "threshold_source": threshold_source,
+        "val_class_counts": val_class_counts,
+        "test_class_counts": test_class_counts,
         "seed": int(seed),
         "run_id": run_id,
         "val_stats": val_stats,
@@ -248,6 +298,10 @@ def train_nand_seed(
         "seed": int(seed),
         "checkpoint": str(ckpt_path),
         "threshold": float(threshold),
+        "threshold_selection_status": threshold_selection_status,
+        "threshold_source": threshold_source,
+        "val_class_counts": val_class_counts,
+        "test_class_counts": test_class_counts,
         "val_stats": val_stats,
         "test_metrics": test_metrics,
     }
@@ -287,6 +341,10 @@ def train_nand_across_seeds(
         "best_seed": best["seed"],
         "best_checkpoint": best["checkpoint"],
         "best_threshold": best["threshold"],
+        "best_threshold_selection_status": best.get("threshold_selection_status"),
+        "best_threshold_source": best.get("threshold_source"),
+        "best_val_class_counts": best.get("val_class_counts"),
+        "best_test_class_counts": best.get("test_class_counts"),
         "best_val_f1": best["val_stats"].get("f1"),
     }
 

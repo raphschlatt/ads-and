@@ -16,4 +16,5 @@ training:
   max_epochs: 250
   early_stopping_patience: 25
   temperature: 0.25
+  default_cosine_threshold: 0.35
   seeds: [1, 2, 3, 4, 5]

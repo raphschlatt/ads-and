@@ -1,8 +1,14 @@
 method: "dbscan"
+eps_mode: "from_threshold"  # fixed | from_threshold
 eps: 0.35
+eps_min: 0.15
+eps_max: 0.85
 min_samples: 1
 metric: "precomputed"
 constraints:
   enabled: true
+  constraint_mode: "soft"  # soft | hard
   max_year_gap: 30
   enforce_name_conflict: true
+  name_conflict_min_distance: 0.75
+  year_gap_min_distance: 0.65
