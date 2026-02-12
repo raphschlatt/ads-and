@@ -1,0 +1,8 @@
+method: "dbscan"
+eps: 0.35
+min_samples: 1
+metric: "precomputed"
+constraints:
+  enabled: true
+  max_year_gap: 30
+  enforce_name_conflict: true

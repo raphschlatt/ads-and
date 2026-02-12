@@ -1,0 +1,4 @@
+stage: "smoke"
+subset_target_mentions: 1000
+seed: 11
+max_pairs_per_block: 10000

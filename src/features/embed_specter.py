@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+import pandas as pd
+
+
+def _hash_stub_embedding(text: str, dim: int = 768) -> np.ndarray:
+    h = hashlib.sha256(text.encode("utf-8", errors="ignore")).digest()
+    seed = int.from_bytes(h[:8], byteorder="little", signed=False)
+    rng = np.random.default_rng(seed)
+    vec = rng.normal(0.0, 1.0, size=dim).astype(np.float32)
+    norm = float(np.linalg.norm(vec))
+    return vec / norm if norm > 0 else vec
+
+
+def _to_text(title: str, abstract: str) -> str:
+    title = (title or "").strip()
+    abstract = (abstract or "").strip()
+    if title and abstract:
+        return f"{title} [SEP] {abstract}"
+    return title or abstract
+
+
+def _has_valid_precomputed(values: Iterable) -> bool:
+    for item in values:
+        if isinstance(item, list) and len(item) == 768:
+            return True
+    return False
+
+
+def _stack_precomputed(values: Iterable, texts: list[str]) -> np.ndarray:
+    out = []
+    for idx, item in enumerate(values):
+        if isinstance(item, list) and len(item) == 768:
+            out.append(np.asarray(item, dtype=np.float32))
+        else:
+            out.append(_hash_stub_embedding(texts[idx], dim=768))
+    return np.vstack(out).astype(np.float32)
+
+
+def generate_specter_embeddings(
+    mentions: pd.DataFrame,
+    model_name: str = "allenai/specter",
+    batch_size: int = 16,
+    max_length: int = 256,
+    device: str = "auto",
+    prefer_precomputed: bool = True,
+    use_stub_if_missing: bool = False,
+) -> np.ndarray:
+    titles = mentions["title"].fillna("").astype(str).tolist()
+    abstracts = mentions["abstract"].fillna("").astype(str).tolist()
+    texts = [_to_text(t, a) for t, a in zip(titles, abstracts)]
+
+    if prefer_precomputed and "precomputed_embedding" in mentions.columns:
+        pre = mentions["precomputed_embedding"].tolist()
+        if _has_valid_precomputed(pre):
+            return _stack_precomputed(pre, texts)
+
+    try:
+        import torch
+        from transformers import AutoModel, AutoTokenizer
+    except Exception as exc:
+        if not use_stub_if_missing:
+            raise RuntimeError(
+                "SPECTER embedding generation requires `torch` and `transformers`, or precomputed 768-dim embeddings."
+            ) from exc
+        return np.vstack([_hash_stub_embedding(t, dim=768) for t in texts]).astype(np.float32)
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name)
+    model.to(device)
+    model.eval()
+
+    vectors: list[np.ndarray] = []
+    with torch.no_grad():
+        for start in range(0, len(texts), batch_size):
+            chunk = texts[start : start + batch_size]
+            enc = tokenizer(
+                chunk,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+            enc = {k: v.to(device) for k, v in enc.items()}
+            out = model(**enc)
+            cls = out.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
+            vectors.append(cls)
+
+    return np.vstack(vectors).astype(np.float32)
+
+
+def get_or_create_specter_embeddings(
+    mentions: pd.DataFrame,
+    output_path: str | Path,
+    force_recompute: bool = False,
+    model_name: str = "allenai/specter",
+    batch_size: int = 16,
+    max_length: int = 256,
+    device: str = "auto",
+    prefer_precomputed: bool = True,
+    use_stub_if_missing: bool = False,
+) -> np.ndarray:
+    output = Path(output_path)
+    if output.exists() and not force_recompute:
+        return np.load(output)
+
+    emb = generate_specter_embeddings(
+        mentions=mentions,
+        model_name=model_name,
+        batch_size=batch_size,
+        max_length=max_length,
+        device=device,
+        prefer_precomputed=prefer_precomputed,
+        use_stub_if_missing=use_stub_if_missing,
+    )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.save(output, emb)
+    return emb

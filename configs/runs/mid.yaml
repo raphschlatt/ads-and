@@ -1,0 +1,4 @@
+stage: "mid"
+subset_target_mentions: 100000
+seed: 11
+max_pairs_per_block: 500000
