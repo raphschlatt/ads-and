@@ -206,12 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("prepare-lspo")
-    sp.add_argument("--paths-config", default="configs/paths.colab.yaml")
+    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
     sp.add_argument("--output", default=None)
     sp.set_defaults(func=cmd_prepare_lspo)
 
     sp = sub.add_parser("prepare-ads")
-    sp.add_argument("--paths-config", default="configs/paths.colab.yaml")
+    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
     sp.add_argument("--output", default=None)
     sp.set_defaults(func=cmd_prepare_ads)
 

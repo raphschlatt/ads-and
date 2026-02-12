@@ -99,3 +99,49 @@ def resolve_paths_config(paths_cfg: Dict[str, Any], project_root: str | Path | N
         out[section] = sec
 
     return out
+
+
+def load_resolved_config(path: str | Path, project_root: str | Path | None = None) -> Dict[str, Any]:
+    root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
+    cfg_path = resolve_existing_path(path, project_root=root) or resolve_path(path, project_root=root)
+    return load_yaml(cfg_path)
+
+
+def load_notebook_context(
+    run_stage: str,
+    project_root: str | Path | None = None,
+    paths_config: str | Path = "configs/paths.local.yaml",
+    model_config: str | Path = "configs/model/nand_best.yaml",
+    cluster_config: str | Path = "configs/clustering/dbscan_paper.yaml",
+) -> Dict[str, Any]:
+    root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
+    paths_raw = load_resolved_config(paths_config, project_root=root)
+    paths_cfg = resolve_paths_config(paths_raw, project_root=root)
+    model_cfg = load_resolved_config(model_config, project_root=root)
+    run_cfg = load_resolved_config(f"configs/runs/{run_stage}.yaml", project_root=root)
+    cluster_cfg = load_resolved_config(cluster_config, project_root=root)
+
+    return {
+        "ROOT": root,
+        "PATHS": paths_cfg,
+        "DATA": paths_cfg.get("data", {}),
+        "ART": paths_cfg.get("artifacts", {}),
+        "MODEL": model_cfg,
+        "RUN": run_cfg,
+        "CLUSTER": cluster_cfg,
+    }
+
+
+def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_id: str) -> Dict[str, Path]:
+    dirs = {
+        "metrics": Path(artifacts_cfg["metrics_dir"]) / run_id,
+        "checkpoints": Path(artifacts_cfg["checkpoints_dir"]) / run_id,
+        "pair_scores": Path(artifacts_cfg["pair_scores_dir"]) / run_id,
+        "clusters": Path(artifacts_cfg["clusters_dir"]) / run_id,
+        "embeddings": Path(artifacts_cfg["embeddings_dir"]) / run_id,
+        "subset_cache": Path(data_cfg["subset_cache_dir"]) / run_id,
+        "subset_manifests": Path(data_cfg["subset_manifest_dir"]),
+        "interim": Path(data_cfg["interim_dir"]),
+        "processed": Path(data_cfg["processed_dir"]),
+    }
+    return dirs

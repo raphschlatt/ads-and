@@ -6,6 +6,7 @@ data:
   raw_ads_references: "data/raw/ads/queried_references_lang_translated_openai_tokenized.json"
   interim_dir: "data/interim"
   processed_dir: "data/processed"
+  subset_cache_dir: "data/subsets/cache"
   subset_manifest_dir: "data/subsets/manifests"
 artifacts:
   root: "artifacts"

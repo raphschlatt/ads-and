@@ -57,6 +57,7 @@ python3 -m src.cli -h
 Install with your preferred environment manager; a minimal pip list is in:
 
 - `requirements-research.txt`
+- Path profile defaults to `configs/paths.local.yaml` (switch to `configs/paths.colab.yaml` if needed).
 
 ## Notes
 
