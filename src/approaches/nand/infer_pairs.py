@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -23,11 +24,29 @@ def _build_mention_index(mentions: pd.DataFrame) -> Dict[str, int]:
     return {str(m): i for i, m in enumerate(mentions["mention_id"].tolist())}
 
 
+def _resolve_device(torch, device: str) -> str:
+    if device != "auto":
+        return device
+    if not torch.cuda.is_available():
+        return "cpu"
+    try:
+        # A real CUDA allocation catches cases where is_available() is true
+        # but CUDA init still fails in this process/session.
+        _ = torch.cuda.current_device()
+        _ = torch.empty(1, device="cuda")
+        return "cuda"
+    except Exception as exc:  # pragma: no cover
+        warnings.warn(
+            f"CUDA appears unavailable in this session ({exc!r}); falling back to CPU.",
+            RuntimeWarning,
+        )
+        return "cpu"
+
+
 def load_checkpoint(checkpoint_path: str | Path, device: str = "auto") -> Dict[str, Any]:
     torch = _require_torch()
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    return torch.load(checkpoint_path, map_location=device)
+    # Load on CPU first to avoid hard failures during CUDA deserialization.
+    return torch.load(checkpoint_path, map_location="cpu")
 
 
 def score_pairs_with_checkpoint(
@@ -41,13 +60,24 @@ def score_pairs_with_checkpoint(
     device: str = "auto",
 ) -> pd.DataFrame:
     torch = _require_torch()
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    requested_device = device
+    device = _resolve_device(torch, device)
 
     checkpoint = load_checkpoint(checkpoint_path=checkpoint_path, device=device)
     model = create_encoder(checkpoint["model_config"])
     model.load_state_dict(checkpoint["state_dict"])
-    model.to(device)
+    try:
+        model.to(device)
+    except Exception as exc:
+        if requested_device == "auto" and str(device).startswith("cuda"):
+            warnings.warn(
+                f"Moving model to CUDA failed ({exc!r}); falling back to CPU.",
+                RuntimeWarning,
+            )
+            device = "cpu"
+            model.to(device)
+        else:
+            raise
     model.eval()
 
     features = build_feature_matrix(chars2vec=chars2vec, text_emb=text_emb)

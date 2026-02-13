@@ -21,7 +21,7 @@ def _default_gate_config() -> Dict:
             "uid_uniqueness_max": 1,
         },
         "stages": {
-            "smoke": {"f1_min": 0.80, "min_neg_val": 10, "min_neg_test": 10},
+            "smoke": {"f1_min": 0.80, "min_neg_val": 20, "min_neg_test": 20},
             "mini": {"f1_min": 0.88, "min_neg_val": 50, "min_neg_test": 50},
             "mid": {"f1_min": 0.90, "min_neg_val": 200, "min_neg_test": 200},
             "full": {"f1_min": 0.90, "min_neg_val": 500, "min_neg_test": 500},

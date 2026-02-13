@@ -8,8 +8,8 @@ defaults:
 stages:
   smoke:
     f1_min: 0.80
-    min_neg_val: 10
-    min_neg_test: 10
+    min_neg_val: 20
+    min_neg_test: 20
   mini:
     f1_min: 0.88
     min_neg_val: 50

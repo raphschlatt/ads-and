@@ -95,21 +95,30 @@ def build_stage_subset(
     quotas = _allocate_block_quotas(counts, target_mentions, seed)
 
     rng = np.random.default_rng(seed)
-    parts = []
+    selected_idx_parts = []
+    # Cache block row positions once and sample integer positions per block.
+    block_positions = mentions.groupby("block_key", sort=False).indices
     for block_key, quota in quotas.items():
         if quota <= 0:
             continue
-        block_df = mentions[mentions["block_key"] == block_key]
-        if len(block_df) <= quota:
-            sampled = block_df
+        block_idx = block_positions.get(block_key)
+        if block_idx is None:
+            continue
+        block_idx = np.asarray(block_idx, dtype=np.int64)
+        if block_idx.size <= quota:
+            sampled_idx = block_idx
         else:
-            sampled = block_df.sample(n=int(quota), random_state=int(rng.integers(0, 2_000_000_000)))
-        parts.append(sampled)
+            # Keep deterministic per-block behavior while avoiding DataFrame materialization.
+            sample_seed = int(rng.integers(0, 2_000_000_000))
+            take_pos = np.random.RandomState(sample_seed).choice(block_idx.size, size=int(quota), replace=False)
+            sampled_idx = block_idx[take_pos]
+        selected_idx_parts.append(sampled_idx)
 
-    if not parts:
+    if not selected_idx_parts:
         raise ValueError("No subset records sampled. Check stage/target settings.")
 
-    subset = pd.concat(parts, ignore_index=True)
+    selected_idx = np.concatenate(selected_idx_parts).astype(np.int64, copy=False)
+    subset = mentions.iloc[selected_idx].copy()
     if len(subset) > target_mentions:
         subset = subset.sample(n=target_mentions, random_state=seed)
 

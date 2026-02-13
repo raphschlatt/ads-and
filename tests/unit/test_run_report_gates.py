@@ -14,8 +14,8 @@ def _base_metrics():
         "lspo_pairwise_f1": 0.90,
         "threshold": 0.35,
         "threshold_selection_status": "ok",
-        "val_class_counts": {"pos": 12, "neg": 15},
-        "test_class_counts": {"pos": 10, "neg": 12},
+        "val_class_counts": {"pos": 12, "neg": 25},
+        "test_class_counts": {"pos": 10, "neg": 22},
     }
 
 
