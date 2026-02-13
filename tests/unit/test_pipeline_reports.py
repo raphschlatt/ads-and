@@ -100,6 +100,9 @@ def test_build_pairs_qc_and_cluster_qc():
     assert cluster_qc["cluster_count"] == 2
     assert cluster_qc["split_high_sim_count"] == 1
     assert cluster_qc["merged_low_conf_count"] == 0
+    assert cluster_qc["pair_score_range_ok"] is True
+    assert cluster_qc["negative_distance_count"] == 0
+    assert cluster_qc["cosine_out_of_range_count"] == 0
 
 
 def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):

@@ -153,3 +153,102 @@ def test_score_pairs_explicit_cuda_raises_when_model_to_cuda_fails(monkeypatch):
         )
 
     assert model.to_calls == ["cuda"]
+
+
+class _FakeTensor:
+    def __init__(self, arr):
+        self.arr = np.asarray(arr, dtype=np.float32)
+
+    def to(self, _device):
+        return self
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.arr
+
+
+class _NoGrad:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeTorchScore:
+    def __init__(self):
+        self.cuda = _FakeCuda(available=False)
+
+        class _Functional:
+            @staticmethod
+            def cosine_similarity(z1, z2, dim=1):
+                _ = z2, dim
+                n = z1.arr.shape[0]
+                return _FakeTensor(np.full((n,), 1.0000001, dtype=np.float32))
+
+        class _NN:
+            functional = _Functional()
+
+        self.nn = _NN()
+
+    def from_numpy(self, arr):
+        return _FakeTensor(arr)
+
+    def no_grad(self):
+        return _NoGrad()
+
+
+class _IdentityModel:
+    def load_state_dict(self, _state_dict):
+        return None
+
+    def to(self, _device):
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, x):
+        return x
+
+
+def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
+    monkeypatch.setattr(infer_pairs, "_require_torch", lambda: _FakeTorchScore())
+    monkeypatch.setattr(infer_pairs, "_resolve_device", lambda _torch, _device: "cpu")
+    monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
+    monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: _IdentityModel())
+    monkeypatch.setattr(
+        infer_pairs,
+        "build_feature_matrix",
+        lambda chars2vec, text_emb: np.ones((chars2vec.shape[0], 2), dtype=np.float32),
+    )
+
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2"]})
+    pairs = pd.DataFrame(
+        [
+            {
+                "pair_id": "m1__m2",
+                "mention_id_1": "m1",
+                "mention_id_2": "m2",
+                "block_key": "a.block",
+            }
+        ]
+    )
+
+    with pytest.warns(RuntimeWarning, match="numeric clamping"):
+        out = infer_pairs.score_pairs_with_checkpoint(
+            mentions=mentions,
+            pairs=pairs,
+            chars2vec=np.zeros((2, 1), dtype=np.float32),
+            text_emb=np.zeros((2, 1), dtype=np.float32),
+            checkpoint_path="checkpoint.pt",
+            device="cpu",
+        )
+
+    assert float(out["cosine_sim"].iloc[0]) == pytest.approx(1.0)
+    assert float(out["distance"].iloc[0]) == pytest.approx(0.0)

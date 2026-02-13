@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.approaches.nand.modeling import create_encoder
 from src.common.io_schema import PAIR_SCORE_REQUIRED_COLUMNS, validate_columns, save_parquet
+from src.common.numeric_safety import clamp_cosine_sim, compute_safe_distance_from_cosine
 from src.approaches.nand.train import build_feature_matrix
 
 
@@ -114,10 +115,25 @@ def score_pairs_with_checkpoint(
             sims.append(s.detach().cpu().numpy())
 
     sim_arr = np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)
+    sim_arr, sim_meta = clamp_cosine_sim(sim_arr)
+    dist_arr, dist_meta = compute_safe_distance_from_cosine(sim_arr)
+    if sim_meta["clamped"] or dist_meta["clamped"]:
+        warnings.warn(
+            (
+                "Applied numeric clamping to pair scores: "
+                f"cosine_non_finite={sim_meta['non_finite_count']}, "
+                f"cosine_below_min={sim_meta['below_min_count']}, "
+                f"cosine_above_max={sim_meta['above_max_count']}, "
+                f"distance_non_finite={dist_meta['non_finite_count']}, "
+                f"distance_below_min={dist_meta['below_min_count']}, "
+                f"distance_above_max={dist_meta['above_max_count']}."
+            ),
+            RuntimeWarning,
+        )
 
     out = p[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
     out["cosine_sim"] = sim_arr.astype(np.float32)
-    out["distance"] = (1.0 - out["cosine_sim"]).astype(np.float32)
+    out["distance"] = dist_arr.astype(np.float32)
 
     validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
 

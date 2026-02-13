@@ -1,7 +1,13 @@
 import numpy as np
 import pandas as pd
+import pytest
 
-from src.approaches.nand.cluster import _apply_constraints, _name_conflict, resolve_dbscan_eps
+from src.approaches.nand.cluster import (
+    _apply_constraints,
+    _name_conflict,
+    cluster_blockwise_dbscan,
+    resolve_dbscan_eps,
+)
 
 
 def test_name_conflict_handles_diacritics_and_initials():
@@ -66,3 +72,39 @@ def test_resolve_dbscan_eps_from_threshold_is_clamped():
     eps2, meta2 = resolve_dbscan_eps(cfg, cosine_threshold=0.05)
     assert eps2 == 0.85
     assert meta2["source"] == "from_threshold"
+
+
+def test_cluster_blockwise_dbscan_sanitizes_invalid_precomputed_values():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "b1", "block_key": "blk.b", "author_raw": "B, B", "year": 2000},
+            {"mention_id": "b2", "block_key": "blk.b", "author_raw": "B, B", "year": 2001},
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        [
+            {
+                "pair_id": "a1__a2",
+                "mention_id_1": "a1",
+                "mention_id_2": "a2",
+                "block_key": "blk.a",
+                "distance": -1e-7,
+            },
+            {
+                "pair_id": "b1__b2",
+                "mention_id_1": "b1",
+                "mention_id_2": "b2",
+                "block_key": "blk.b",
+                "distance": np.nan,
+            },
+        ]
+    )
+    cfg = {"eps": 0.35, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
+
+    with pytest.warns(RuntimeWarning, match="Sanitized DBSCAN precomputed distances"):
+        clusters = cluster_blockwise_dbscan(mentions=mentions, pair_scores=pair_scores, cluster_config=cfg)
+
+    assert len(clusters) == 4
+    assert clusters["mention_id"].nunique() == 4

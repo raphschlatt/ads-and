@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import warnings
 from pathlib import Path
 from typing import Dict, Tuple, Any
 
@@ -10,6 +11,7 @@ import pandas as pd
 from sklearn.cluster import DBSCAN
 
 from src.common.io_schema import CLUSTER_REQUIRED_COLUMNS, validate_columns, save_parquet
+from src.common.numeric_safety import sanitize_precomputed_distance_matrix
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _SURNAME_PARTICLES = {
@@ -216,6 +218,14 @@ def cluster_blockwise_dbscan(
     constraints = cluster_config.get("constraints", {})
 
     rows = []
+    sanitize_totals = {
+        "corrected_blocks": 0,
+        "non_finite_count": 0,
+        "negative_count": 0,
+        "above_max_count": 0,
+        "asymmetry_pairs": 0,
+        "diag_reset_count": 0,
+    }
 
     grouped = mentions.groupby("block_key", sort=False)
     iterator = grouped
@@ -236,8 +246,16 @@ def cluster_blockwise_dbscan(
             rows.append({"mention_id": m, "block_key": str(block_key), "author_uid": f"{block_key}::0"})
             continue
 
-        dist, idx = _build_distance_matrix(block_mentions, block_scores)
+        dist, _ = _build_distance_matrix(block_mentions, block_scores)
         dist = _apply_constraints(dist, block_mentions, constraints)
+        dist, sanitize_meta = sanitize_precomputed_distance_matrix(dist)
+        if sanitize_meta["corrected"]:
+            sanitize_totals["corrected_blocks"] += 1
+        sanitize_totals["non_finite_count"] += int(sanitize_meta["non_finite_count"])
+        sanitize_totals["negative_count"] += int(sanitize_meta["negative_count"])
+        sanitize_totals["above_max_count"] += int(sanitize_meta["above_max_count"])
+        sanitize_totals["asymmetry_pairs"] += int(sanitize_meta["asymmetry_pairs"])
+        sanitize_totals["diag_reset_count"] += int(sanitize_meta["diag_reset_count"])
 
         model = DBSCAN(eps=eps, min_samples=min_samples, metric=metric)
         labels = model.fit_predict(dist)
@@ -248,6 +266,20 @@ def cluster_blockwise_dbscan(
 
     out = pd.DataFrame(rows)
     validate_columns(out, CLUSTER_REQUIRED_COLUMNS, "clusters")
+
+    if sanitize_totals["corrected_blocks"] > 0:
+        warnings.warn(
+            (
+                "Sanitized DBSCAN precomputed distances: "
+                f"corrected_blocks={sanitize_totals['corrected_blocks']}, "
+                f"non_finite_count={sanitize_totals['non_finite_count']}, "
+                f"negative_count={sanitize_totals['negative_count']}, "
+                f"above_max_count={sanitize_totals['above_max_count']}, "
+                f"asymmetry_pairs={sanitize_totals['asymmetry_pairs']}, "
+                f"diag_reset_count={sanitize_totals['diag_reset_count']}."
+            ),
+            RuntimeWarning,
+        )
 
     if output_path is not None:
         save_parquet(out, output_path, index=False)

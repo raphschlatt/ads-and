@@ -6,7 +6,12 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
-from src.common.io_schema import CLUSTER_REQUIRED_COLUMNS, MENTION_REQUIRED_COLUMNS, validate_columns
+from src.common.io_schema import (
+    CLUSTER_REQUIRED_COLUMNS,
+    MENTION_REQUIRED_COLUMNS,
+    validate_columns,
+    validate_pair_score_ranges,
+)
 
 
 def write_json(payload: Mapping[str, Any], output_path: str | Path) -> Path:
@@ -116,12 +121,15 @@ def build_cluster_qc(
     clusters: pd.DataFrame,
     threshold: float,
 ) -> dict[str, Any]:
+    range_stats = validate_pair_score_ranges(pair_scores)
+
     if len(clusters) == 0:
         return {
             "singleton_ratio": 0.0,
             "merged_low_conf_count": 0,
             "split_high_sim_count": 0,
             "cluster_count": 0,
+            **range_stats,
         }
 
     cluster_size = clusters.groupby(["block_key", "author_uid"]).size().rename("size").reset_index()
@@ -150,6 +158,7 @@ def build_cluster_qc(
         "merged_low_conf_count": merged_low_conf_count,
         "split_high_sim_count": split_high_sim_count,
         "cluster_count": int(len(cluster_size)),
+        **range_stats,
     }
 
 

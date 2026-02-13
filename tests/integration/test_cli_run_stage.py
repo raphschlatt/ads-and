@@ -152,13 +152,15 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int] | None = None)
     lspo_df = _toy_lspo_mentions()
     ads_df = _toy_ads_mentions()
 
-    def _prepare_lspo(_parquet_path, _h5_path, output_path):
+    def _prepare_lspo(*, parquet_path=None, h5_path=None, output_path, **_kwargs):
+        _ = parquet_path, h5_path
         p = Path(output_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         lspo_df.to_parquet(p, index=False)
         return lspo_df.copy()
 
-    def _prepare_ads(_publications_path, _references_path, output_path):
+    def _prepare_ads(*, publications_path=None, references_path=None, output_path, **_kwargs):
+        _ = publications_path, references_path
         p = Path(output_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         ads_df.to_parquet(p, index=False)
