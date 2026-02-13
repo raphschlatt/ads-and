@@ -2,10 +2,10 @@ stage: "mid"
 subset_target_mentions: 100000
 seed: 11
 subset_sampling:
-  target_mean_block_size: 2
+  target_mean_block_size: 4
 max_pairs_per_block: 500000
 split_balance:
   min_neg_val: 200
   min_neg_test: 200
-  max_attempts: 500
+  max_attempts: 50
 train_seeds: [1, 2, 3, 4, 5]
