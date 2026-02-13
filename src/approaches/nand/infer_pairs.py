@@ -58,6 +58,7 @@ def score_pairs_with_checkpoint(
     output_path: str | Path | None = None,
     batch_size: int = 8192,
     device: str = "auto",
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     torch = _require_torch()
     requested_device = device
@@ -92,8 +93,18 @@ def score_pairs_with_checkpoint(
     idx2 = idx2[valid_mask].astype(int)
 
     sims = []
+    starts = range(0, len(p), batch_size)
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            total = (len(p) + batch_size - 1) // batch_size
+            starts = tqdm(starts, total=total, desc="Score batches", leave=False)
+        except Exception:
+            pass
+
     with torch.no_grad():
-        for start in range(0, len(p), batch_size):
+        for start in starts:
             end = min(start + batch_size, len(p))
             x1 = torch.from_numpy(features[idx1[start:end]]).to(device)
             x2 = torch.from_numpy(features[idx2[start:end]]).to(device)

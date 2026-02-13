@@ -52,6 +52,36 @@ The notebook layer is primary. A matching CLI exists for automation:
 python3 -m src.cli -h
 ```
 
+### End-to-End Stage Run
+
+Run the full 00->05 pipeline in one command:
+
+```bash
+python3 -m src.cli run-stage \
+  --run-stage smoke \
+  --paths-config configs/paths.local.yaml \
+  --device auto
+```
+
+With baseline comparison:
+
+```bash
+python3 -m src.cli run-stage \
+  --run-stage smoke \
+  --paths-config configs/paths.local.yaml \
+  --device auto \
+  --baseline-run-id smoke_20260213T134837Z_f0fc32b8
+```
+
+### CLI Behavior
+
+- Status and progress output is English and terminal-friendly.
+- Default mode is resume/reuse: existing artifacts are reused when possible.
+- Use `--force` to recompute all stages for the same `run_id`.
+- `--device auto` prefers CUDA and falls back to CPU if CUDA init fails.
+- `--device cuda` is strict and fails if GPU is not usable.
+- Metrics and reports are written to `artifacts/metrics/<run_id>/` (`05_*` and optional `99_compare_to_baseline.json`).
+
 ## Environment
 
 Install with your preferred environment manager; a minimal pip list is in:

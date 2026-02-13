@@ -183,6 +183,7 @@ def build_pairs_within_blocks(
     require_same_split: bool = True,
     labeled_only: bool = False,
     balance_train: bool = True,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Build mention pairs inside blocks, optionally with labels (LSPO)."""
     if "split" not in mentions.columns:
@@ -192,7 +193,17 @@ def build_pairs_within_blocks(
     rows = []
     rng = np.random.default_rng(seed)
 
-    for block_key, block in mentions.groupby("block_key", sort=False):
+    grouped = mentions.groupby("block_key", sort=False)
+    iterator = grouped
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            iterator = tqdm(grouped, total=int(mentions["block_key"].nunique()), desc="Pair blocks", leave=False)
+        except Exception:
+            pass
+
+    for block_key, block in iterator:
         block = block.reset_index(drop=True)
         n = len(block)
         if n < 2:

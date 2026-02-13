@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -18,6 +19,23 @@ def _require_torch():
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("PyTorch is required for NAND training.") from exc
     return torch, DataLoader, TensorDataset
+
+
+def _resolve_device(torch, device: str) -> str:
+    if device != "auto":
+        return device
+    if not torch.cuda.is_available():
+        return "cpu"
+    try:
+        _ = torch.cuda.current_device()
+        _ = torch.empty(1, device="cuda")
+        return "cuda"
+    except Exception as exc:  # pragma: no cover
+        warnings.warn(
+            f"CUDA appears unavailable in this session ({exc!r}); falling back to CPU.",
+            RuntimeWarning,
+        )
+        return "cpu"
 
 
 def build_feature_matrix(chars2vec: np.ndarray, text_emb: np.ndarray) -> np.ndarray:
@@ -115,14 +133,25 @@ def _score_pairs(
     pair_idx_1: np.ndarray,
     pair_idx_2: np.ndarray,
     batch_size: int = 8192,
+    show_progress: bool = False,
 ) -> np.ndarray:
     torch, _, _ = _require_torch()
     device = next(model.parameters()).device
     sims = []
 
     model.eval()
+    starts = range(0, len(pair_idx_1), batch_size)
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            total = (len(pair_idx_1) + batch_size - 1) // batch_size
+            starts = tqdm(starts, total=total, desc="Score pairs", leave=False)
+        except Exception:
+            pass
+
     with torch.no_grad():
-        for start in range(0, len(pair_idx_1), batch_size):
+        for start in starts:
             end = min(start + batch_size, len(pair_idx_1))
             i1 = pair_idx_1[start:end]
             i2 = pair_idx_2[start:end]
@@ -146,11 +175,12 @@ def train_nand_seed(
     run_id: str,
     output_dir: str | Path,
     device: str = "auto",
+    show_progress: bool = False,
 ) -> Dict[str, Any]:
     torch, DataLoader, TensorDataset = _require_torch()
 
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    requested_device = device
+    device = _resolve_device(torch, device)
 
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -180,7 +210,18 @@ def train_nand_seed(
     )
 
     model = create_encoder(model_config)
-    model.to(device)
+    try:
+        model.to(device)
+    except Exception as exc:
+        if requested_device == "auto" and str(device).startswith("cuda"):
+            warnings.warn(
+                f"Moving training model to CUDA failed ({exc!r}); falling back to CPU.",
+                RuntimeWarning,
+            )
+            device = "cpu"
+            model.to(device)
+        else:
+            raise
 
     opt = torch.optim.Adam(model.parameters(), lr=float(model_config.get("learning_rate", 1e-5)))
     max_epochs = int(model_config.get("max_epochs", 250))
@@ -194,7 +235,16 @@ def train_nand_seed(
     train_history: List[float] = []
     val_history: List[float] = []
 
-    for _epoch in range(max_epochs):
+    epochs = range(max_epochs)
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            epochs = tqdm(epochs, total=max_epochs, desc=f"Train seed {seed}", leave=False)
+        except Exception:
+            pass
+
+    for _epoch in epochs:
         model.train()
         batch_losses = []
 
@@ -255,7 +305,7 @@ def train_nand_seed(
         threshold_selection_status = "fallback_no_labels"
         threshold_source = "fallback_default"
     else:
-        val_sim = _score_pairs(model, features, val_i1, val_i2)
+        val_sim = _score_pairs(model, features, val_i1, val_i2, show_progress=show_progress)
         threshold, val_stats, threshold_selection_status, threshold_source = _compute_best_threshold(
             val_sim,
             val_y,
@@ -264,7 +314,7 @@ def train_nand_seed(
 
     test_metrics = {"f1": None, "precision": None, "recall": None, "accuracy": None}
     if len(test_i1) > 0:
-        test_sim = _score_pairs(model, features, test_i1, test_i2)
+        test_sim = _score_pairs(model, features, test_i1, test_i2, show_progress=show_progress)
         pred = (test_sim >= threshold).astype(int)
         test_metrics = {
             "f1": float(f1_score(test_y, pred, zero_division=0)),
@@ -318,9 +368,19 @@ def train_nand_across_seeds(
     output_dir: str | Path,
     metrics_output: str | Path | None = None,
     device: str = "auto",
+    show_progress: bool = False,
 ) -> Dict[str, Any]:
     runs = []
-    for seed in seeds:
+    seed_iter = seeds
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            seed_iter = tqdm(seeds, total=len(seeds), desc="Seeds", leave=False)
+        except Exception:
+            pass
+
+    for seed in seed_iter:
         result = train_nand_seed(
             mentions=mentions,
             pairs=pairs,
@@ -331,6 +391,7 @@ def train_nand_across_seeds(
             run_id=run_id,
             output_dir=output_dir,
             device=device,
+            show_progress=show_progress,
         )
         runs.append(result)
 

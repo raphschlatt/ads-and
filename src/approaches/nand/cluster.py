@@ -208,6 +208,7 @@ def cluster_blockwise_dbscan(
     pair_scores: pd.DataFrame,
     cluster_config: Dict,
     output_path: str | Path | None = None,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     eps = float(cluster_config.get("eps", 0.35))
     min_samples = int(cluster_config.get("min_samples", 1))
@@ -216,7 +217,17 @@ def cluster_blockwise_dbscan(
 
     rows = []
 
-    for block_key, block_mentions in mentions.groupby("block_key", sort=False):
+    grouped = mentions.groupby("block_key", sort=False)
+    iterator = grouped
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            iterator = tqdm(grouped, total=int(mentions["block_key"].nunique()), desc="Cluster blocks", leave=False)
+        except Exception:
+            pass
+
+    for block_key, block_mentions in iterator:
         block_mentions = block_mentions.reset_index(drop=True)
         block_scores = pair_scores[pair_scores["block_key"] == block_key]
 

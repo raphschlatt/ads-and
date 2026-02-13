@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import warnings
 from pathlib import Path
 from typing import Iterable
 
@@ -42,6 +43,23 @@ def _stack_precomputed(values: Iterable, texts: list[str]) -> np.ndarray:
     return np.vstack(out).astype(np.float32)
 
 
+def _resolve_device(torch, device: str) -> str:
+    if device != "auto":
+        return device
+    if not torch.cuda.is_available():
+        return "cpu"
+    try:
+        _ = torch.cuda.current_device()
+        _ = torch.empty(1, device="cuda")
+        return "cuda"
+    except Exception as exc:  # pragma: no cover
+        warnings.warn(
+            f"CUDA appears unavailable in this session ({exc!r}); falling back to CPU.",
+            RuntimeWarning,
+        )
+        return "cpu"
+
+
 def generate_specter_embeddings(
     mentions: pd.DataFrame,
     model_name: str = "allenai/specter",
@@ -50,6 +68,7 @@ def generate_specter_embeddings(
     device: str = "auto",
     prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
+    show_progress: bool = False,
 ) -> np.ndarray:
     titles = mentions["title"].fillna("").astype(str).tolist()
     abstracts = mentions["abstract"].fillna("").astype(str).tolist()
@@ -70,17 +89,37 @@ def generate_specter_embeddings(
             ) from exc
         return np.vstack([_hash_stub_embedding(t, dim=768) for t in texts]).astype(np.float32)
 
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    requested_device = device
+    device = _resolve_device(torch, device)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name)
-    model.to(device)
+    try:
+        model.to(device)
+    except Exception as exc:
+        if requested_device == "auto" and str(device).startswith("cuda"):
+            warnings.warn(
+                f"Moving SPECTER model to CUDA failed ({exc!r}); falling back to CPU.",
+                RuntimeWarning,
+            )
+            device = "cpu"
+            model.to(device)
+        else:
+            raise
     model.eval()
 
     vectors: list[np.ndarray] = []
+    starts = range(0, len(texts), batch_size)
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+
+            total = (len(texts) + batch_size - 1) // batch_size
+            starts = tqdm(starts, total=total, desc="SPECTER batches", leave=False)
+        except Exception:
+            pass
     with torch.no_grad():
-        for start in range(0, len(texts), batch_size):
+        for start in starts:
             chunk = texts[start : start + batch_size]
             enc = tokenizer(
                 chunk,
@@ -107,6 +146,7 @@ def get_or_create_specter_embeddings(
     device: str = "auto",
     prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
+    show_progress: bool = False,
 ) -> np.ndarray:
     output = Path(output_path)
     if output.exists() and not force_recompute:
@@ -120,6 +160,7 @@ def get_or_create_specter_embeddings(
         device=device,
         prefer_precomputed=prefer_precomputed,
         use_stub_if_missing=use_stub_if_missing,
+        show_progress=show_progress,
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)
