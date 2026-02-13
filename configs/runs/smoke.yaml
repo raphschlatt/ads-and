@@ -8,3 +8,4 @@ split_balance:
   min_neg_val: 20
   min_neg_test: 20
   max_attempts: 400
+train_seeds: [1, 2]

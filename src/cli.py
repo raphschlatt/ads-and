@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import uuid
-from datetime import datetime
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -75,8 +78,60 @@ def _load_json(path: str | Path) -> dict[str, Any]:
 
 
 def _default_run_id(stage: str) -> str:
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{stage}_{ts}_cli{uuid.uuid4().hex[:8]}"
+
+
+def _configure_library_noise(quiet_libraries: bool) -> None:
+    if not quiet_libraries:
+        return
+
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+    os.environ.setdefault("ABSL_LOG_LEVEL", "3")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*`resume_download` is deprecated.*",
+        category=FutureWarning,
+    )
+
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("tensorflow").setLevel(logging.ERROR)
+    logging.getLogger("absl").setLevel(logging.ERROR)
+
+    try:  # pragma: no cover
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+    try:  # pragma: no cover
+        from huggingface_hub.utils import disable_progress_bars, logging as hf_logging
+
+        disable_progress_bars()
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+    try:  # pragma: no cover
+        import absl.logging as absl_logging
+
+        absl_logging.set_verbosity("error")
+    except Exception:
+        pass
+
+
+def _resolve_train_seeds(args, run_cfg: dict[str, Any], training_cfg: dict[str, Any]) -> list[int]:
+    if getattr(args, "seeds", None):
+        return [int(s) for s in args.seeds]
+    if run_cfg.get("train_seeds"):
+        return [int(s) for s in run_cfg["train_seeds"]]
+    return [int(s) for s in training_cfg.get("seeds", [1, 2, 3, 4, 5])]
 
 
 def cmd_prepare_lspo(args):
@@ -122,6 +177,7 @@ def cmd_subset(args):
 
 
 def cmd_embeddings(args):
+    _configure_library_noise(getattr(args, "quiet_libs", True))
     mentions = read_parquet(args.mentions)
     model_cfg = _load_model_cfg(args.model_config)
     rep_cfg = model_cfg.get("representation", {})
@@ -131,6 +187,7 @@ def cmd_embeddings(args):
         output_path=args.chars_out,
         force_recompute=args.force,
         use_stub_if_missing=args.use_stub,
+        quiet_libraries=getattr(args, "quiet_libs", True),
     )
     text = get_or_create_specter_embeddings(
         mentions=mentions,
@@ -143,6 +200,8 @@ def cmd_embeddings(args):
         prefer_precomputed=args.prefer_precomputed,
         use_stub_if_missing=args.use_stub,
         show_progress=args.progress,
+        quiet_libraries=getattr(args, "quiet_libs", True),
+        reuse_model=True,
     )
     print(f"Chars2Vec embeddings: {chars.shape} -> {args.chars_out}")
     print(f"Text embeddings: {text.shape} -> {args.text_out}")
@@ -272,6 +331,7 @@ def cmd_run_stage(args):
 
     try:
         ui.start("Initialize run context")
+        _configure_library_noise(args.quiet_libs)
         paths = _load_paths_cfg(args.paths_config)
         data_cfg = paths["data"]
         art_cfg = paths["artifacts"]
@@ -300,8 +360,9 @@ def cmd_run_stage(args):
             run_dirs=run_dirs,
             output_path=latest_context_path,
             stage=args.run_stage,
-            extras={"created_utc": datetime.utcnow().isoformat(), "source": "cli.run-stage"},
+            extras={"created_utc": datetime.now(timezone.utc).isoformat(), "source": "cli.run-stage"},
         )
+        train_seeds = _resolve_train_seeds(args, run_cfg=run_cfg, training_cfg=training_cfg)
         write_json(
             {
                 "run_id": run_id,
@@ -309,6 +370,8 @@ def cmd_run_stage(args):
                 "device": args.device,
                 "use_stub_embeddings": bool(args.use_stub_embeddings),
                 "prefer_precomputed_ads": bool(args.prefer_precomputed_ads),
+                "quiet_libs": bool(args.quiet_libs),
+                "train_seeds": train_seeds,
                 "run_config": str(run_cfg_path),
                 "model_config": str(args.model_config),
                 "cluster_config": str(cluster_cfg_path),
@@ -489,6 +552,7 @@ def cmd_run_stage(args):
             output_path=lspo_chars_path,
             force_recompute=args.force,
             use_stub_if_missing=args.use_stub_embeddings,
+            quiet_libraries=args.quiet_libs,
         )
         lspo_text = get_or_create_specter_embeddings(
             mentions=lspo_subset,
@@ -501,12 +565,15 @@ def cmd_run_stage(args):
             prefer_precomputed=False,
             use_stub_if_missing=args.use_stub_embeddings,
             show_progress=args.progress,
+            quiet_libraries=args.quiet_libs,
+            reuse_model=True,
         )
         ads_chars = get_or_create_chars2vec_embeddings(
             mentions=ads_subset,
             output_path=ads_chars_path,
             force_recompute=args.force,
             use_stub_if_missing=args.use_stub_embeddings,
+            quiet_libraries=args.quiet_libs,
         )
         ads_text = get_or_create_specter_embeddings(
             mentions=ads_subset,
@@ -519,6 +586,8 @@ def cmd_run_stage(args):
             prefer_precomputed=args.prefer_precomputed_ads,
             use_stub_if_missing=args.use_stub_embeddings,
             show_progress=args.progress,
+            quiet_libraries=args.quiet_libs,
+            reuse_model=True,
         )
 
         if emb_cache_hit:
@@ -602,14 +671,13 @@ def cmd_run_stage(args):
         if train_cache_hit:
             ui.skip(f"Reused train manifest: {train_manifest.get('best_checkpoint')}")
         else:
-            seeds = [int(s) for s in training_cfg.get("seeds", [1, 2, 3, 4, 5])]
             train_manifest = train_nand_across_seeds(
                 mentions=lspo_mentions_split,
                 pairs=lspo_pairs,
                 chars2vec=lspo_chars,
                 text_emb=lspo_text,
                 model_config=training_cfg,
-                seeds=seeds,
+                seeds=train_seeds,
                 run_id=run_id,
                 output_dir=checkpoint_dir,
                 metrics_output=train_manifest_path,
@@ -776,6 +844,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gates-config", default="configs/gates.yaml")
     sp.add_argument("--run-id", default=None)
     sp.add_argument("--device", default="auto")
+    sp.add_argument("--seeds", nargs="+", type=int, default=None)
     sp.add_argument("--use-stub-embeddings", action="store_true")
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--baseline-run-id", default=None)
@@ -788,6 +857,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--progress", dest="progress", action="store_true")
     sp.add_argument("--no-progress", dest="progress", action="store_false")
     sp.set_defaults(progress=True)
+
+    sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
+    sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
+    sp.set_defaults(quiet_libs=True)
 
     sp.set_defaults(func=cmd_run_stage)
 
@@ -819,6 +892,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--use-stub", action="store_true")
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--progress", action="store_true")
+    sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
+    sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
+    sp.set_defaults(quiet_libs=True)
     sp.set_defaults(func=cmd_embeddings)
 
     sp = sub.add_parser("pairs")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,9 +22,14 @@ def generate_chars2vec_embeddings(
     names: list[str],
     model_name: str = "eng_50",
     use_stub_if_missing: bool = False,
+    quiet_libraries: bool = False,
 ) -> np.ndarray:
     if not names:
         return np.zeros((0, 50), dtype=np.float32)
+
+    if quiet_libraries:
+        os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+        os.environ.setdefault("ABSL_LOG_LEVEL", "3")
 
     try:
         import chars2vec  # type: ignore
@@ -49,6 +55,7 @@ def get_or_create_chars2vec_embeddings(
     force_recompute: bool = False,
     model_name: str = "eng_50",
     use_stub_if_missing: bool = False,
+    quiet_libraries: bool = False,
 ) -> np.ndarray:
     output = Path(output_path)
     if output.exists() and not force_recompute:
@@ -59,6 +66,7 @@ def get_or_create_chars2vec_embeddings(
         names=names,
         model_name=model_name,
         use_stub_if_missing=use_stub_if_missing,
+        quiet_libraries=quiet_libraries,
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)

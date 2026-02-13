@@ -43,7 +43,11 @@ class CliUI:
         return f"[{step_idx:02d}/{self.total_steps:02d}]"
 
     def _emit(self, level: str, message: str) -> None:
-        print(f"{self._prefix()} {level} {message}")
+        line = f"{self._prefix()} {level} {message}"
+        if not self._bar.disable and hasattr(self._bar, "write"):
+            self._bar.write(line)
+            return
+        print(line)
 
     def start(self, label: str) -> None:
         if self._state and self._state.active:
@@ -52,7 +56,8 @@ class CliUI:
         self._state = _StepState(index=self.current_step, label=str(label))
         if not self._bar.disable:
             self._bar.set_description_str(f"{self.current_step:02d}/{self.total_steps:02d} {label}")
-        self._emit("START", label)
+        else:
+            self._emit("START", label)
 
     def info(self, message: str) -> None:
         self._emit("INFO", message)

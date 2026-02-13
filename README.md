@@ -80,6 +80,8 @@ python3 -m src.cli run-stage \
 - Use `--force` to recompute all stages for the same `run_id`.
 - `--device auto` prefers CUDA and falls back to CPU if CUDA init fails.
 - `--device cuda` is strict and fails if GPU is not usable.
+- `--quiet-libs` is the default and suppresses noisy third-party logs; use `--verbose-libs` for deep debugging.
+- Training seeds are stage-specific via `configs/runs/*.yaml` (`train_seeds`) and can be overridden with `--seeds`.
 - Metrics and reports are written to `artifacts/metrics/<run_id>/` (`05_*` and optional `99_compare_to_baseline.json`).
 
 ## Environment

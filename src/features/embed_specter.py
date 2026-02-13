@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import warnings
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
+
+_SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
 
 
 def _hash_stub_embedding(text: str, dim: int = 768) -> np.ndarray:
@@ -60,6 +64,45 @@ def _resolve_device(torch, device: str) -> str:
         return "cpu"
 
 
+def _configure_hf_noise(quiet_libraries: bool) -> None:
+    if not quiet_libraries:
+        return
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
+    try:  # pragma: no cover
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+    try:  # pragma: no cover
+        from huggingface_hub.utils import disable_progress_bars, logging as hf_logging
+
+        disable_progress_bars()
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+
+def _load_specter_components(model_name: str, reuse_model: bool):
+    from transformers import AutoModel, AutoTokenizer
+
+    if reuse_model and model_name in _SPECTER_MODEL_CACHE:
+        return _SPECTER_MODEL_CACHE[model_name]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name)
+    if reuse_model:
+        _SPECTER_MODEL_CACHE[model_name] = (tokenizer, model)
+    return tokenizer, model
+
+
 def generate_specter_embeddings(
     mentions: pd.DataFrame,
     model_name: str = "allenai/specter",
@@ -69,6 +112,8 @@ def generate_specter_embeddings(
     prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
     show_progress: bool = False,
+    quiet_libraries: bool = False,
+    reuse_model: bool = True,
 ) -> np.ndarray:
     titles = mentions["title"].fillna("").astype(str).tolist()
     abstracts = mentions["abstract"].fillna("").astype(str).tolist()
@@ -81,7 +126,6 @@ def generate_specter_embeddings(
 
     try:
         import torch
-        from transformers import AutoModel, AutoTokenizer
     except Exception as exc:
         if not use_stub_if_missing:
             raise RuntimeError(
@@ -89,11 +133,12 @@ def generate_specter_embeddings(
             ) from exc
         return np.vstack([_hash_stub_embedding(t, dim=768) for t in texts]).astype(np.float32)
 
+    _configure_hf_noise(quiet_libraries)
+
     requested_device = device
     device = _resolve_device(torch, device)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name)
+    tokenizer, model = _load_specter_components(model_name=model_name, reuse_model=reuse_model)
     try:
         model.to(device)
     except Exception as exc:
@@ -147,6 +192,8 @@ def get_or_create_specter_embeddings(
     prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
     show_progress: bool = False,
+    quiet_libraries: bool = False,
+    reuse_model: bool = True,
 ) -> np.ndarray:
     output = Path(output_path)
     if output.exists() and not force_recompute:
@@ -161,6 +208,8 @@ def get_or_create_specter_embeddings(
         prefer_precomputed=prefer_precomputed,
         use_stub_if_missing=use_stub_if_missing,
         show_progress=show_progress,
+        quiet_libraries=quiet_libraries,
+        reuse_model=reuse_model,
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)

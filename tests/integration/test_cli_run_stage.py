@@ -58,7 +58,11 @@ def _toy_ads_mentions() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _make_configs(tmp_path: Path, split_balance: dict[str, int] | None = None) -> dict[str, Path]:
+def _make_configs(
+    tmp_path: Path,
+    split_balance: dict[str, int] | None = None,
+    train_seeds: list[int] | None = None,
+) -> dict[str, Path]:
     paths_cfg = {
         "project_root": str(tmp_path),
         "data": {
@@ -93,6 +97,8 @@ def _make_configs(tmp_path: Path, split_balance: dict[str, int] | None = None) -
             "max_attempts": 5,
         },
     }
+    if train_seeds is not None:
+        run_cfg["train_seeds"] = [int(s) for s in train_seeds]
     model_cfg = {
         "name": "mock",
         "representation": {
@@ -382,3 +388,39 @@ def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path:
     assert captured["min_neg_val"] == 7
     assert captured["min_neg_test"] == 9
     assert captured["max_attempts"] == 13
+
+
+def test_cli_run_stage_uses_train_seeds_from_run_config(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path, train_seeds=[6, 7])
+    _apply_fast_mocks(monkeypatch)
+    captured: dict[str, list[int]] = {}
+    base_train = cli.train_nand_across_seeds
+
+    def _capture_train(*args, **kwargs):
+        captured["seeds"] = [int(s) for s in kwargs["seeds"]]
+        return base_train(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "train_nand_across_seeds", _capture_train)
+
+    parser = cli.build_parser()
+    _run_stage(parser, cfg, "smoke_test_train_seeds", extra=["--force"])
+
+    assert captured["seeds"] == [6, 7]
+
+
+def test_cli_run_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path, train_seeds=[6, 7])
+    _apply_fast_mocks(monkeypatch)
+    captured: dict[str, list[int]] = {}
+    base_train = cli.train_nand_across_seeds
+
+    def _capture_train(*args, **kwargs):
+        captured["seeds"] = [int(s) for s in kwargs["seeds"]]
+        return base_train(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "train_nand_across_seeds", _capture_train)
+
+    parser = cli.build_parser()
+    _run_stage(parser, cfg, "smoke_test_train_seeds_override", extra=["--force", "--seeds", "2", "4"])
+
+    assert captured["seeds"] == [2, 4]
