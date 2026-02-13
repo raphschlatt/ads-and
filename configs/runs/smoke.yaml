@@ -1,6 +1,8 @@
 stage: "smoke"
 subset_target_mentions: 5000
 seed: 11
+subset_sampling:
+  target_mean_block_size: 4
 max_pairs_per_block: 10000
 split_balance:
   min_neg_val: 20

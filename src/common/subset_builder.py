@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -25,7 +25,38 @@ STAGE_TARGETS = {
 }
 
 
-def _allocate_block_quotas(counts: pd.Series, target: int, seed: int) -> pd.Series:
+def _distribute_with_capacity(
+    capacity: pd.Series,
+    budget: int,
+    rng: np.random.Generator,
+) -> pd.Series:
+    out = pd.Series(0, index=capacity.index, dtype=int)
+    remaining = int(max(0, budget))
+    avail = capacity.astype(int).clip(lower=0)
+
+    while remaining > 0 and int(avail.sum()) > 0:
+        total_avail = int(avail.sum())
+        if remaining >= total_avail:
+            out += avail
+            break
+
+        weights = avail.astype(float)
+        weights = weights / weights.sum()
+        draw = pd.Series(rng.multinomial(remaining, weights.values), index=avail.index, dtype=int)
+        granted = draw.clip(upper=avail)
+        out += granted
+        remaining -= int(granted.sum())
+        avail = (avail - granted).clip(lower=0)
+
+    return out
+
+
+def _allocate_block_quotas(
+    counts: pd.Series,
+    target: int,
+    seed: int,
+    target_mean_block_size: float = 2.0,
+) -> pd.Series:
     rng = np.random.default_rng(seed)
     n_blocks = len(counts)
 
@@ -43,33 +74,62 @@ def _allocate_block_quotas(counts: pd.Series, target: int, seed: int) -> pd.Seri
             extra = rng.multinomial(remaining, weights.values)
             quotas += pd.Series(extra, index=counts.index)
     else:
-        # Ensure small stages still produce pairable blocks by prioritizing ambiguous blocks.
-        # Allocate 2 mentions per top block when possible, then spread remaining budget.
-        remaining = target
-        ambiguous_idx = counts[counts >= 2].index.tolist()
-        max_pairable_blocks = remaining // 2
-        top_pairable = ambiguous_idx[:max_pairable_blocks]
-        for idx in top_pairable:
-            if remaining >= 2:
-                quotas.loc[idx] = 2
-                remaining -= 2
-
-        if remaining > 0:
-            not_chosen = [idx for idx in counts.index if quotas.loc[idx] == 0]
-            if not_chosen:
-                pick_n = min(remaining, len(not_chosen))
-                picked = rng.choice(not_chosen, size=pick_n, replace=False)
-                quotas.loc[picked] += 1
-                remaining -= pick_n
-
-        # If still remaining, distribute by block size weights.
-        if remaining > 0:
+        pairable = counts[counts >= 2]
+        if len(pairable) == 0:
+            # Degenerate fallback: no pairable blocks available.
             weights = counts.astype(float)
             weights = weights / weights.sum()
-            extra = rng.multinomial(remaining, weights.values)
+            extra = rng.multinomial(target, weights.values)
             quotas += pd.Series(extra, index=counts.index)
+        else:
+            mean_block_size = max(2.0, float(target_mean_block_size))
+            n_selected_blocks = int(round(target / mean_block_size))
+            n_selected_blocks = max(1, min(n_selected_blocks, len(pairable)))
 
-    quotas = quotas.clip(upper=counts)
+            pairable_idx = pairable.index.to_numpy()
+            if len(pairable_idx) == n_selected_blocks:
+                selected_idx = pairable_idx
+            else:
+                weights = pairable.astype(float)
+                weights = weights / weights.sum()
+                selected_idx = rng.choice(pairable_idx, size=n_selected_blocks, replace=False, p=weights.values)
+            selected_set = set(selected_idx.tolist())
+
+            selected_sorted = [idx for idx in counts.index if idx in selected_set]
+            quotas.loc[selected_sorted] = 2
+
+            remaining = target - int(quotas.sum())
+            if remaining > 0:
+                selected_headroom = (counts.loc[selected_sorted] - quotas.loc[selected_sorted]).clip(lower=0).astype(int)
+                add_selected = _distribute_with_capacity(selected_headroom, remaining, rng=rng)
+                quotas.loc[selected_sorted] += add_selected
+                remaining = target - int(quotas.sum())
+
+            if remaining > 0:
+                other_sorted = [idx for idx in counts.index if idx not in selected_set]
+                if other_sorted:
+                    other_capacity = (counts.loc[other_sorted] - quotas.loc[other_sorted]).clip(lower=0).astype(int)
+                    add_others = _distribute_with_capacity(other_capacity, remaining, rng=rng)
+                    quotas.loc[other_sorted] += add_others
+                    remaining = target - int(quotas.sum())
+
+            if remaining > 0:
+                final_capacity = (counts - quotas).clip(lower=0).astype(int)
+                add_final = _distribute_with_capacity(final_capacity, remaining, rng=rng)
+                quotas += add_final
+
+    quotas = quotas.clip(upper=counts).astype(int)
+
+    if int(quotas.sum()) < target:
+        remaining = int(target - int(quotas.sum()))
+        fill_capacity = (counts - quotas).clip(lower=0).astype(int)
+        quotas += _distribute_with_capacity(fill_capacity, remaining, rng=rng)
+
+    if int(quotas.sum()) > target:
+        overflow = int(int(quotas.sum()) - target)
+        removable = quotas.astype(int).clip(lower=0)
+        quotas -= _distribute_with_capacity(removable, overflow, rng=rng)
+
     return quotas
 
 
@@ -78,6 +138,7 @@ def build_stage_subset(
     stage: str,
     seed: int = 11,
     target_mentions: Optional[int] = None,
+    subset_sampling: Optional[dict[str, Any]] = None,
 ) -> pd.DataFrame:
     validate_columns(mentions, MENTION_REQUIRED_COLUMNS, "mentions")
 
@@ -92,7 +153,14 @@ def build_stage_subset(
         return subset
 
     counts = mentions["block_key"].value_counts().sort_values(ascending=False)
-    quotas = _allocate_block_quotas(counts, target_mentions, seed)
+    subset_sampling = subset_sampling or {}
+    target_mean_block_size = float(subset_sampling.get("target_mean_block_size", 2.0))
+    quotas = _allocate_block_quotas(
+        counts,
+        target_mentions,
+        seed,
+        target_mean_block_size=target_mean_block_size,
+    )
 
     rng = np.random.default_rng(seed)
     selected_idx_parts = []
@@ -119,6 +187,13 @@ def build_stage_subset(
 
     selected_idx = np.concatenate(selected_idx_parts).astype(np.int64, copy=False)
     subset = mentions.iloc[selected_idx].copy()
+    if len(subset) < target_mentions:
+        missing = int(target_mentions - len(subset))
+        chosen = pd.Index(selected_idx)
+        remaining_pool = mentions.loc[~mentions.index.isin(chosen)]
+        if len(remaining_pool) > 0:
+            top_up = remaining_pool.sample(n=min(missing, len(remaining_pool)), random_state=seed)
+            subset = pd.concat([subset, top_up], ignore_index=True)
     if len(subset) > target_mentions:
         subset = subset.sample(n=target_mentions, random_state=seed)
 

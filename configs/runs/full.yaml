@@ -1,6 +1,8 @@
 stage: "full"
 subset_target_mentions: null
 seed: 11
+subset_sampling:
+  target_mean_block_size: 2
 max_pairs_per_block: null
 split_balance:
   min_neg_val: 500

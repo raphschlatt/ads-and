@@ -69,8 +69,15 @@ def cmd_subset(args):
     stage = run_cfg["stage"]
     seed = int(run_cfg.get("seed", 11))
     target = run_cfg.get("subset_target_mentions")
+    subset_sampling = run_cfg.get("subset_sampling", {})
 
-    subset = build_stage_subset(mentions, stage=stage, seed=seed, target_mentions=target)
+    subset = build_stage_subset(
+        mentions,
+        stage=stage,
+        seed=seed,
+        target_mentions=target,
+        subset_sampling=subset_sampling,
+    )
     save_parquet(subset, args.output, index=False)
     write_subset_manifest(subset, args.manifest)
     print(f"Subset {stage}: {len(subset)} mentions -> {args.output}")

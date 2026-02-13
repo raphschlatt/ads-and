@@ -1,6 +1,7 @@
 import pandas as pd
 
 from src.approaches.nand.build_pairs import assign_lspo_splits
+from src.common.subset_builder import build_stage_subset
 
 
 def _mentions(n_orcid: int, reps_per_orcid: int = 2) -> pd.DataFrame:
@@ -59,3 +60,69 @@ def test_assign_lspo_splits_marks_degraded_when_targets_impossible():
     )
 
     assert meta["status"] == "split_balance_degraded"
+
+
+def _rich_block_mentions(n_blocks: int = 400) -> pd.DataFrame:
+    rows = []
+    for block in range(n_blocks):
+        # Each block has 3 ORCIDs repeated twice: enough intra-block positives and negatives.
+        for orcid_idx in range(3):
+            for rep in range(2):
+                mention_idx = len(rows)
+                rows.append(
+                    {
+                        "mention_id": f"b{block}_{orcid_idx}_{rep}::0",
+                        "bibcode": f"b{mention_idx}",
+                        "author_idx": 0,
+                        "author_raw": f"A{orcid_idx}",
+                        "title": "t",
+                        "abstract": "a",
+                        "year": 2000,
+                        "source_type": "lspo",
+                        "block_key": f"blk{block}",
+                        "orcid": f"o{block}_{orcid_idx}",
+                    }
+                )
+    return pd.DataFrame(rows)
+
+
+def test_pair_rich_subset_sampling_improves_split_balance_feasibility():
+    mentions = _rich_block_mentions()
+    target = 240  # small-stage regime: target < number of blocks
+
+    subset_mean2 = build_stage_subset(
+        mentions,
+        stage="smoke",
+        seed=11,
+        target_mentions=target,
+        subset_sampling={"target_mean_block_size": 2},
+    )
+    _, meta_mean2 = assign_lspo_splits(
+        subset_mean2,
+        seed=11,
+        min_neg_val=10,
+        min_neg_test=10,
+        max_attempts=200,
+        return_meta=True,
+    )
+
+    subset_mean4 = build_stage_subset(
+        mentions,
+        stage="smoke",
+        seed=11,
+        target_mentions=target,
+        subset_sampling={"target_mean_block_size": 4},
+    )
+    _, meta_mean4 = assign_lspo_splits(
+        subset_mean4,
+        seed=11,
+        min_neg_val=10,
+        min_neg_test=10,
+        max_attempts=200,
+        return_meta=True,
+    )
+
+    assert meta_mean2["status"] == "split_balance_degraded"
+    assert meta_mean4["status"] == "ok"
+    assert meta_mean4["split_label_counts"]["val"]["neg"] > meta_mean2["split_label_counts"]["val"]["neg"]
+    assert meta_mean4["split_label_counts"]["test"]["neg"] > meta_mean2["split_label_counts"]["test"]["neg"]
