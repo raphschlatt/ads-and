@@ -20,7 +20,13 @@ from src.approaches.nand.export import build_publication_author_mapping
 from src.approaches.nand.infer_pairs import score_pairs_with_checkpoint
 from src.approaches.nand.train import train_nand_across_seeds
 from src.common.cli_ui import CliUI
-from src.common.cache_ops import hash_file, link_or_copy, resolve_shared_cache_root, stable_hash
+from src.common.cache_ops import (
+    hash_checkpoint_model_state,
+    hash_file,
+    link_or_copy,
+    resolve_shared_cache_root,
+    stable_hash,
+)
 from src.common.config import (
     build_run_dirs,
     find_project_root,
@@ -243,28 +249,43 @@ def _record_cache_ref(
     shared_path: Path,
     run_path: Path,
     mode: str,
+    cache_schema_version: str | None = None,
 ) -> None:
-    refs.append(
-        {
-            "artifact_type": str(artifact_type),
-            "artifact_id": str(artifact_id),
-            "shared_path": str(shared_path),
-            "run_path": str(run_path),
-            "materialization_mode": str(mode),
-        }
-    )
+    row = {
+        "artifact_type": str(artifact_type),
+        "artifact_id": str(artifact_id),
+        "shared_path": str(shared_path),
+        "run_path": str(run_path),
+        "materialization_mode": str(mode),
+    }
+    if cache_schema_version is not None:
+        row["cache_schema_version"] = str(cache_schema_version)
+    refs.append(row)
 
 
-def _build_eps_sweep_values(cluster_cfg: dict[str, Any]) -> list[float]:
-    eps_min = float(cluster_cfg.get("eps_sweep_min", 0.2))
-    eps_max = float(cluster_cfg.get("eps_sweep_max", 0.5))
-    eps_step = float(cluster_cfg.get("eps_sweep_step", 0.05))
+def _build_eps_values(eps_min: float, eps_max: float, eps_step: float) -> list[float]:
     if eps_step <= 0:
         raise ValueError(f"eps_sweep_step must be > 0, got {eps_step}")
     if eps_min > eps_max:
         raise ValueError(f"eps_sweep_min must be <= eps_sweep_max, got {eps_min} > {eps_max}")
     values = np.arange(eps_min, eps_max + (eps_step * 0.5), eps_step)
     return [float(np.round(v, 6)) for v in values.tolist()]
+
+
+def _build_eps_sweep_values(cluster_cfg: dict[str, Any]) -> list[float]:
+    eps_min = float(cluster_cfg.get("eps_sweep_min", 0.2))
+    eps_max = float(cluster_cfg.get("eps_sweep_max", 0.5))
+    eps_step = float(cluster_cfg.get("eps_sweep_step", 0.05))
+    return _build_eps_values(eps_min=eps_min, eps_max=eps_max, eps_step=eps_step)
+
+
+def _resolve_precision_mode(run_cfg: dict[str, Any], training_cfg: dict[str, Any]) -> str:
+    raw = run_cfg.get("precision_mode", training_cfg.get("precision_mode", "fp32"))
+    mode = str(raw or "fp32").strip().lower()
+    if mode not in {"fp32", "amp_bf16"}:
+        warnings.warn(f"Unknown precision_mode={raw!r}; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    return mode
 
 
 def _cluster_pairwise_metrics(pairs, clusters) -> dict[str, Any]:
@@ -309,6 +330,7 @@ def _resolve_stage_eps(
     score_batch_size: int,
     device: str,
     show_progress: bool,
+    precision_mode: str = "fp32",
 ) -> tuple[float, dict[str, Any]]:
     eps_mode = str(cluster_cfg.get("eps_mode", "fixed")).lower()
     if eps_mode != "val_sweep":
@@ -317,22 +339,69 @@ def _resolve_stage_eps(
     sweep_rows: list[dict[str, Any]] = []
     fallback_cfg = dict(cluster_cfg)
     fallback_cfg["selected_eps"] = None
+    diag_cfg = dict(cluster_cfg.get("boundary_diagnostics", {}) or {})
+    diag_sweep_min = float(diag_cfg.get("diag_min", 0.55))
+    diag_sweep_max = float(diag_cfg.get("diag_max", 0.70))
+    diag_sweep_step = float(diag_cfg.get("diag_step", 0.05))
+    range_limited_delta_f1 = float(diag_cfg.get("delta_f1_threshold", 0.005))
+
+    def _fallback_meta(status: str, base_meta: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(base_meta)
+        payload.update(
+            {
+                "sweep_status": status,
+                "sweep_results": sweep_rows,
+                "n_valid_candidates": 0,
+                "boundary_hit": False,
+                "boundary_side": None,
+                "f1_gap_best_second": None,
+                "boundary_diagnostic_run": False,
+                "diag_sweep_min": diag_sweep_min,
+                "diag_sweep_max": diag_sweep_max,
+                "diag_sweep_step": diag_sweep_step,
+                "diag_n_valid_candidates": 0,
+                "diag_best_eps": None,
+                "diag_best_metrics": None,
+                "diag_best_minus_canonical_f1": None,
+                "range_limited_delta_f1_threshold": range_limited_delta_f1,
+                "range_limited": False,
+            }
+        )
+        return payload
+
+    def _eval_rows(
+        *,
+        eps_values: list[float],
+        mentions,
+        pairs,
+        pair_scores,
+        eval_cluster_cfg: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for eps in eps_values:
+            row: dict[str, Any] = {"eps": float(eps)}
+            try:
+                cfg = json.loads(json.dumps(eval_cluster_cfg))
+                cfg["eps"] = float(eps)
+                clusters = cluster_blockwise_dbscan(
+                    mentions=mentions,
+                    pair_scores=pair_scores,
+                    cluster_config=cfg,
+                    output_path=None,
+                    show_progress=False,
+                )
+                row.update(_cluster_pairwise_metrics(pairs, clusters))
+            except Exception as exc:
+                row["error"] = repr(exc)
+            rows.append(row)
+        return rows
 
     val_mask = lspo_mentions_split["split"].astype(str) == "val"
     val_mentions = lspo_mentions_split[val_mask].reset_index(drop=True)
     val_pairs = lspo_pairs[(lspo_pairs["split"] == "val") & lspo_pairs["label"].notna()].copy()
     if len(val_mentions) < 2 or len(val_pairs) == 0:
         resolved, base_meta = resolve_dbscan_eps(fallback_cfg, cosine_threshold=best_threshold)
-        base_meta.update(
-            {
-                "sweep_status": "fallback_no_val_pairs",
-                "sweep_results": sweep_rows,
-                "n_valid_candidates": 0,
-                "boundary_hit": False,
-                "boundary_side": None,
-                "f1_gap_best_second": None,
-            }
-        )
+        base_meta = _fallback_meta("fallback_no_val_pairs", base_meta)
         return resolved, base_meta
 
     val_chars = lspo_chars[val_mask.to_numpy()]
@@ -346,41 +415,23 @@ def _resolve_stage_eps(
         output_path=None,
         batch_size=int(score_batch_size),
         device=device,
+        precision_mode=precision_mode,
         show_progress=show_progress,
     )
 
     eps_values = _build_eps_sweep_values(cluster_cfg)
-    for eps in eps_values:
-        row: dict[str, Any] = {"eps": float(eps)}
-        try:
-            eval_cfg = json.loads(json.dumps(cluster_cfg))
-            eval_cfg["eps"] = float(eps)
-            clusters = cluster_blockwise_dbscan(
-                mentions=val_mentions,
-                pair_scores=val_pair_scores,
-                cluster_config=eval_cfg,
-                output_path=None,
-                show_progress=False,
-            )
-            metrics = _cluster_pairwise_metrics(val_pairs, clusters)
-            row.update(metrics)
-        except Exception as exc:
-            row["error"] = repr(exc)
-        sweep_rows.append(row)
+    sweep_rows = _eval_rows(
+        eps_values=eps_values,
+        mentions=val_mentions,
+        pairs=val_pairs,
+        pair_scores=val_pair_scores,
+        eval_cluster_cfg=cluster_cfg,
+    )
 
     valid_rows = [r for r in sweep_rows if r.get("f1") is not None]
     if not valid_rows:
         resolved, base_meta = resolve_dbscan_eps(fallback_cfg, cosine_threshold=best_threshold)
-        base_meta.update(
-            {
-                "sweep_status": "fallback_no_valid_candidates",
-                "sweep_results": sweep_rows,
-                "n_valid_candidates": 0,
-                "boundary_hit": False,
-                "boundary_side": None,
-                "f1_gap_best_second": None,
-            }
-        )
+        base_meta = _fallback_meta("fallback_no_valid_candidates", base_meta)
         return resolved, base_meta
 
     sweep_center = (float(cluster_cfg.get("eps_sweep_min", 0.2)) + float(cluster_cfg.get("eps_sweep_max", 0.5))) / 2.0
@@ -420,8 +471,62 @@ def _resolve_stage_eps(
                 "n_pairs": best_row.get("n_pairs"),
             },
             "sweep_results": sweep_rows,
+            "boundary_diagnostic_run": False,
+            "diag_sweep_min": diag_sweep_min,
+            "diag_sweep_max": diag_sweep_max,
+            "diag_sweep_step": diag_sweep_step,
+            "diag_n_valid_candidates": 0,
+            "diag_best_eps": None,
+            "diag_best_metrics": None,
+            "diag_best_minus_canonical_f1": None,
+            "range_limited_delta_f1_threshold": range_limited_delta_f1,
+            "range_limited": False,
         }
     )
+
+    if boundary_hit:
+        base_meta["boundary_diagnostic_run"] = True
+        diag_rows: list[dict[str, Any]] = []
+        try:
+            diag_values = _build_eps_values(
+                eps_min=diag_sweep_min,
+                eps_max=diag_sweep_max,
+                eps_step=diag_sweep_step,
+            )
+            diag_rows = _eval_rows(
+                eps_values=diag_values,
+                mentions=val_mentions,
+                pairs=val_pairs,
+                pair_scores=val_pair_scores,
+                eval_cluster_cfg=cluster_cfg,
+            )
+        except Exception as exc:
+            diag_rows = [{"error": repr(exc)}]
+
+        valid_diag = [r for r in diag_rows if r.get("f1") is not None]
+        base_meta["diag_sweep_results"] = diag_rows
+        base_meta["diag_n_valid_candidates"] = int(len(valid_diag))
+        if valid_diag:
+            diag_center = (diag_sweep_min + diag_sweep_max) / 2.0
+            diag_ranked = sorted(valid_diag, key=lambda r: (float(r["f1"]), -abs(float(r["eps"]) - diag_center)), reverse=True)
+            diag_best = diag_ranked[0]
+            canonical_f1 = float(best_row["f1"])
+            diag_best_f1 = float(diag_best["f1"])
+            diag_delta = float(diag_best_f1 - canonical_f1)
+            base_meta.update(
+                {
+                    "diag_best_eps": float(diag_best["eps"]),
+                    "diag_best_metrics": {
+                        "f1": diag_best.get("f1"),
+                        "precision": diag_best.get("precision"),
+                        "recall": diag_best.get("recall"),
+                        "accuracy": diag_best.get("accuracy"),
+                        "n_pairs": diag_best.get("n_pairs"),
+                    },
+                    "diag_best_minus_canonical_f1": diag_delta,
+                    "range_limited": bool(diag_delta >= range_limited_delta_f1),
+                }
+            )
     return resolved, base_meta
 
 
@@ -549,7 +654,11 @@ def cmd_train(args):
     text = np.load(args.text)
 
     model_cfg = _load_model_cfg(args.model_config)
-    training_cfg = model_cfg.get("training", {})
+    training_cfg = dict(model_cfg.get("training", {}) or {})
+    precision_mode = str(args.precision_mode or training_cfg.get("precision_mode", "fp32")).strip().lower()
+    if precision_mode not in {"fp32", "amp_bf16"}:
+        raise ValueError(f"Unsupported precision_mode={precision_mode!r}. Use fp32 or amp_bf16.")
+    training_cfg["precision_mode"] = precision_mode
     seeds = args.seeds or training_cfg.get("seeds", [1, 2, 3, 4, 5])
 
     manifest = train_nand_across_seeds(
@@ -563,6 +672,7 @@ def cmd_train(args):
         output_dir=args.output_dir,
         metrics_output=args.metrics_output,
         device=args.device,
+        precision_mode=precision_mode,
         show_progress=args.progress,
     )
     print(f"Training done. Best checkpoint: {manifest['best_checkpoint']}")
@@ -583,6 +693,7 @@ def cmd_score(args):
         output_path=args.output,
         batch_size=args.batch_size,
         device=args.device,
+        precision_mode=args.precision_mode,
         show_progress=args.progress,
     )
     print(f"Scored pairs: {len(out)} -> {args.output}")
@@ -726,16 +837,67 @@ def _collect_redundant_run_copies(paths_cfg: dict[str, Any]) -> list[dict[str, A
     return out
 
 
+def _collect_shared_path_refs(paths_cfg: dict[str, Any]) -> dict[str, list[str]]:
+    metrics_root = Path(paths_cfg["artifacts"]["metrics_dir"])
+    refs: dict[str, list[str]] = {}
+    if not metrics_root.exists():
+        return refs
+    for ref_file in sorted(metrics_root.glob("*/00_cache_refs.json")):
+        payload = _load_json(ref_file)
+        run_id = str(payload.get("run_id", ref_file.parent.name))
+        for ref in list(payload.get("cache_refs") or []):
+            shared_path = str(ref.get("shared_path", "")).strip()
+            if not shared_path:
+                continue
+            runs = refs.setdefault(shared_path, [])
+            if run_id not in runs:
+                runs.append(run_id)
+    return refs
+
+
+def _collect_legacy_pair_score_records(paths_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    shared_pair_scores_dir = resolve_shared_cache_root(paths_cfg["data"]) / "pair_scores"
+    shared_refs = _collect_shared_path_refs(paths_cfg)
+    out: list[dict[str, Any]] = []
+    if not shared_pair_scores_dir.exists():
+        return out
+    for p in sorted(shared_pair_scores_dir.glob("ads_pair_scores_*.parquet")):
+        if p.name.startswith("ads_pair_scores_v2_"):
+            continue
+        referenced_by = list(shared_refs.get(str(p), []))
+        out.append(
+            {
+                "type": "legacy_pair_score",
+                "path": str(p),
+                "size_bytes": int(p.stat().st_size),
+                "referenced_by_runs": referenced_by,
+                "referenced": bool(referenced_by),
+            }
+        )
+    return out
+
+
+def _collect_unused_legacy_pair_score_records(paths_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = _collect_legacy_pair_score_records(paths_cfg)
+    return [r for r in rows if not bool(r.get("referenced"))]
+
+
 def cmd_cache_doctor(args):
     paths = _load_paths_cfg(args.paths_config)
     stale_subsets = _collect_stale_subset_records(paths["data"])
     redundant_run_copies = _collect_redundant_run_copies(paths)
+    legacy_pair_scores = _collect_legacy_pair_score_records(paths)
+    promotable_legacy_hits = [row for row in legacy_pair_scores if bool(row.get("referenced"))]
     payload = {
         "stale_subsets": stale_subsets,
         "redundant_run_copies": redundant_run_copies,
+        "legacy_pair_scores_detected": legacy_pair_scores,
+        "promotable_legacy_hits": promotable_legacy_hits,
         "counts": {
             "stale_subsets": int(len(stale_subsets)),
             "redundant_run_copies": int(len(redundant_run_copies)),
+            "legacy_pair_scores_detected": int(len(legacy_pair_scores)),
+            "promotable_legacy_hits": int(len(promotable_legacy_hits)),
         },
     }
     print(json.dumps(payload, indent=2))
@@ -746,6 +908,7 @@ def cmd_cache_purge(args):
     targets = {
         "stale-subsets": _collect_stale_subset_records(paths["data"]),
         "redundant-run-copies": _collect_redundant_run_copies(paths),
+        "legacy-pair-scores-unused": _collect_unused_legacy_pair_score_records(paths),
     }
     rows = list(targets[args.target])
     purged = 0
@@ -767,6 +930,14 @@ def cmd_cache_purge(args):
             if args.yes:
                 mode = link_or_copy(shared_path, run_path)
                 relinked += int(mode in {"hardlink", "symlink", "existing"})
+                purged += 1
+    elif args.target == "legacy-pair-scores-unused":
+        for row in rows:
+            p = Path(str(row.get("path", "")))
+            if not p.exists():
+                continue
+            if args.yes:
+                p.unlink()
                 purged += 1
 
     payload = {
@@ -798,7 +969,11 @@ def cmd_run_stage(args):
 
         model_cfg = _load_model_cfg(args.model_config)
         rep_cfg = model_cfg.get("representation", {})
-        training_cfg = model_cfg.get("training", {})
+        training_cfg = dict(model_cfg.get("training", {}) or {})
+        precision_mode = _resolve_precision_mode(run_cfg=run_cfg, training_cfg=training_cfg)
+        if getattr(args, "precision_mode", None):
+            precision_mode = str(args.precision_mode).strip().lower()
+        training_cfg["precision_mode"] = precision_mode
 
         project_root = find_project_root(Path.cwd())
         cluster_cfg_path = resolve_existing_path(args.cluster_config, project_root=project_root) or Path(args.cluster_config)
@@ -828,6 +1003,7 @@ def cmd_run_stage(args):
                 "prefer_precomputed_ads": bool(args.prefer_precomputed_ads),
                 "quiet_libs": bool(args.quiet_libs),
                 "train_seeds": train_seeds,
+                "precision_mode": precision_mode,
                 "run_config": str(run_cfg_path),
                 "model_config": str(args.model_config),
                 "cluster_config": str(cluster_cfg_path),
@@ -1383,6 +1559,7 @@ def cmd_run_stage(args):
                 output_dir=checkpoint_dir,
                 metrics_output=train_manifest_path,
                 device=args.device,
+                precision_mode=precision_mode,
                 show_progress=args.progress,
             )
             ui.done(f"Best checkpoint: {train_manifest['best_checkpoint']}")
@@ -1396,19 +1573,59 @@ def cmd_run_stage(args):
         )
 
         ui.start("Score ADS pairs")
+        score_pipeline_version = "v2"
+        try:
+            model_state_hash = hash_checkpoint_model_state(
+                train_manifest["best_checkpoint"],
+                score_pipeline_version=score_pipeline_version,
+            )
+        except Exception as exc:
+            warnings.warn(
+                (
+                    "Model-state hash failed "
+                    f"({exc.__class__.__name__}); falling back to file hash for pair-score cache key."
+                ),
+                RuntimeWarning,
+            )
+            model_state_hash = hash_file(train_manifest["best_checkpoint"])
+
         checkpoint_hash = hash_file(train_manifest["best_checkpoint"])
         score_cfg_hash = stable_hash({"score_batch_size": int(args.score_batch_size)})
-        pair_scores_id = stable_hash(
+        pair_scores_id_v2 = stable_hash(
+            {
+                "ads_pairs_id": ads_pairs_id,
+                "model_state_hash": model_state_hash,
+                "score_cfg_hash": score_cfg_hash,
+                "score_pipeline_version": score_pipeline_version,
+            }
+        )
+        pair_scores_id_legacy = stable_hash(
             {
                 "ads_pairs_id": ads_pairs_id,
                 "checkpoint_hash": checkpoint_hash,
                 "score_cfg_hash": score_cfg_hash,
             }
         )
-        pair_scores_shared_path = shared_pair_scores_dir / f"ads_pair_scores_{pair_scores_id}.parquet"
-        if pair_scores_shared_path.exists() and not args.force:
-            pair_scores = read_parquet(pair_scores_shared_path)
+        pair_scores_shared_path_v2 = shared_pair_scores_dir / f"ads_pair_scores_v2_{pair_scores_id_v2}.parquet"
+        pair_scores_shared_path_legacy = shared_pair_scores_dir / f"ads_pair_scores_{pair_scores_id_legacy}.parquet"
+        pair_scores_shared_path_used = pair_scores_shared_path_v2
+        pair_scores_cache_schema_version = "v2"
+        pair_scores_artifact_id = pair_scores_id_v2
+
+        if pair_scores_shared_path_v2.exists() and not args.force:
+            pair_scores = read_parquet(pair_scores_shared_path_v2)
             ui.skip(f"Reused pair scores ({len(pair_scores)} rows).")
+        elif pair_scores_shared_path_legacy.exists() and not args.force:
+            pair_scores = read_parquet(pair_scores_shared_path_legacy)
+            pair_scores_cache_schema_version = "v1"
+            pair_scores_artifact_id = pair_scores_id_legacy
+            pair_scores_shared_path_used = pair_scores_shared_path_legacy
+            promote_mode = link_or_copy(pair_scores_shared_path_legacy, pair_scores_shared_path_v2)
+            if pair_scores_shared_path_v2.exists():
+                pair_scores_shared_path_used = pair_scores_shared_path_v2
+                pair_scores_cache_schema_version = "v2"
+                pair_scores_artifact_id = pair_scores_id_v2
+            ui.skip(f"Reused legacy pair scores ({len(pair_scores)} rows, promote={promote_mode}).")
         else:
             pair_scores = score_pairs_with_checkpoint(
                 mentions=ads_subset,
@@ -1416,19 +1633,24 @@ def cmd_run_stage(args):
                 chars2vec=ads_chars,
                 text_emb=ads_text,
                 checkpoint_path=train_manifest["best_checkpoint"],
-                output_path=pair_scores_shared_path,
+                output_path=pair_scores_shared_path_v2,
                 batch_size=int(args.score_batch_size),
                 device=args.device,
+                precision_mode=precision_mode,
                 show_progress=args.progress,
             )
+            pair_scores_shared_path_used = pair_scores_shared_path_v2
+            pair_scores_cache_schema_version = "v2"
+            pair_scores_artifact_id = pair_scores_id_v2
             ui.done(f"Scored {len(pair_scores)} ADS pairs.")
         _record_cache_ref(
             cache_refs,
             artifact_type="pair_scores",
-            artifact_id=pair_scores_id,
-            shared_path=pair_scores_shared_path,
+            artifact_id=pair_scores_artifact_id,
+            shared_path=pair_scores_shared_path_used,
             run_path=pair_scores_path,
-            mode=link_or_copy(pair_scores_shared_path, pair_scores_path),
+            mode=link_or_copy(pair_scores_shared_path_used, pair_scores_path),
+            cache_schema_version=pair_scores_cache_schema_version,
         )
         write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
 
@@ -1458,6 +1680,7 @@ def cmd_run_stage(args):
                     "eps_sweep_min": cluster_cfg_used.get("eps_sweep_min"),
                     "eps_sweep_max": cluster_cfg_used.get("eps_sweep_max"),
                     "eps_sweep_step": cluster_cfg_used.get("eps_sweep_step"),
+                    "boundary_diagnostics": cluster_cfg_used.get("boundary_diagnostics"),
                     "min_samples": cluster_cfg_used.get("min_samples"),
                     "constraint_mode": cluster_cfg_used.get("constraint_mode"),
                     "constraints": cluster_cfg_used.get("constraints"),
@@ -1466,7 +1689,7 @@ def cmd_run_stage(args):
             eps_sweep_id = stable_hash(
                 {
                     "lspo_pairs_id": lspo_pairs_id,
-                    "checkpoint_hash": checkpoint_hash,
+                    "model_state_hash": model_state_hash,
                     "sweep_cfg_hash": sweep_cfg_hash,
                 }
             )
@@ -1480,6 +1703,7 @@ def cmd_run_stage(args):
                 checkpoint_path=str(train_manifest["best_checkpoint"]),
                 score_batch_size=int(args.score_batch_size),
                 device=args.device,
+                precision_mode=precision_mode,
                 show_progress=args.progress,
             )
             eps_meta["eps_sweep_id"] = eps_sweep_id
@@ -1489,7 +1713,7 @@ def cmd_run_stage(args):
                     "eps_sweep_id": eps_sweep_id,
                     "run_stage": stage,
                     "run_id": run_id,
-                    "checkpoint_hash": checkpoint_hash,
+                    "model_state_hash": model_state_hash,
                     "sweep_cfg_hash": sweep_cfg_hash,
                     "eps_resolution": eps_meta,
                 },
@@ -1616,6 +1840,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gates-config", default="configs/gates.yaml")
     sp.add_argument("--run-id", default=None)
     sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
     sp.add_argument("--seeds", nargs="+", type=int, default=None)
     sp.add_argument("--use-stub-embeddings", action="store_true")
     sp.add_argument("--force", action="store_true")
@@ -1696,6 +1921,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output-dir", required=True)
     sp.add_argument("--metrics-output", required=True)
     sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
     sp.add_argument("--progress", action="store_true")
     sp.set_defaults(func=cmd_train)
 
@@ -1708,6 +1934,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output", required=True)
     sp.add_argument("--batch-size", type=int, default=8192)
     sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
     sp.add_argument("--progress", action="store_true")
     sp.set_defaults(func=cmd_score)
 
@@ -1740,7 +1967,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     cpurge = cache_sub.add_parser("purge")
     cpurge.add_argument("--paths-config", default="configs/paths.local.yaml")
-    cpurge.add_argument("--target", required=True, choices=["stale-subsets", "redundant-run-copies"])
+    cpurge.add_argument(
+        "--target",
+        required=True,
+        choices=["stale-subsets", "redundant-run-copies", "legacy-pair-scores-unused"],
+    )
     cpurge.add_argument("--yes", action="store_true")
     cpurge.set_defaults(func=cmd_cache_purge)
 

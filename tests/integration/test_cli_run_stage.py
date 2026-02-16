@@ -118,6 +118,7 @@ def _make_configs(
             "learning_rate": 1e-3,
             "max_epochs": 2,
             "early_stopping_patience": 1,
+            "precision_mode": "fp32",
             "seeds": [1],
             "default_cosine_threshold": 0.35,
         },
@@ -132,6 +133,12 @@ def _make_configs(
         "eps_sweep_step": 0.1,
         "eps_min": 0.1,
         "eps_max": 0.9,
+        "boundary_diagnostics": {
+            "diag_min": 0.55,
+            "diag_max": 0.70,
+            "diag_step": 0.05,
+            "delta_f1_threshold": 0.005,
+        },
         "min_samples": 1,
         "metric": "precomputed",
         "constraints": {"enabled": False},
@@ -376,10 +383,15 @@ def test_cli_run_stage_smoke_stub(monkeypatch, tmp_path: Path):
     assert (metrics_dir / "04_cluster_qc.json").exists()
     assert (metrics_dir / "05_stage_metrics_smoke.json").exists()
     assert (metrics_dir / "05_go_no_go_smoke.json").exists()
+    context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
+    assert context["precision_mode"] == "fp32"
     stage_metrics = json.loads((metrics_dir / "05_stage_metrics_smoke.json").read_text(encoding="utf-8"))
     assert "ads_cluster_assignments" in stage_metrics["counts"]
     assert "ads_blocks" in stage_metrics["counts"]
     assert "split_balance_status" in stage_metrics
+    assert "eps_diag_ran" in stage_metrics
+    assert "eps_range_limited" in stage_metrics
+    assert "eps_diag_delta_f1" in stage_metrics
     go_payload = json.loads((metrics_dir / "05_go_no_go_smoke.json").read_text(encoding="utf-8"))
     assert "warnings" in go_payload
 
@@ -404,6 +416,28 @@ def test_cli_run_stage_resume_behavior(monkeypatch, tmp_path: Path):
 
     _run_stage(parser, cfg, run_id)
     assert (cfg["metrics_dir"] / run_id / "05_go_no_go_smoke.json").exists()
+
+
+def test_cli_run_stage_reuses_pair_scores_v2_across_run_ids(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    parser = cli.build_parser()
+
+    run_1 = "smoke_test_pair_scores_v2_a"
+    run_2 = "smoke_test_pair_scores_v2_b"
+    _run_stage(parser, cfg, run_1, extra=["--force"])
+    _run_stage(parser, cfg, run_2)
+
+    refs_1 = json.loads((cfg["metrics_dir"] / run_1 / "00_cache_refs.json").read_text(encoding="utf-8"))
+    refs_2 = json.loads((cfg["metrics_dir"] / run_2 / "00_cache_refs.json").read_text(encoding="utf-8"))
+    pair_ref_1 = next(r for r in refs_1["cache_refs"] if r.get("artifact_type") == "pair_scores")
+    pair_ref_2 = next(r for r in refs_2["cache_refs"] if r.get("artifact_type") == "pair_scores")
+
+    assert "ads_pair_scores_v2_" in str(pair_ref_1["shared_path"])
+    assert "ads_pair_scores_v2_" in str(pair_ref_2["shared_path"])
+    assert pair_ref_1.get("cache_schema_version") == "v2"
+    assert pair_ref_2.get("cache_schema_version") == "v2"
+    assert str(pair_ref_1["shared_path"]) == str(pair_ref_2["shared_path"])
 
 
 def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path: Path):
@@ -458,6 +492,15 @@ def test_cli_run_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path: Path
     assert "boundary_hit" in eps_meta
     assert "boundary_side" in eps_meta
     assert "f1_gap_best_second" in eps_meta
+    assert "boundary_diagnostic_run" in eps_meta
+    assert "diag_sweep_min" in eps_meta
+    assert "diag_sweep_max" in eps_meta
+    assert "diag_sweep_step" in eps_meta
+    assert "diag_n_valid_candidates" in eps_meta
+    assert "diag_best_eps" in eps_meta
+    assert "diag_best_metrics" in eps_meta
+    assert "diag_best_minus_canonical_f1" in eps_meta
+    assert "range_limited" in eps_meta
     if eps_meta["sweep_status"] == "ok":
         assert len(eps_meta["sweep_results"]) >= 1
         assert 0.2 <= float(payload["cluster_config_used"]["eps"]) <= 0.5
@@ -520,6 +563,11 @@ def test_cli_run_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path)
     assert float(eps_meta["selected_eps"]) == 0.5
     assert int(eps_meta["n_valid_candidates"]) >= 1
     assert eps_meta["f1_gap_best_second"] is not None
+    assert eps_meta["boundary_diagnostic_run"] is True
+    assert eps_meta["diag_n_valid_candidates"] >= 1
+    assert float(eps_meta["diag_best_eps"]) >= 0.55
+    assert eps_meta["diag_best_minus_canonical_f1"] is not None
+    assert eps_meta["range_limited"] is True
 
 
 def test_cli_run_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path):

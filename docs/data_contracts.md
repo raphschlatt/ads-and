@@ -60,6 +60,7 @@ Optional columns:
 - `best_test_metrics` (dict: `f1`, `precision`, `recall`, `accuracy`)
 - `best_val_class_counts` (dict: `pos`, `neg`)
 - `best_test_class_counts` (dict: `pos`, `neg`)
+- `precision_mode` (`fp32` or `amp_bf16`; canonical paper runs should use `fp32`)
 
 ## stage_metrics.json (05)
 
@@ -79,6 +80,10 @@ Optional columns:
 - `eps_boundary_side` (`min`/`max` or null)
 - `eps_n_valid_candidates` (int or null)
 - `eps_f1_gap_best_second` (float or null)
+- `eps_diag_ran` (bool or null)
+- `eps_range_limited` (bool or null)
+- `eps_diag_delta_f1` (float or null; diagnostic best minus canonical best)
+- `precision_mode` (`fp32` or `amp_bf16`)
 - `counts.ads_clusters` (int; canonical unique `author_uid`)
 - `counts.ads_cluster_assignments` (int; legacy count of mention->UID rows)
 - `counts.ads_blocks` (int)
@@ -100,3 +105,12 @@ Optional columns:
 - `checks` (list with `name`, `passed`, `detail`, `severity`)
 - `blockers` (list[str]; failed blocker checks)
 - `warnings` (list[str]; failed warning checks)
+
+## cache_refs.json (00)
+
+- `artifact_type` (str)
+- `artifact_id` (str)
+- `shared_path` (str)
+- `run_path` (str)
+- `materialization_mode` (`hardlink`/`symlink`/`copy`/`existing`)
+- `cache_schema_version` (optional str; for pair-score cache migration, e.g. `v1`/`v2`)

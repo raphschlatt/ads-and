@@ -7,6 +7,11 @@ eps_sweep_max: 0.5
 eps_sweep_step: 0.05
 eps_min: 0.15
 eps_max: 0.85
+boundary_diagnostics:
+  diag_min: 0.55
+  diag_max: 0.70
+  diag_step: 0.05
+  delta_f1_threshold: 0.005
 min_samples: 1
 metric: "precomputed"
 constraints:

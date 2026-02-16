@@ -156,6 +156,9 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         "boundary_side": "max",
         "n_valid_candidates": 7,
         "f1_gap_best_second": 0.0123,
+        "boundary_diagnostic_run": True,
+        "range_limited": True,
+        "diag_best_minus_canonical_f1": 0.021,
     }
 
     consistency_files = []
@@ -194,6 +197,10 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
     assert stage_metrics["split_high_sim_rate_probe"] == 0.13
     assert stage_metrics["eps_boundary_hit"] is True
     assert stage_metrics["eps_boundary_side"] == "max"
+    assert stage_metrics["eps_diag_ran"] is True
+    assert stage_metrics["eps_range_limited"] is True
+    assert stage_metrics["eps_diag_delta_f1"] == 0.021
+    assert stage_metrics["precision_mode"] == "fp32"
     assert stage_metrics["subset_cache_key"] == "smoke_seed11_target5000_cfg123_srcabc"
     assert stage_metrics["lspo_pairs"] == 42
     assert stage_metrics["max_possible_neg_total"] == 1234

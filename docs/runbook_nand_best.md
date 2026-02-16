@@ -15,6 +15,8 @@ Reproduce NAND best path on LSPO, then run zero-shot disambiguation on ADS menti
 - Split: `60/20/20` (`split_assignment` in run config)
 - Pair protocol: exclude same-publication pairs (`exclude_same_bibcode: true`)
 - Clustering: DBSCAN + constraints, `eps_mode: val_sweep` in `0.20..0.50`
+- Boundary diagnostics: if selected `eps` is at range edge, run audit-only sweep `0.55..0.70`
+- Precision: canonical benchmark profile uses `precision_mode: fp32` (`amp_bf16` is fast-profile only)
 
 ## Execution Order
 

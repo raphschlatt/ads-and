@@ -29,6 +29,8 @@ def _default_gate_config() -> Dict:
             },
             "eps_policy": {
                 "boundary_hit_severity": "warning",
+                "range_limited_delta_f1": 0.005,
+                "range_limited_severity": "warning",
             },
         },
         "stages": {
@@ -41,6 +43,7 @@ def _default_gate_config() -> Dict:
                 "cluster_quality_severity": "blocker",
                 "lspo_block_size_p95_min": 2,
                 "lspo_pairs_min": 50000,
+                "eps_range_limited_severity": "blocker",
             },
             "full": {
                 "f1_min": 0.90,
@@ -49,6 +52,7 @@ def _default_gate_config() -> Dict:
                 "cluster_quality_severity": "blocker",
                 "lspo_block_size_p95_min": 2,
                 "lspo_pairs_min": 300000,
+                "eps_range_limited_severity": "blocker",
             },
         },
     }
@@ -113,6 +117,13 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     eps_boundary_severity = _normalize_severity(
         stage_gates.get("eps_boundary_severity", eps_defaults.get("boundary_hit_severity", "warning")),
         default="warning",
+    )
+    eps_range_limited_severity = _normalize_severity(
+        stage_gates.get("eps_range_limited_severity", eps_defaults.get("range_limited_severity", "warning")),
+        default="warning",
+    )
+    eps_range_limited_delta_f1 = float(
+        stage_gates.get("eps_range_limited_delta_f1", eps_defaults.get("range_limited_delta_f1", 0.005))
     )
     split_feasibility_severity = _normalize_severity(stage_gates.get("split_feasibility_severity", "blocker"), default="blocker")
 
@@ -314,6 +325,21 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         )
     else:
         add_check("eps_boundary_hit", True, "Observed boundary_hit=false")
+
+    eps_range_limited = stage_metrics.get("eps_range_limited")
+    eps_diag_delta_f1 = stage_metrics.get("eps_diag_delta_f1")
+    if eps_range_limited is None:
+        add_check("eps_range_limited", True, "not available")
+    elif bool(eps_range_limited):
+        detail = f"Observed range_limited=true (diag_delta_f1={eps_diag_delta_f1}, threshold>={eps_range_limited_delta_f1:.4f})"
+        add_check(
+            "eps_range_limited",
+            False,
+            detail,
+            severity=eps_range_limited_severity,
+        )
+    else:
+        add_check("eps_range_limited", True, "Observed range_limited=false")
 
     # If LSPO metrics are present, apply loose stage-aware sanity bounds.
     lspo_f1 = stage_metrics.get("lspo_pairwise_f1")

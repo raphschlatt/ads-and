@@ -76,6 +76,8 @@ def test_cache_doctor_and_purge_stale_subsets(tmp_path: Path, capsys):
     args.func(args)
     doctor_payload = json.loads(capsys.readouterr().out)
     assert doctor_payload["counts"]["stale_subsets"] >= 1
+    assert "legacy_pair_scores_detected" in doctor_payload
+    assert "promotable_legacy_hits" in doctor_payload
 
     args = parser.parse_args(
         ["cache", "purge", "--paths-config", str(paths_cfg), "--target", "stale-subsets"]
@@ -145,3 +147,69 @@ def test_cache_doctor_and_purge_redundant_run_copies(tmp_path: Path, capsys):
     except Exception:
         samefile = False
     assert samefile or hash_file(run_path) == hash_file(shared_path)
+
+
+def test_cache_doctor_and_purge_legacy_pair_scores_unused(tmp_path: Path, capsys):
+    paths_cfg = _paths_cfg(tmp_path)
+    pair_scores_dir = tmp_path / "data/cache/_shared/pair_scores"
+    pair_scores_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_used = pair_scores_dir / "ads_pair_scores_deadbeef.parquet"
+    legacy_unused = pair_scores_dir / "ads_pair_scores_unused.parquet"
+    modern_v2 = pair_scores_dir / "ads_pair_scores_v2_abcd1234.parquet"
+
+    sample = pd.DataFrame(
+        [
+            {
+                "pair_id": "p1",
+                "mention_id_1": "m1",
+                "mention_id_2": "m2",
+                "block_key": "b",
+                "cosine_sim": 0.8,
+                "distance": 0.2,
+            }
+        ]
+    )
+    sample.to_parquet(legacy_used, index=False)
+    sample.to_parquet(legacy_unused, index=False)
+    sample.to_parquet(modern_v2, index=False)
+
+    refs_path = tmp_path / "artifacts/metrics/smoke_run_2/00_cache_refs.json"
+    refs_path.parent.mkdir(parents=True, exist_ok=True)
+    refs_path.write_text(
+        json.dumps(
+            {
+                "run_id": "smoke_run_2",
+                "cache_refs": [
+                    {
+                        "artifact_type": "pair_scores",
+                        "artifact_id": "deadbeef",
+                        "shared_path": str(legacy_used),
+                        "run_path": str(tmp_path / "artifacts/pair_scores/smoke_run_2/ads_pair_scores_smoke.parquet"),
+                        "materialization_mode": "copy",
+                        "cache_schema_version": "v1",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    parser = cli.build_parser()
+    args = parser.parse_args(["cache", "doctor", "--paths-config", str(paths_cfg)])
+    args.func(args)
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert doctor_payload["counts"]["legacy_pair_scores_detected"] == 2
+    assert doctor_payload["counts"]["promotable_legacy_hits"] == 1
+
+    args = parser.parse_args(
+        ["cache", "purge", "--paths-config", str(paths_cfg), "--target", "legacy-pair-scores-unused", "--yes"]
+    )
+    args.func(args)
+    purge_payload = json.loads(capsys.readouterr().out)
+    assert purge_payload["candidate_count"] == 1
+    assert purge_payload["purged_count"] == 1
+    assert legacy_used.exists()
+    assert not legacy_unused.exists()
+    assert modern_v2.exists()

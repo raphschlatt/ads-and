@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Any
 import warnings
@@ -44,6 +45,36 @@ def _resolve_device(torch, device: str) -> str:
         return "cpu"
 
 
+def _resolve_effective_precision_mode(torch, precision_mode: str, device: str) -> str:
+    mode = str(precision_mode or "fp32").strip().lower()
+    if mode not in {"fp32", "amp_bf16"}:
+        warnings.warn(f"Unknown precision_mode={precision_mode!r}; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    if mode == "fp32":
+        return "fp32"
+    if not str(device).startswith("cuda"):
+        warnings.warn("precision_mode=amp_bf16 requested on non-CUDA device; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    is_supported = True
+    try:
+        if hasattr(torch.cuda, "is_bf16_supported"):
+            is_supported = bool(torch.cuda.is_bf16_supported())
+    except Exception:
+        is_supported = False
+    if not is_supported:
+        warnings.warn("CUDA BF16 is not supported in this environment; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    return "amp_bf16"
+
+
+def _autocast_context(torch, precision_mode: str):
+    if str(precision_mode) == "amp_bf16":
+        if hasattr(torch, "autocast"):
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
+    return nullcontext()
+
+
 def load_checkpoint(checkpoint_path: str | Path, device: str = "auto") -> Dict[str, Any]:
     torch = _require_torch()
     # Load on CPU first to avoid hard failures during CUDA deserialization.
@@ -59,6 +90,7 @@ def score_pairs_with_checkpoint(
     output_path: str | Path | None = None,
     batch_size: int = 8192,
     device: str = "auto",
+    precision_mode: str = "fp32",
     show_progress: bool = False,
 ) -> pd.DataFrame:
     torch = _require_torch()
@@ -81,6 +113,7 @@ def score_pairs_with_checkpoint(
         else:
             raise
     model.eval()
+    effective_precision_mode = _resolve_effective_precision_mode(torch=torch, precision_mode=precision_mode, device=device)
 
     features = build_feature_matrix(chars2vec=chars2vec, text_emb=text_emb)
     mindex = _build_mention_index(mentions)
@@ -109,9 +142,10 @@ def score_pairs_with_checkpoint(
             end = min(start + batch_size, len(p))
             x1 = torch.from_numpy(features[idx1[start:end]]).to(device)
             x2 = torch.from_numpy(features[idx2[start:end]]).to(device)
-            z1 = model(x1)
-            z2 = model(x2)
-            s = torch.nn.functional.cosine_similarity(z1, z2, dim=1)
+            with _autocast_context(torch, effective_precision_mode):
+                z1 = model(x1)
+                z2 = model(x2)
+                s = torch.nn.functional.cosine_similarity(z1, z2, dim=1)
             sims.append(s.detach().cpu().numpy())
 
     sim_arr = np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)

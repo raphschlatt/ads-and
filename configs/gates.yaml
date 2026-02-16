@@ -12,6 +12,8 @@ defaults:
     degraded_severity: warning
   eps_policy:
     boundary_hit_severity: warning
+    range_limited_delta_f1: 0.005
+    range_limited_severity: warning
 
 stages:
   smoke:
@@ -20,12 +22,14 @@ stages:
     min_neg_test: 20
     cluster_quality_severity: warning
     split_balance_degraded_severity: warning
+    eps_range_limited_severity: warning
   mini:
     f1_min: 0.88
     min_neg_val: 50
     min_neg_test: 50
     cluster_quality_severity: warning
     split_balance_degraded_severity: warning
+    eps_range_limited_severity: warning
   mid:
     f1_min: 0.90
     min_neg_val: 200
@@ -34,6 +38,7 @@ stages:
     split_balance_degraded_severity: blocker
     lspo_block_size_p95_min: 2
     lspo_pairs_min: 50000
+    eps_range_limited_severity: blocker
   full:
     f1_min: 0.90
     min_neg_val: 500
@@ -42,3 +47,4 @@ stages:
     split_balance_degraded_severity: blocker
     lspo_block_size_p95_min: 2
     lspo_pairs_min: 300000
+    eps_range_limited_severity: blocker

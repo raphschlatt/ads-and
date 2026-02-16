@@ -12,6 +12,7 @@ def test_run_stage_parser_defaults():
     assert args.quiet_libs is True
     assert args.seeds is None
     assert args.device == "auto"
+    assert args.precision_mode is None
     assert args.score_batch_size == 8192
     assert args.func is cli.cmd_run_stage
 
@@ -67,3 +68,25 @@ def test_embeddings_parser_quiet_libs_flags():
         ]
     )
     assert args_verbose.quiet_libs is False
+
+
+def test_score_parser_precision_default():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "score",
+            "--mentions",
+            "m.parquet",
+            "--pairs",
+            "p.parquet",
+            "--chars",
+            "c.npy",
+            "--text",
+            "t.npy",
+            "--checkpoint",
+            "ckpt.pt",
+            "--output",
+            "scores.parquet",
+        ]
+    )
+    assert args.precision_mode == "fp32"

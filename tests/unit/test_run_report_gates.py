@@ -21,6 +21,8 @@ def _base_metrics():
         "singleton_ratio": 0.10,
         "split_high_sim_rate_probe": 0.05,
         "eps_boundary_hit": False,
+        "eps_range_limited": False,
+        "eps_diag_delta_f1": 0.0,
         "lspo_block_size_p95": 3.5,
         "lspo_pairs": 1000,
         "max_possible_neg_total": 1000,
@@ -44,6 +46,8 @@ def _gate_cfg():
             },
             "eps_policy": {
                 "boundary_hit_severity": "warning",
+                "range_limited_delta_f1": 0.005,
+                "range_limited_severity": "warning",
             },
         },
         "stages": {
@@ -53,6 +57,7 @@ def _gate_cfg():
                 "min_neg_test": 0,
                 "cluster_quality_severity": "warning",
                 "split_balance_degraded_severity": "warning",
+                "eps_range_limited_severity": "warning",
             },
             "mid": {
                 "f1_min": 0.80,
@@ -62,6 +67,7 @@ def _gate_cfg():
                 "split_balance_degraded_severity": "blocker",
                 "lspo_block_size_p95_min": 2.0,
                 "lspo_pairs_min": 500,
+                "eps_range_limited_severity": "blocker",
             },
         },
     }
@@ -122,6 +128,27 @@ def test_go_no_go_eps_boundary_is_warning():
     go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
     assert go["go"] is True
     assert "eps_boundary_hit" in go["warnings"]
+
+
+def test_go_no_go_eps_range_limited_is_warning_on_smoke():
+    metrics = _base_metrics()
+    metrics["eps_range_limited"] = True
+    metrics["eps_diag_delta_f1"] = 0.02
+
+    go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
+    assert go["go"] is True
+    assert "eps_range_limited" in go["warnings"]
+
+
+def test_go_no_go_eps_range_limited_is_blocker_on_mid():
+    metrics = _base_metrics()
+    metrics["stage"] = "mid"
+    metrics["eps_range_limited"] = True
+    metrics["eps_diag_delta_f1"] = 0.02
+
+    go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
+    assert go["go"] is False
+    assert "eps_range_limited" in go["blockers"]
 
 
 def test_go_no_go_blocks_when_split_feasibility_fails():

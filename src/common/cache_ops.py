@@ -40,6 +40,59 @@ def hash_file(path: str | Path, length: int = 12) -> str:
     return h.hexdigest()[: int(length)]
 
 
+def hash_checkpoint_model_state(
+    checkpoint_path: str | Path,
+    *,
+    score_pipeline_version: str = "v2",
+    length: int = 12,
+) -> str:
+    """Build a run-id-invariant hash from checkpoint model contents.
+
+    Hash payload:
+    - score pipeline version marker
+    - serialized model config
+    - ordered state_dict tensors (name, shape, dtype, bytes)
+    """
+    try:
+        import numpy as np
+        import torch
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Torch and NumPy are required to hash checkpoint model state.") from exc
+
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    state = ckpt.get("state_dict")
+    if not isinstance(state, Mapping):
+        raise ValueError(f"Checkpoint missing 'state_dict': {checkpoint_path}")
+
+    model_cfg = ckpt.get("model_config", {})
+    cfg_blob = json.dumps(model_cfg, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    h = hashlib.sha1()
+    h.update(str(score_pipeline_version).encode("utf-8"))
+    h.update(b"|")
+    h.update(cfg_blob)
+
+    for key in sorted(state.keys()):
+        value = state[key]
+        if hasattr(value, "detach"):
+            arr = value.detach().cpu().numpy()
+        else:
+            arr = np.asarray(value)
+        if not isinstance(arr, np.ndarray):
+            arr = np.asarray(arr)
+        arr = np.ascontiguousarray(arr)
+        h.update(b"|")
+        h.update(str(key).encode("utf-8"))
+        h.update(b"|")
+        h.update(str(arr.dtype).encode("utf-8"))
+        h.update(b"|")
+        h.update(str(tuple(arr.shape)).encode("utf-8"))
+        h.update(b"|")
+        h.update(arr.tobytes(order="C"))
+
+    return h.hexdigest()[: int(length)]
+
+
 def _remove_existing(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()

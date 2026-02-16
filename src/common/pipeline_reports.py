@@ -296,6 +296,7 @@ def build_stage_metrics(
         "threshold": train_manifest.get("best_threshold"),
         "threshold_selection_status": train_manifest.get("best_threshold_selection_status", "unknown"),
         "threshold_source": train_manifest.get("best_threshold_source", "unknown"),
+        "precision_mode": train_manifest.get("precision_mode", "fp32"),
         "val_class_counts": train_manifest.get("best_val_class_counts", {}),
         "test_class_counts": train_manifest.get("best_test_class_counts", {}),
         "subset_cache_key": subset_cache_key,
@@ -314,6 +315,9 @@ def build_stage_metrics(
         "eps_boundary_side": eps_meta.get("boundary_side"),
         "eps_n_valid_candidates": eps_meta.get("n_valid_candidates"),
         "eps_f1_gap_best_second": _optional_float(eps_meta.get("f1_gap_best_second")),
+        "eps_diag_ran": bool(eps_meta.get("boundary_diagnostic_run")) if "boundary_diagnostic_run" in eps_meta else None,
+        "eps_range_limited": bool(eps_meta.get("range_limited")) if "range_limited" in eps_meta else None,
+        "eps_diag_delta_f1": _optional_float(eps_meta.get("diag_best_minus_canonical_f1")),
         "counts": {
             "lspo_mentions": int(len(lspo_mentions)),
             "ads_mentions": int(len(ads_mentions)),

@@ -47,8 +47,10 @@ def test_train_manifest_contains_new_threshold_and_class_fields(tmp_path: Path, 
     assert manifest["best_test_class_counts"]["neg"] == 11
     assert manifest["best_test_f1"] == 0.79
     assert manifest["best_test_metrics"]["precision"] == 0.8
+    assert manifest["precision_mode"] == "fp32"
 
     assert manifest_path.exists()
     on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert on_disk["best_threshold_selection_status"] == "ok"
     assert on_disk["best_test_f1"] == 0.79
+    assert on_disk["precision_mode"] == "fp32"

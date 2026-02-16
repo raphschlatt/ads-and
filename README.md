@@ -12,6 +12,7 @@ Default methodology is paper-fair:
 - Pair building excludes same-`bibcode` mention pairs.
 - Train loss uses positives and explicit negatives (`InfoNCE + negative margin`).
 - DBSCAN `eps` defaults to validation sweep (`0.20..0.50`), not threshold coupling.
+- If sweep hits a boundary, an audit-only diagnostic sweep (`0.55..0.70`) is logged as `range_limited` evidence.
 - Stage metric `lspo_pairwise_f1` is canonical test-F1 (val-F1 still reported separately).
 
 ## Notebook Calling Layer
@@ -93,8 +94,10 @@ python3 -m src.cli run-stage \
 - Split assignment defaults are explicit via `split_assignment` in `configs/runs/*.yaml`.
 - Pair-building defaults are explicit via `pair_building` in `configs/runs/*.yaml`.
 - DBSCAN defaults use `eps_mode: val_sweep` with sweep range in `configs/clustering/dbscan_paper.yaml`.
+- `precision_mode` can be set to `fp32` (default) or `amp_bf16` for non-canonical speed profiles.
 - Metrics and reports are written to `artifacts/metrics/<run_id>/` (`05_*` and optional `99_compare_to_baseline.json`).
 - `05_go_no_go_<stage>.json` now separates hard `blockers` from non-blocking `warnings`.
+- Cache tooling: `python3 -m src.cli cache doctor` and targeted purge via `cache purge --target ...`.
 
 ## Environment
 

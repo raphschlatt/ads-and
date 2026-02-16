@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import warnings
 from pathlib import Path
@@ -36,6 +37,36 @@ def _resolve_device(torch, device: str) -> str:
             RuntimeWarning,
         )
         return "cpu"
+
+
+def _resolve_effective_precision_mode(torch, precision_mode: str, device: str) -> str:
+    mode = str(precision_mode or "fp32").strip().lower()
+    if mode not in {"fp32", "amp_bf16"}:
+        warnings.warn(f"Unknown precision_mode={precision_mode!r}; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    if mode == "fp32":
+        return "fp32"
+    if not str(device).startswith("cuda"):
+        warnings.warn("precision_mode=amp_bf16 requested on non-CUDA device; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    is_supported = True
+    try:
+        if hasattr(torch.cuda, "is_bf16_supported"):
+            is_supported = bool(torch.cuda.is_bf16_supported())
+    except Exception:
+        is_supported = False
+    if not is_supported:
+        warnings.warn("CUDA BF16 is not supported in this environment; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    return "amp_bf16"
+
+
+def _autocast_context(torch, precision_mode: str):
+    if str(precision_mode) == "amp_bf16":
+        if hasattr(torch, "autocast"):
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
+    return nullcontext()
 
 
 def build_feature_matrix(chars2vec: np.ndarray, text_emb: np.ndarray) -> np.ndarray:
@@ -161,6 +192,7 @@ def _score_pairs(
     pair_idx_1: np.ndarray,
     pair_idx_2: np.ndarray,
     batch_size: int = 8192,
+    precision_mode: str = "fp32",
     show_progress: bool = False,
 ) -> np.ndarray:
     torch, _, _ = _require_torch()
@@ -185,9 +217,10 @@ def _score_pairs(
             i2 = pair_idx_2[start:end]
             x1 = torch.from_numpy(features[i1]).to(device)
             x2 = torch.from_numpy(features[i2]).to(device)
-            z1 = model(x1)
-            z2 = model(x2)
-            s = torch.nn.functional.cosine_similarity(z1, z2, dim=1)
+            with _autocast_context(torch, precision_mode):
+                z1 = model(x1)
+                z2 = model(x2)
+                s = torch.nn.functional.cosine_similarity(z1, z2, dim=1)
             sims.append(s.detach().cpu().numpy())
 
     return np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)
@@ -203,6 +236,7 @@ def train_nand_seed(
     run_id: str,
     output_dir: str | Path,
     device: str = "auto",
+    precision_mode: str = "fp32",
     show_progress: bool = False,
 ) -> Dict[str, Any]:
     torch, DataLoader, TensorDataset = _require_torch()
@@ -262,6 +296,12 @@ def train_nand_seed(
         else:
             raise
 
+    effective_precision_mode = _resolve_effective_precision_mode(
+        torch=torch,
+        precision_mode=precision_mode or str(model_config.get("precision_mode", "fp32")),
+        device=device,
+    )
+
     opt = torch.optim.Adam(model.parameters(), lr=float(model_config.get("learning_rate", 1e-5)))
     max_epochs = int(model_config.get("max_epochs", 250))
     patience = int(model_config.get("early_stopping_patience", 25))
@@ -297,18 +337,19 @@ def train_nand_seed(
             x2 = torch.from_numpy(features[b_i2]).to(device)
             y = b_y.to(device)
 
-            z1 = model(x1)
-            z2 = model(x2)
-            loss, _ = _combined_pair_loss(
-                torch=torch,
-                z1=z1,
-                z2=z2,
-                labels=y,
-                temperature=temperature,
-                infonce_weight=infonce_weight,
-                negative_loss_weight=negative_loss_weight,
-                negative_margin=negative_margin,
-            )
+            with _autocast_context(torch, effective_precision_mode):
+                z1 = model(x1)
+                z2 = model(x2)
+                loss, _ = _combined_pair_loss(
+                    torch=torch,
+                    z1=z1,
+                    z2=z2,
+                    labels=y,
+                    temperature=temperature,
+                    infonce_weight=infonce_weight,
+                    negative_loss_weight=negative_loss_weight,
+                    negative_margin=negative_margin,
+                )
 
             opt.zero_grad()
             loss.backward()
@@ -329,18 +370,19 @@ def train_nand_seed(
                     x1 = torch.from_numpy(features[v_i1[start:end]]).to(device)
                     x2 = torch.from_numpy(features[v_i2[start:end]]).to(device)
                     y = torch.from_numpy(v_y[start:end].astype(np.int64)).to(device)
-                    z1 = model(x1)
-                    z2 = model(x2)
-                    vloss, _ = _combined_pair_loss(
-                        torch=torch,
-                        z1=z1,
-                        z2=z2,
-                        labels=y,
-                        temperature=temperature,
-                        infonce_weight=infonce_weight,
-                        negative_loss_weight=negative_loss_weight,
-                        negative_margin=negative_margin,
-                    )
+                    with _autocast_context(torch, effective_precision_mode):
+                        z1 = model(x1)
+                        z2 = model(x2)
+                        vloss, _ = _combined_pair_loss(
+                            torch=torch,
+                            z1=z1,
+                            z2=z2,
+                            labels=y,
+                            temperature=temperature,
+                            infonce_weight=infonce_weight,
+                            negative_loss_weight=negative_loss_weight,
+                            negative_margin=negative_margin,
+                        )
                     v_losses.append(float(vloss.detach().cpu().item()))
 
         val_loss = float(np.mean(v_losses)) if v_losses else train_loss
@@ -366,7 +408,14 @@ def train_nand_seed(
         threshold_selection_status = "fallback_no_labels"
         threshold_source = "fallback_default"
     else:
-        val_sim = _score_pairs(model, features, val_i1, val_i2, show_progress=show_progress)
+        val_sim = _score_pairs(
+            model,
+            features,
+            val_i1,
+            val_i2,
+            precision_mode=effective_precision_mode,
+            show_progress=show_progress,
+        )
         threshold, val_stats, threshold_selection_status, threshold_source = _compute_best_threshold(
             val_sim,
             val_y,
@@ -375,7 +424,14 @@ def train_nand_seed(
 
     test_metrics = {"f1": None, "precision": None, "recall": None, "accuracy": None}
     if len(test_i1) > 0:
-        test_sim = _score_pairs(model, features, test_i1, test_i2, show_progress=show_progress)
+        test_sim = _score_pairs(
+            model,
+            features,
+            test_i1,
+            test_i2,
+            precision_mode=effective_precision_mode,
+            show_progress=show_progress,
+        )
         pred = (test_sim >= threshold).astype(int)
         test_metrics = {
             "f1": float(f1_score(test_y, pred, zero_division=0)),
@@ -399,6 +455,7 @@ def train_nand_seed(
         "train_class_counts": train_class_counts,
         "seed": int(seed),
         "run_id": run_id,
+        "precision_mode": effective_precision_mode,
         "val_stats": val_stats,
         "test_metrics": test_metrics,
         "train_loss_history": train_history,
@@ -415,6 +472,7 @@ def train_nand_seed(
         "train_class_counts": train_class_counts,
         "val_class_counts": val_class_counts,
         "test_class_counts": test_class_counts,
+        "precision_mode": effective_precision_mode,
         "val_stats": val_stats,
         "test_metrics": test_metrics,
     }
@@ -431,6 +489,7 @@ def train_nand_across_seeds(
     output_dir: str | Path,
     metrics_output: str | Path | None = None,
     device: str = "auto",
+    precision_mode: str = "fp32",
     show_progress: bool = False,
 ) -> Dict[str, Any]:
     runs = []
@@ -454,6 +513,7 @@ def train_nand_across_seeds(
             run_id=run_id,
             output_dir=output_dir,
             device=device,
+            precision_mode=precision_mode,
             show_progress=show_progress,
         )
         runs.append(result)
@@ -473,6 +533,7 @@ def train_nand_across_seeds(
         "best_test_f1": (best.get("test_metrics") or {}).get("f1"),
         "best_test_metrics": best.get("test_metrics"),
         "best_val_f1": best["val_stats"].get("f1"),
+        "precision_mode": best.get("precision_mode", str(precision_mode or "fp32")),
     }
 
     if metrics_output is not None:
