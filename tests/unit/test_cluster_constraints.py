@@ -58,6 +58,30 @@ def test_hard_constraints_force_distance_to_one():
     assert np.isclose(out[1, 0], 1.0)
 
 
+def test_name_conflict_can_be_hard_while_year_gap_remains_soft():
+    dist = np.array([[0.0, 0.2], [0.2, 0.0]], dtype=np.float32)
+    block_mentions = pd.DataFrame(
+        [
+            {"author_raw": "Smith, John", "year": 1990},
+            {"author_raw": "Smith, Jane", "year": 2025},
+        ]
+    )
+    constraints = {
+        "enabled": True,
+        "constraint_mode": "soft",  # legacy default
+        "name_conflict_mode": "hard",
+        "year_gap_mode": "soft",
+        "max_year_gap": 20,
+        "enforce_name_conflict": True,
+        "name_conflict_min_distance": 0.75,
+        "year_gap_min_distance": 0.65,
+    }
+
+    out = _apply_constraints(dist, block_mentions, constraints)
+    assert np.isclose(out[0, 1], 1.0)
+    assert np.isclose(out[1, 0], 1.0)
+
+
 def test_resolve_dbscan_eps_from_threshold_is_clamped():
     cfg = {
         "eps_mode": "from_threshold",
@@ -72,6 +96,26 @@ def test_resolve_dbscan_eps_from_threshold_is_clamped():
     eps2, meta2 = resolve_dbscan_eps(cfg, cosine_threshold=0.05)
     assert eps2 == 0.85
     assert meta2["source"] == "from_threshold"
+
+
+def test_resolve_dbscan_eps_val_sweep_prefers_selected_then_fallback():
+    cfg = {
+        "eps_mode": "val_sweep",
+        "eps": 0.35,
+        "eps_fallback": 0.31,
+        "eps_min": 0.15,
+        "eps_max": 0.85,
+        "selected_eps": 0.27,
+    }
+    eps, meta = resolve_dbscan_eps(cfg, cosine_threshold=0.1)
+    assert np.isclose(eps, 0.27)
+    assert meta["source"] == "val_sweep_selected"
+
+    cfg2 = dict(cfg)
+    cfg2.pop("selected_eps")
+    eps2, meta2 = resolve_dbscan_eps(cfg2, cosine_threshold=0.1)
+    assert np.isclose(eps2, 0.31)
+    assert meta2["source"] == "val_sweep_fallback"
 
 
 def test_cluster_blockwise_dbscan_sanitizes_invalid_precomputed_values():

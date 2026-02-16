@@ -142,6 +142,8 @@ def _apply_constraints(dist: np.ndarray, block_mentions: pd.DataFrame, constrain
     max_year_gap = int(constraints.get("max_year_gap", 30))
     enforce_name_conflict = bool(constraints.get("enforce_name_conflict", True))
     constraint_mode = str(constraints.get("constraint_mode", "soft")).lower()
+    name_conflict_mode = str(constraints.get("name_conflict_mode", constraint_mode)).lower()
+    year_gap_mode = str(constraints.get("year_gap_mode", constraint_mode)).lower()
     name_conflict_min_distance = float(constraints.get("name_conflict_min_distance", 1.0))
     year_gap_min_distance = float(constraints.get("year_gap_min_distance", 1.0))
 
@@ -163,7 +165,8 @@ def _apply_constraints(dist: np.ndarray, block_mentions: pd.DataFrame, constrain
             if not (force_name or force_year):
                 continue
 
-            if constraint_mode == "hard":
+            force_hard = (force_name and name_conflict_mode == "hard") or (force_year and year_gap_mode == "hard")
+            if force_hard:
                 out[i, j] = 1.0
                 out[j, i] = 1.0
                 continue
@@ -182,12 +185,20 @@ def _apply_constraints(dist: np.ndarray, block_mentions: pd.DataFrame, constrain
 def resolve_dbscan_eps(cluster_config: Dict[str, Any], cosine_threshold: float | None = None) -> tuple[float, Dict[str, Any]]:
     eps_mode = str(cluster_config.get("eps_mode", "fixed")).lower()
     fixed_eps = float(cluster_config.get("eps", 0.35))
+    eps_fallback = float(cluster_config.get("eps_fallback", fixed_eps))
     eps_min = float(cluster_config.get("eps_min", 0.0))
     eps_max = float(cluster_config.get("eps_max", 1.0))
+    selected_eps = cluster_config.get("selected_eps")
 
     if eps_mode == "from_threshold" and cosine_threshold is not None:
         raw_eps = 1.0 - float(cosine_threshold)
         source = "from_threshold"
+    elif eps_mode == "val_sweep" and selected_eps is not None:
+        raw_eps = float(selected_eps)
+        source = "val_sweep_selected"
+    elif eps_mode == "val_sweep":
+        raw_eps = eps_fallback
+        source = "val_sweep_fallback"
     else:
         raw_eps = fixed_eps
         source = "fixed"
@@ -198,6 +209,11 @@ def resolve_dbscan_eps(cluster_config: Dict[str, Any], cosine_threshold: float |
         "source": source,
         "cosine_threshold": cosine_threshold,
         "raw_eps": float(raw_eps),
+        "selected_eps": None if selected_eps is None else float(selected_eps),
+        "eps_fallback": float(eps_fallback),
+        "eps_sweep_min": cluster_config.get("eps_sweep_min"),
+        "eps_sweep_max": cluster_config.get("eps_sweep_max"),
+        "eps_sweep_step": cluster_config.get("eps_sweep_step"),
         "eps_min": eps_min,
         "eps_max": eps_max,
         "resolved_eps": resolved,

@@ -97,3 +97,21 @@ def test_subset_sampling_parameter_changes_selection_shape():
     # Same target size but different block allocation profile.
     assert len(s_mean2) == len(s_mean4) == target
     assert s_mean2["mention_id"].tolist() != s_mean4["mention_id"].tolist()
+
+
+def test_pair_rich_allocation_applies_when_target_exceeds_block_count():
+    counts = pd.Series(
+        np.full(240, 8, dtype=int),
+        index=[f"a.block{i}" for i in range(240)],
+    )
+    target = 300  # target > block count
+    quotas = _allocate_block_quotas(
+        counts=counts,
+        target=target,
+        seed=11,
+        target_mean_block_size=4,
+    )
+
+    assert int(quotas.sum()) == target
+    assert int((quotas >= 2).sum()) >= 70
+    assert float(quotas.quantile(0.95)) >= 2.0

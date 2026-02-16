@@ -105,6 +105,8 @@ def build_pairs_qc(
     lspo_pairs: pd.DataFrame,
     ads_pairs: pd.DataFrame,
     split_meta: Mapping[str, Any],
+    lspo_pair_build_meta: Mapping[str, Any] | None = None,
+    ads_pair_build_meta: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "orcid_leakage_groups": _orcid_leakage_groups(lspo_mentions),
@@ -112,6 +114,8 @@ def build_pairs_qc(
         "ads_pairs": int(len(ads_pairs)),
         "split_label_counts": summarize_split_labels(lspo_pairs),
         "split_balance": dict(split_meta),
+        "lspo_pair_build": dict(lspo_pair_build_meta or {}),
+        "ads_pair_build": dict(ads_pair_build_meta or {}),
     }
 
 
@@ -207,8 +211,14 @@ def build_stage_metrics(
         else 0.0
     )
 
-    lspo_pairwise_f1 = train_manifest.get("best_val_f1")
+    lspo_pairwise_f1 = train_manifest.get("best_test_f1")
+    lspo_pairwise_f1_source = "best_test_f1"
+    if lspo_pairwise_f1 is None:
+        lspo_pairwise_f1 = train_manifest.get("best_val_f1")
+        lspo_pairwise_f1_source = "best_val_f1_legacy"
     lspo_pairwise_f1 = float(lspo_pairwise_f1) if lspo_pairwise_f1 is not None else None
+    lspo_pairwise_f1_val = train_manifest.get("best_val_f1")
+    lspo_pairwise_f1_val = float(lspo_pairwise_f1_val) if lspo_pairwise_f1_val is not None else None
 
     return {
         "run_id": str(run_id),
@@ -220,6 +230,8 @@ def build_stage_metrics(
         "mention_coverage": float(mention_coverage),
         "run_id_consistent": _run_id_consistent(run_id, consistency_files),
         "lspo_pairwise_f1": lspo_pairwise_f1,
+        "lspo_pairwise_f1_source": lspo_pairwise_f1_source,
+        "lspo_pairwise_f1_val": lspo_pairwise_f1_val,
         "threshold": train_manifest.get("best_threshold"),
         "threshold_selection_status": train_manifest.get("best_threshold_selection_status", "unknown"),
         "threshold_source": train_manifest.get("best_threshold_source", "unknown"),
@@ -267,6 +279,8 @@ def write_compare_to_baseline(
         "test_neg_current": int(((current_counts.get("test") or {}).get("neg", 0))),
         "f1_baseline": (baseline_stage or {}).get("lspo_pairwise_f1"),
         "f1_current": current_stage.get("lspo_pairwise_f1"),
+        "f1_val_baseline": (baseline_stage or {}).get("lspo_pairwise_f1_val"),
+        "f1_val_current": current_stage.get("lspo_pairwise_f1_val"),
         "go_baseline": (baseline_go or {}).get("go"),
         "go_current": current_go.get("go"),
         "blockers_current": current_go.get("blockers", []),

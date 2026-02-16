@@ -65,58 +65,49 @@ def _allocate_block_quotas(
 
     quotas = pd.Series(0, index=counts.index, dtype=int)
 
-    if target >= n_blocks:
-        quotas[:] = 1
-        remaining = target - n_blocks
-        if remaining > 0:
-            weights = counts.astype(float)
-            weights = weights / weights.sum()
-            extra = rng.multinomial(remaining, weights.values)
-            quotas += pd.Series(extra, index=counts.index)
+    pairable = counts[counts >= 2]
+    if len(pairable) == 0:
+        # Degenerate fallback: no pairable blocks available.
+        weights = counts.astype(float)
+        weights = weights / weights.sum()
+        extra = rng.multinomial(min(int(target), int(counts.sum())), weights.values)
+        quotas += pd.Series(extra, index=counts.index)
     else:
-        pairable = counts[counts >= 2]
-        if len(pairable) == 0:
-            # Degenerate fallback: no pairable blocks available.
-            weights = counts.astype(float)
-            weights = weights / weights.sum()
-            extra = rng.multinomial(target, weights.values)
-            quotas += pd.Series(extra, index=counts.index)
+        mean_block_size = max(2.0, float(target_mean_block_size))
+        n_selected_blocks = int(round(target / mean_block_size))
+        n_selected_blocks = max(1, min(n_selected_blocks, len(pairable)))
+
+        pairable_idx = pairable.index.to_numpy()
+        if len(pairable_idx) == n_selected_blocks:
+            selected_idx = pairable_idx
         else:
-            mean_block_size = max(2.0, float(target_mean_block_size))
-            n_selected_blocks = int(round(target / mean_block_size))
-            n_selected_blocks = max(1, min(n_selected_blocks, len(pairable)))
+            weights = pairable.astype(float)
+            weights = weights / weights.sum()
+            selected_idx = rng.choice(pairable_idx, size=n_selected_blocks, replace=False, p=weights.values)
+        selected_set = set(selected_idx.tolist())
 
-            pairable_idx = pairable.index.to_numpy()
-            if len(pairable_idx) == n_selected_blocks:
-                selected_idx = pairable_idx
-            else:
-                weights = pairable.astype(float)
-                weights = weights / weights.sum()
-                selected_idx = rng.choice(pairable_idx, size=n_selected_blocks, replace=False, p=weights.values)
-            selected_set = set(selected_idx.tolist())
+        selected_sorted = [idx for idx in counts.index if idx in selected_set]
+        quotas.loc[selected_sorted] = 2
 
-            selected_sorted = [idx for idx in counts.index if idx in selected_set]
-            quotas.loc[selected_sorted] = 2
-
+        remaining = target - int(quotas.sum())
+        if remaining > 0:
+            selected_headroom = (counts.loc[selected_sorted] - quotas.loc[selected_sorted]).clip(lower=0).astype(int)
+            add_selected = _distribute_with_capacity(selected_headroom, remaining, rng=rng)
+            quotas.loc[selected_sorted] += add_selected
             remaining = target - int(quotas.sum())
-            if remaining > 0:
-                selected_headroom = (counts.loc[selected_sorted] - quotas.loc[selected_sorted]).clip(lower=0).astype(int)
-                add_selected = _distribute_with_capacity(selected_headroom, remaining, rng=rng)
-                quotas.loc[selected_sorted] += add_selected
+
+        if remaining > 0:
+            other_sorted = [idx for idx in counts.index if idx not in selected_set]
+            if other_sorted:
+                other_capacity = (counts.loc[other_sorted] - quotas.loc[other_sorted]).clip(lower=0).astype(int)
+                add_others = _distribute_with_capacity(other_capacity, remaining, rng=rng)
+                quotas.loc[other_sorted] += add_others
                 remaining = target - int(quotas.sum())
 
-            if remaining > 0:
-                other_sorted = [idx for idx in counts.index if idx not in selected_set]
-                if other_sorted:
-                    other_capacity = (counts.loc[other_sorted] - quotas.loc[other_sorted]).clip(lower=0).astype(int)
-                    add_others = _distribute_with_capacity(other_capacity, remaining, rng=rng)
-                    quotas.loc[other_sorted] += add_others
-                    remaining = target - int(quotas.sum())
-
-            if remaining > 0:
-                final_capacity = (counts - quotas).clip(lower=0).astype(int)
-                add_final = _distribute_with_capacity(final_capacity, remaining, rng=rng)
-                quotas += add_final
+        if remaining > 0:
+            final_capacity = (counts - quotas).clip(lower=0).astype(int)
+            add_final = _distribute_with_capacity(final_capacity, remaining, rng=rng)
+            quotas += add_final
 
     quotas = quotas.clip(upper=counts).astype(int)
 

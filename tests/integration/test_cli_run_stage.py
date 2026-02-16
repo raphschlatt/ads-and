@@ -61,6 +61,7 @@ def _toy_ads_mentions() -> pd.DataFrame:
 def _make_configs(
     tmp_path: Path,
     split_balance: dict[str, int] | None = None,
+    split_assignment: dict[str, float] | None = None,
     train_seeds: list[int] | None = None,
 ) -> dict[str, Path]:
     paths_cfg = {
@@ -89,6 +90,8 @@ def _make_configs(
         "subset_target_mentions": 6,
         "seed": 11,
         "subset_sampling": {"target_mean_block_size": 4},
+        "split_assignment": split_assignment or {"train_ratio": 0.6, "val_ratio": 0.2},
+        "pair_building": {"exclude_same_bibcode": True},
         "max_pairs_per_block": 100,
         "split_balance": split_balance
         or {
@@ -120,8 +123,12 @@ def _make_configs(
     }
     cluster_cfg = {
         "method": "dbscan",
-        "eps_mode": "from_threshold",
+        "eps_mode": "val_sweep",
         "eps": 0.35,
+        "eps_fallback": 0.35,
+        "eps_sweep_min": 0.2,
+        "eps_sweep_max": 0.5,
+        "eps_sweep_step": 0.1,
         "eps_min": 0.1,
         "eps_max": 0.9,
         "min_samples": 1,
@@ -148,7 +155,7 @@ def _make_configs(
     }
 
 
-def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int] | None = None) -> None:
+def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int | float] | None = None) -> None:
     lspo_df = _toy_lspo_mentions()
     ads_df = _toy_ads_mentions()
 
@@ -187,6 +194,8 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int] | None = None)
     def _assign(
         mentions,
         seed=11,
+        train_ratio=0.6,
+        val_ratio=0.2,
         min_neg_val=0,
         min_neg_test=0,
         max_attempts=1,
@@ -195,6 +204,8 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int] | None = None)
     ):
         if captured_split is not None:
             captured_split["seed"] = int(seed)
+            captured_split["train_ratio"] = float(train_ratio)
+            captured_split["val_ratio"] = float(val_ratio)
             captured_split["min_neg_val"] = int(min_neg_val)
             captured_split["min_neg_test"] = int(min_neg_test)
             captured_split["max_attempts"] = int(max_attempts)
@@ -216,13 +227,17 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int] | None = None)
         }
         return (out, meta) if return_meta else out
 
-    def _pairs(mentions, **_kwargs):
+    def _pairs(mentions, return_meta=False, exclude_same_bibcode=True, **_kwargs):
         rows = []
+        skipped_same_pub = 0
         for block_key, grp in mentions.groupby("block_key", sort=False):
             if len(grp) < 2:
                 continue
             a = grp.iloc[0]
             b = grp.iloc[1]
+            if exclude_same_bibcode and str(a.get("bibcode")) == str(b.get("bibcode")):
+                skipped_same_pub += 1
+                continue
             split = str(a.get("split", "inference"))
             label = None
             if "orcid" in grp.columns:
@@ -239,7 +254,13 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int] | None = None)
                     "label": label,
                 }
             )
-        return pd.DataFrame(rows)
+        out = pd.DataFrame(rows)
+        meta = {
+            "exclude_same_bibcode": bool(exclude_same_bibcode),
+            "same_publication_pairs_skipped": int(skipped_same_pub),
+            "balance_train": bool(_kwargs.get("balance_train", False)),
+        }
+        return (out, meta) if return_meta else out
 
     def _train(
         mentions,
@@ -380,8 +401,9 @@ def test_cli_run_stage_resume_behavior(monkeypatch, tmp_path: Path):
 
 def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path: Path):
     split_cfg = {"min_neg_val": 7, "min_neg_test": 9, "max_attempts": 13}
-    cfg = _make_configs(tmp_path, split_balance=split_cfg)
-    captured: dict[str, int] = {}
+    split_assignment = {"train_ratio": 0.55, "val_ratio": 0.25}
+    cfg = _make_configs(tmp_path, split_balance=split_cfg, split_assignment=split_assignment)
+    captured: dict[str, int | float] = {}
     _apply_fast_mocks(monkeypatch, captured_split=captured)
 
     parser = cli.build_parser()
@@ -390,6 +412,8 @@ def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path:
     assert captured["min_neg_val"] == 7
     assert captured["min_neg_test"] == 9
     assert captured["max_attempts"] == 13
+    assert captured["train_ratio"] == 0.55
+    assert captured["val_ratio"] == 0.25
 
 
 def test_cli_run_stage_uses_train_seeds_from_run_config(monkeypatch, tmp_path: Path):
@@ -408,6 +432,24 @@ def test_cli_run_stage_uses_train_seeds_from_run_config(monkeypatch, tmp_path: P
     _run_stage(parser, cfg, "smoke_test_train_seeds", extra=["--force"])
 
     assert captured["seeds"] == [6, 7]
+
+
+def test_cli_run_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id = "smoke_test_eps_sweep"
+    _run_stage(parser, cfg, run_id, extra=["--force"])
+
+    meta_path = cfg["metrics_dir"] / run_id / "04_clustering_config_used.json"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    eps_meta = payload["eps_resolution"]
+    assert eps_meta["eps_mode"] == "val_sweep"
+    assert eps_meta["sweep_status"] in {"ok", "fallback_no_val_pairs", "fallback_no_valid_candidates"}
+    if eps_meta["sweep_status"] == "ok":
+        assert len(eps_meta["sweep_results"]) >= 1
+        assert 0.2 <= float(payload["cluster_config_used"]["eps"]) <= 0.5
 
 
 def test_cli_run_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path):

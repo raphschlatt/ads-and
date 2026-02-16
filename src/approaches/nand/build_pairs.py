@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from itertools import combinations
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 import numpy as np
 import pandas as pd
@@ -70,8 +70,8 @@ def estimate_split_label_counts(mentions: pd.DataFrame) -> Dict[str, Dict[str, i
 def assign_lspo_splits(
     mentions: pd.DataFrame,
     seed: int = 11,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
+    train_ratio: float = 0.6,
+    val_ratio: float = 0.2,
     min_neg_val: int = 0,
     min_neg_test: int = 0,
     max_attempts: int = 1,
@@ -107,6 +107,58 @@ def assign_lspo_splits(
     max_attempts = max(1, int(max_attempts))
     min_neg_val = max(0, int(min_neg_val))
     min_neg_test = max(0, int(min_neg_test))
+    train_ratio = float(train_ratio)
+    val_ratio = float(val_ratio)
+    if train_ratio <= 0.0 or val_ratio < 0.0 or train_ratio + val_ratio >= 1.0:
+        raise ValueError(
+            f"Invalid split ratios: train_ratio={train_ratio}, val_ratio={val_ratio}. "
+            "Require train_ratio>0, val_ratio>=0, and train_ratio+val_ratio<1."
+        )
+
+    # Structural feasibility check: if the total possible negatives is below the
+    # requested val+test budget, retries cannot satisfy the target.
+    total_counts_input = out.copy()
+    total_counts_input["split"] = "train"
+    total_counts = estimate_split_label_counts(total_counts_input).get("train", {})
+    total_possible_neg = int(total_counts.get("neg", 0))
+    required_neg = int(min_neg_val + min_neg_test)
+
+    if required_neg > 0 and total_possible_neg < required_neg:
+        train_set, val_set, test_set = _split_sets_from_orcid(
+            unique_orcid=unique_orcid,
+            seed=seed,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+        )
+
+        def _split_infeasible(orcid):
+            if pd.isna(orcid) or str(orcid).strip() == "":
+                return "inference"
+            s = str(orcid)
+            if s in train_set:
+                return "train"
+            if s in val_set:
+                return "val"
+            if s in test_set:
+                return "test"
+            return "inference"
+
+        candidate = out.copy()
+        candidate["split"] = candidate["orcid"].map(_split_infeasible)
+        counts = estimate_split_label_counts(candidate)
+        meta = {
+            "status": "split_balance_infeasible",
+            "attempts": 0,
+            "min_neg_val": min_neg_val,
+            "min_neg_test": min_neg_test,
+            "required_neg_total": required_neg,
+            "max_possible_neg_total": total_possible_neg,
+            "train_ratio": train_ratio,
+            "val_ratio": val_ratio,
+            "test_ratio": float(1.0 - train_ratio - val_ratio),
+            "split_label_counts": counts,
+        }
+        return (candidate, meta) if return_meta else candidate
 
     best_df: pd.DataFrame | None = None
     best_counts: Dict[str, Dict[str, int]] | None = None
@@ -166,6 +218,11 @@ def assign_lspo_splits(
         "attempts": attempts_used,
         "min_neg_val": min_neg_val,
         "min_neg_test": min_neg_test,
+        "required_neg_total": required_neg,
+        "max_possible_neg_total": total_possible_neg,
+        "train_ratio": train_ratio,
+        "val_ratio": val_ratio,
+        "test_ratio": float(1.0 - train_ratio - val_ratio),
         "split_label_counts": best_counts,
     }
     return (best_df, meta) if return_meta else best_df
@@ -183,14 +240,17 @@ def build_pairs_within_blocks(
     require_same_split: bool = True,
     labeled_only: bool = False,
     balance_train: bool = True,
+    exclude_same_bibcode: bool = True,
     show_progress: bool = False,
-) -> pd.DataFrame:
+    return_meta: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, Dict[str, Any]]:
     """Build mention pairs inside blocks, optionally with labels (LSPO)."""
     if "split" not in mentions.columns:
         mentions = mentions.copy()
         mentions["split"] = "inference"
 
     rows = []
+    same_publication_pairs_skipped = 0
     rng = np.random.default_rng(seed)
 
     grouped = mentions.groupby("block_key", sort=False)
@@ -217,6 +277,13 @@ def build_pairs_within_blocks(
         for i, j in idx_pairs:
             r1 = block.iloc[i]
             r2 = block.iloc[j]
+
+            if exclude_same_bibcode and "bibcode" in block.columns:
+                b1 = r1.get("bibcode")
+                b2 = r2.get("bibcode")
+                if pd.notna(b1) and pd.notna(b2) and str(b1).strip() and str(b2).strip() and str(b1) == str(b2):
+                    same_publication_pairs_skipped += 1
+                    continue
 
             split1 = str(r1.get("split", "inference"))
             split2 = str(r2.get("split", "inference"))
@@ -248,8 +315,13 @@ def build_pairs_within_blocks(
             )
 
     pairs = pd.DataFrame(rows)
+    meta: Dict[str, Any] = {
+        "exclude_same_bibcode": bool(exclude_same_bibcode),
+        "same_publication_pairs_skipped": int(same_publication_pairs_skipped),
+        "balance_train": bool(balance_train),
+    }
     if len(pairs) == 0:
-        return pairs
+        return (pairs, meta) if return_meta else pairs
 
     if balance_train and "label" in pairs.columns:
         train_mask = (pairs["split"] == "train") & pairs["label"].notna()
@@ -257,16 +329,26 @@ def build_pairs_within_blocks(
         if len(train_df) > 0:
             pos = train_df[train_df["label"] == 1]
             neg = train_df[train_df["label"] == 0]
-            if len(pos) > 0 and len(neg) > 0 and len(neg) > len(pos):
-                neg = neg.sample(n=len(pos), random_state=seed)
+            meta["train_balance_before"] = {"pos": int(len(pos)), "neg": int(len(neg))}
+            if len(pos) > 0 and len(neg) > 0 and len(pos) != len(neg):
+                target_n = min(len(pos), len(neg))
+                if len(pos) > target_n:
+                    pos = pos.sample(n=target_n, random_state=seed)
+                if len(neg) > target_n:
+                    neg = neg.sample(n=target_n, random_state=seed)
                 train_bal = pd.concat([pos, neg], ignore_index=True)
                 non_train = pairs[~train_mask]
                 pairs = pd.concat([non_train, train_bal], ignore_index=True)
+            train_bal_counts = pairs[(pairs["split"] == "train") & pairs["label"].notna()]
+            meta["train_balance_after"] = {
+                "pos": int((train_bal_counts["label"] == 1).sum()),
+                "neg": int((train_bal_counts["label"] == 0).sum()),
+            }
 
     # Required contract columns.
     validate_columns(pairs, PAIR_REQUIRED_COLUMNS, "pairs")
     pairs = pairs.sort_values(["split", "block_key", "mention_id_1", "mention_id_2"]).reset_index(drop=True)
-    return pairs
+    return (pairs, meta) if return_meta else pairs
 
 
 def write_pairs(pairs: pd.DataFrame, output_path: str | Path) -> Path:

@@ -50,3 +50,21 @@ Optional columns:
 - `mention_id` (str)
 - `author_uid` (str)
 - `source_type` (str)
+
+## train_manifest.json (03)
+
+- `best_checkpoint` (str)
+- `best_threshold` (float)
+- `best_val_f1` (float)
+- `best_test_f1` (float, canonical final pairwise metric)
+- `best_test_metrics` (dict: `f1`, `precision`, `recall`, `accuracy`)
+- `best_val_class_counts` (dict: `pos`, `neg`)
+- `best_test_class_counts` (dict: `pos`, `neg`)
+
+## stage_metrics.json (05)
+
+- `lspo_pairwise_f1` (float, canonical test-F1)
+- `lspo_pairwise_f1_val` (float, validation F1 for diagnostics)
+- `lspo_pairwise_f1_source` (`best_test_f1` or legacy fallback source)
+- `threshold` (float)
+- `threshold_selection_status` (str)

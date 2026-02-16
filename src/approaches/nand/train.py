@@ -74,6 +74,34 @@ def _label_class_counts(labels: np.ndarray) -> Dict[str, int]:
     return {"pos": int((labels == 1).sum()), "neg": int((labels == 0).sum())}
 
 
+def _combined_pair_loss(
+    *,
+    torch,
+    z1,
+    z2,
+    labels,
+    temperature: float,
+    infonce_weight: float,
+    negative_loss_weight: float,
+    negative_margin: float,
+):
+    labels = labels.to(z1.device).long()
+    pos_mask = labels == 1
+    neg_mask = labels == 0
+
+    info_loss = torch.zeros((), device=z1.device)
+    neg_loss = torch.zeros((), device=z1.device)
+
+    if bool(pos_mask.any()):
+        info_loss = info_nce_loss(z1[pos_mask], z2[pos_mask], temperature=temperature)
+    if bool(neg_mask.any()):
+        cos_neg = torch.nn.functional.cosine_similarity(z1[neg_mask], z2[neg_mask], dim=1)
+        neg_loss = torch.nn.functional.relu(cos_neg - float(negative_margin)).mean()
+
+    total = float(infonce_weight) * info_loss + float(negative_loss_weight) * neg_loss
+    return total, {"info_nce": info_loss, "neg_margin": neg_loss}
+
+
 def _compute_best_threshold(
     sim: np.ndarray,
     labels: np.ndarray,
@@ -188,20 +216,31 @@ def train_nand_seed(
     features = build_feature_matrix(chars2vec=chars2vec, text_emb=text_emb)
     mindex = _build_index(mentions)
 
-    train_pairs = pairs[(pairs["split"] == "train") & (pairs["label"] == 1)]
+    train_pairs = pairs[(pairs["split"] == "train") & pairs["label"].notna()]
     val_pairs = pairs[(pairs["split"] == "val") & pairs["label"].notna()]
     test_pairs = pairs[(pairs["split"] == "test") & pairs["label"].notna()]
 
-    train_i1, train_i2, _ = _pairs_to_index_arrays(train_pairs, mindex, labeled_only=True)
+    train_i1, train_i2, train_y = _pairs_to_index_arrays(train_pairs, mindex, labeled_only=True)
     val_i1, val_i2, val_y = _pairs_to_index_arrays(val_pairs, mindex, labeled_only=True)
     test_i1, test_i2, test_y = _pairs_to_index_arrays(test_pairs, mindex, labeled_only=True)
+    train_class_counts = _label_class_counts(train_y)
     val_class_counts = _label_class_counts(val_y)
     test_class_counts = _label_class_counts(test_y)
 
-    if len(train_i1) == 0:
+    if train_class_counts["pos"] == 0:
         raise ValueError("No positive train pairs found. Check pair building and split assignment.")
+    require_hard_negatives = bool(model_config.get("require_hard_negatives", True))
+    if require_hard_negatives and train_class_counts["neg"] == 0:
+        raise ValueError(
+            "No negative train pairs found while require_hard_negatives=true. "
+            f"Train class counts: {train_class_counts}"
+        )
 
-    dataset = TensorDataset(torch.from_numpy(train_i1), torch.from_numpy(train_i2))
+    dataset = TensorDataset(
+        torch.from_numpy(train_i1),
+        torch.from_numpy(train_i2),
+        torch.from_numpy(train_y.astype(np.int64)),
+    )
     loader = DataLoader(
         dataset,
         batch_size=int(model_config.get("batch_size", 2048)),
@@ -227,6 +266,9 @@ def train_nand_seed(
     max_epochs = int(model_config.get("max_epochs", 250))
     patience = int(model_config.get("early_stopping_patience", 25))
     temperature = float(model_config.get("temperature", 0.25))
+    infonce_weight = float(model_config.get("infonce_weight", 1.0))
+    negative_loss_weight = float(model_config.get("negative_loss_weight", 1.0))
+    negative_margin = float(model_config.get("negative_margin", 0.65))
 
     best_val_loss = float("inf")
     best_state = None
@@ -248,15 +290,25 @@ def train_nand_seed(
         model.train()
         batch_losses = []
 
-        for b_i1, b_i2 in loader:
+        for b_i1, b_i2, b_y in loader:
             b_i1 = b_i1.numpy()
             b_i2 = b_i2.numpy()
             x1 = torch.from_numpy(features[b_i1]).to(device)
             x2 = torch.from_numpy(features[b_i2]).to(device)
+            y = b_y.to(device)
 
             z1 = model(x1)
             z2 = model(x2)
-            loss = info_nce_loss(z1, z2, temperature=temperature)
+            loss, _ = _combined_pair_loss(
+                torch=torch,
+                z1=z1,
+                z2=z2,
+                labels=y,
+                temperature=temperature,
+                infonce_weight=infonce_weight,
+                negative_loss_weight=negative_loss_weight,
+                negative_margin=negative_margin,
+            )
 
             opt.zero_grad()
             loss.backward()
@@ -266,10 +318,9 @@ def train_nand_seed(
         train_loss = float(np.mean(batch_losses)) if batch_losses else float("nan")
         train_history.append(train_loss)
 
-        # Val loss on positive pairs only.
+        # Validation uses the same combined objective as train.
         model.eval()
-        val_pos = val_pairs[val_pairs["label"] == 1]
-        v_i1, v_i2, _ = _pairs_to_index_arrays(val_pos, mindex, labeled_only=True)
+        v_i1, v_i2, v_y = val_i1, val_i2, val_y
         v_losses = []
         if len(v_i1) > 0:
             with torch.no_grad():
@@ -277,9 +328,19 @@ def train_nand_seed(
                     end = min(start + int(model_config.get("batch_size", 2048)), len(v_i1))
                     x1 = torch.from_numpy(features[v_i1[start:end]]).to(device)
                     x2 = torch.from_numpy(features[v_i2[start:end]]).to(device)
+                    y = torch.from_numpy(v_y[start:end].astype(np.int64)).to(device)
                     z1 = model(x1)
                     z2 = model(x2)
-                    vloss = info_nce_loss(z1, z2, temperature=temperature)
+                    vloss, _ = _combined_pair_loss(
+                        torch=torch,
+                        z1=z1,
+                        z2=z2,
+                        labels=y,
+                        temperature=temperature,
+                        infonce_weight=infonce_weight,
+                        negative_loss_weight=negative_loss_weight,
+                        negative_margin=negative_margin,
+                    )
                     v_losses.append(float(vloss.detach().cpu().item()))
 
         val_loss = float(np.mean(v_losses)) if v_losses else train_loss
@@ -335,6 +396,7 @@ def train_nand_seed(
         "threshold_source": threshold_source,
         "val_class_counts": val_class_counts,
         "test_class_counts": test_class_counts,
+        "train_class_counts": train_class_counts,
         "seed": int(seed),
         "run_id": run_id,
         "val_stats": val_stats,
@@ -350,6 +412,7 @@ def train_nand_seed(
         "threshold": float(threshold),
         "threshold_selection_status": threshold_selection_status,
         "threshold_source": threshold_source,
+        "train_class_counts": train_class_counts,
         "val_class_counts": val_class_counts,
         "test_class_counts": test_class_counts,
         "val_stats": val_stats,
@@ -404,8 +467,11 @@ def train_nand_across_seeds(
         "best_threshold": best["threshold"],
         "best_threshold_selection_status": best.get("threshold_selection_status"),
         "best_threshold_source": best.get("threshold_source"),
+        "best_train_class_counts": best.get("train_class_counts"),
         "best_val_class_counts": best.get("val_class_counts"),
         "best_test_class_counts": best.get("test_class_counts"),
+        "best_test_f1": (best.get("test_metrics") or {}).get("f1"),
+        "best_test_metrics": best.get("test_metrics"),
         "best_val_f1": best["val_stats"].get("f1"),
     }
 

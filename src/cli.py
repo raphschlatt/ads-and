@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any
 
 import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from src.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
 from src.approaches.nand.cluster import cluster_blockwise_dbscan, resolve_dbscan_eps
@@ -134,6 +135,172 @@ def _resolve_train_seeds(args, run_cfg: dict[str, Any], training_cfg: dict[str, 
     return [int(s) for s in training_cfg.get("seeds", [1, 2, 3, 4, 5])]
 
 
+def _resolve_split_assignment_cfg(run_cfg: dict[str, Any]) -> dict[str, float]:
+    cfg = dict(run_cfg.get("split_assignment", {}) or {})
+    train_ratio = float(cfg.get("train_ratio", 0.6))
+    val_ratio = float(cfg.get("val_ratio", 0.2))
+    if train_ratio <= 0.0 or val_ratio < 0.0 or train_ratio + val_ratio >= 1.0:
+        raise ValueError(
+            f"Invalid split_assignment config: train_ratio={train_ratio}, val_ratio={val_ratio}. "
+            "Require train_ratio>0, val_ratio>=0, and train_ratio+val_ratio<1."
+        )
+    return {
+        "train_ratio": train_ratio,
+        "val_ratio": val_ratio,
+        "test_ratio": float(1.0 - train_ratio - val_ratio),
+    }
+
+
+def _resolve_pair_build_cfg(run_cfg: dict[str, Any]) -> dict[str, Any]:
+    cfg = dict(run_cfg.get("pair_building", {}) or {})
+    return {
+        "exclude_same_bibcode": bool(cfg.get("exclude_same_bibcode", True)),
+    }
+
+
+def _build_eps_sweep_values(cluster_cfg: dict[str, Any]) -> list[float]:
+    eps_min = float(cluster_cfg.get("eps_sweep_min", 0.2))
+    eps_max = float(cluster_cfg.get("eps_sweep_max", 0.5))
+    eps_step = float(cluster_cfg.get("eps_sweep_step", 0.05))
+    if eps_step <= 0:
+        raise ValueError(f"eps_sweep_step must be > 0, got {eps_step}")
+    if eps_min > eps_max:
+        raise ValueError(f"eps_sweep_min must be <= eps_sweep_max, got {eps_min} > {eps_max}")
+    values = np.arange(eps_min, eps_max + (eps_step * 0.5), eps_step)
+    return [float(np.round(v, 6)) for v in values.tolist()]
+
+
+def _cluster_pairwise_metrics(pairs, clusters) -> dict[str, Any]:
+    eval_pairs = pairs[pairs["label"].notna()].copy()
+    if len(eval_pairs) == 0 or len(clusters) == 0:
+        return {
+            "f1": None,
+            "precision": None,
+            "recall": None,
+            "accuracy": None,
+            "n_pairs": int(len(eval_pairs)),
+        }
+    diag = eval_pairs.merge(
+        clusters[["mention_id", "author_uid"]].rename(columns={"mention_id": "mention_id_1", "author_uid": "author_uid_1"}),
+        on="mention_id_1",
+        how="left",
+    ).merge(
+        clusters[["mention_id", "author_uid"]].rename(columns={"mention_id": "mention_id_2", "author_uid": "author_uid_2"}),
+        on="mention_id_2",
+        how="left",
+    )
+    pred = (diag["author_uid_1"] == diag["author_uid_2"]).astype(int).to_numpy()
+    y = diag["label"].astype(int).to_numpy()
+    return {
+        "f1": float(f1_score(y, pred, zero_division=0)),
+        "precision": float(precision_score(y, pred, zero_division=0)),
+        "recall": float(recall_score(y, pred, zero_division=0)),
+        "accuracy": float(accuracy_score(y, pred)),
+        "n_pairs": int(len(diag)),
+    }
+
+
+def _resolve_stage_eps(
+    *,
+    cluster_cfg: dict[str, Any],
+    best_threshold: float,
+    lspo_mentions_split,
+    lspo_pairs,
+    lspo_chars: np.ndarray,
+    lspo_text: np.ndarray,
+    checkpoint_path: str,
+    score_batch_size: int,
+    device: str,
+    show_progress: bool,
+) -> tuple[float, dict[str, Any]]:
+    eps_mode = str(cluster_cfg.get("eps_mode", "fixed")).lower()
+    if eps_mode != "val_sweep":
+        return resolve_dbscan_eps(cluster_cfg, cosine_threshold=best_threshold)
+
+    sweep_rows: list[dict[str, Any]] = []
+    fallback_cfg = dict(cluster_cfg)
+    fallback_cfg["selected_eps"] = None
+
+    val_mask = lspo_mentions_split["split"].astype(str) == "val"
+    val_mentions = lspo_mentions_split[val_mask].reset_index(drop=True)
+    val_pairs = lspo_pairs[(lspo_pairs["split"] == "val") & lspo_pairs["label"].notna()].copy()
+    if len(val_mentions) < 2 or len(val_pairs) == 0:
+        resolved, base_meta = resolve_dbscan_eps(fallback_cfg, cosine_threshold=best_threshold)
+        base_meta.update(
+            {
+                "sweep_status": "fallback_no_val_pairs",
+                "sweep_results": sweep_rows,
+            }
+        )
+        return resolved, base_meta
+
+    val_chars = lspo_chars[val_mask.to_numpy()]
+    val_text = lspo_text[val_mask.to_numpy()]
+    val_pair_scores = score_pairs_with_checkpoint(
+        mentions=val_mentions,
+        pairs=val_pairs,
+        chars2vec=val_chars,
+        text_emb=val_text,
+        checkpoint_path=checkpoint_path,
+        output_path=None,
+        batch_size=int(score_batch_size),
+        device=device,
+        show_progress=show_progress,
+    )
+
+    eps_values = _build_eps_sweep_values(cluster_cfg)
+    for eps in eps_values:
+        row: dict[str, Any] = {"eps": float(eps)}
+        try:
+            eval_cfg = json.loads(json.dumps(cluster_cfg))
+            eval_cfg["eps"] = float(eps)
+            clusters = cluster_blockwise_dbscan(
+                mentions=val_mentions,
+                pair_scores=val_pair_scores,
+                cluster_config=eval_cfg,
+                output_path=None,
+                show_progress=False,
+            )
+            metrics = _cluster_pairwise_metrics(val_pairs, clusters)
+            row.update(metrics)
+        except Exception as exc:
+            row["error"] = repr(exc)
+        sweep_rows.append(row)
+
+    valid_rows = [r for r in sweep_rows if r.get("f1") is not None]
+    if not valid_rows:
+        resolved, base_meta = resolve_dbscan_eps(fallback_cfg, cosine_threshold=best_threshold)
+        base_meta.update(
+            {
+                "sweep_status": "fallback_no_valid_candidates",
+                "sweep_results": sweep_rows,
+            }
+        )
+        return resolved, base_meta
+
+    sweep_center = (float(cluster_cfg.get("eps_sweep_min", 0.2)) + float(cluster_cfg.get("eps_sweep_max", 0.5))) / 2.0
+    best_row = max(valid_rows, key=lambda r: (float(r["f1"]), -abs(float(r["eps"]) - sweep_center)))
+    selected_eps = float(best_row["eps"])
+    selected_cfg = dict(cluster_cfg)
+    selected_cfg["selected_eps"] = selected_eps
+    resolved, base_meta = resolve_dbscan_eps(selected_cfg, cosine_threshold=best_threshold)
+    base_meta.update(
+        {
+            "sweep_status": "ok",
+            "selected_eps": selected_eps,
+            "selected_metrics": {
+                "f1": best_row.get("f1"),
+                "precision": best_row.get("precision"),
+                "recall": best_row.get("recall"),
+                "accuracy": best_row.get("accuracy"),
+                "n_pairs": best_row.get("n_pairs"),
+            },
+            "sweep_results": sweep_rows,
+        }
+    )
+    return resolved, base_meta
+
+
 def cmd_prepare_lspo(args):
     paths = _load_paths_cfg(args.paths_config)
     out = args.output or str(Path(paths["data"]["interim_dir"]) / "lspo_mentions.parquet")
@@ -209,12 +376,13 @@ def cmd_embeddings(args):
 
 def cmd_pairs(args):
     mentions = read_parquet(args.mentions)
+    run_cfg = _load_run_cfg(args.run_config) if args.run_config else {}
+    pair_build_cfg = _resolve_pair_build_cfg(run_cfg)
 
     split_meta = None
     if args.assign_lspo_splits:
-        split_cfg = {}
-        if args.run_config:
-            split_cfg = _load_run_cfg(args.run_config).get("split_balance", {})
+        split_cfg = run_cfg.get("split_balance", {})
+        split_assignment_cfg = _resolve_split_assignment_cfg(run_cfg)
 
         min_neg_val = int(args.min_neg_val) if args.min_neg_val is not None else int(split_cfg.get("min_neg_val", 0))
         min_neg_test = int(args.min_neg_test) if args.min_neg_test is not None else int(split_cfg.get("min_neg_test", 0))
@@ -223,6 +391,8 @@ def cmd_pairs(args):
         mentions, split_meta = assign_lspo_splits(
             mentions,
             seed=args.seed,
+            train_ratio=float(split_assignment_cfg["train_ratio"]),
+            val_ratio=float(split_assignment_cfg["val_ratio"]),
             min_neg_val=min_neg_val,
             min_neg_test=min_neg_test,
             max_attempts=max_attempts,
@@ -230,18 +400,21 @@ def cmd_pairs(args):
         )
         save_parquet(mentions, args.mentions, index=False)
 
-    pairs = build_pairs_within_blocks(
+    pairs, pair_meta = build_pairs_within_blocks(
         mentions=mentions,
         max_pairs_per_block=args.max_pairs_per_block,
         seed=args.seed,
         require_same_split=not args.allow_cross_split,
         labeled_only=args.labeled_only,
         balance_train=args.balance_train,
+        exclude_same_bibcode=bool(pair_build_cfg["exclude_same_bibcode"]),
         show_progress=args.progress,
+        return_meta=True,
     )
     write_pairs(pairs, args.output)
     if split_meta is not None:
         print(f"Split balancing: {split_meta}")
+    print(f"Pair build meta: {pair_meta}")
     print(f"Built pairs: {len(pairs)} -> {args.output}")
 
 
@@ -297,6 +470,8 @@ def cmd_cluster(args):
     project_root = find_project_root(Path.cwd())
     cluster_cfg_path = resolve_existing_path(args.cluster_config, project_root=project_root) or Path(args.cluster_config)
     cluster_cfg = load_yaml(cluster_cfg_path)
+    resolved_eps, _eps_meta = resolve_dbscan_eps(cluster_cfg, cosine_threshold=None)
+    cluster_cfg["eps"] = resolved_eps
 
     clusters = cluster_blockwise_dbscan(
         mentions=mentions,
@@ -339,6 +514,8 @@ def cmd_run_stage(args):
         run_cfg_path = args.run_config or f"configs/runs/{args.run_stage}.yaml"
         run_cfg = _load_run_cfg(run_cfg_path)
         run_cfg["stage"] = args.run_stage
+        split_assignment_cfg = _resolve_split_assignment_cfg(run_cfg)
+        pair_build_cfg = _resolve_pair_build_cfg(run_cfg)
 
         model_cfg = _load_model_cfg(args.model_config)
         rep_cfg = model_cfg.get("representation", {})
@@ -603,25 +780,30 @@ def cmd_run_stage(args):
             lspo_mentions_split = read_parquet(lspo_subset_run_path)
             lspo_pairs = read_parquet(lspo_pairs_path)
             split_meta = _load_json(split_meta_path)
+            lspo_pair_meta: dict[str, Any] = {}
             ui.skip(f"Reused LSPO split+pairs ({len(lspo_pairs)} pairs).")
         else:
             split_balance_cfg = run_cfg.get("split_balance", {})
             lspo_mentions_split, split_meta = assign_lspo_splits(
                 lspo_subset,
                 seed=int(run_cfg.get("seed", 11)),
+                train_ratio=float(split_assignment_cfg["train_ratio"]),
+                val_ratio=float(split_assignment_cfg["val_ratio"]),
                 min_neg_val=int(split_balance_cfg.get("min_neg_val", 0)),
                 min_neg_test=int(split_balance_cfg.get("min_neg_test", 0)),
                 max_attempts=int(split_balance_cfg.get("max_attempts", 1)),
                 return_meta=True,
             )
-            lspo_pairs = build_pairs_within_blocks(
+            lspo_pairs, lspo_pair_meta = build_pairs_within_blocks(
                 mentions=lspo_mentions_split,
                 max_pairs_per_block=run_cfg.get("max_pairs_per_block"),
                 seed=int(run_cfg.get("seed", 11)),
                 require_same_split=True,
                 labeled_only=False,
                 balance_train=True,
+                exclude_same_bibcode=bool(pair_build_cfg["exclude_same_bibcode"]),
                 show_progress=args.progress,
+                return_meta=True,
             )
             write_pairs(lspo_pairs, lspo_pairs_path)
             save_parquet(lspo_mentions_split, lspo_subset_run_path, index=False)
@@ -632,16 +814,20 @@ def cmd_run_stage(args):
         if ads_pairs_path.exists() and pairs_qc_path.exists() and not args.force:
             ads_pairs = read_parquet(ads_pairs_path)
             pairs_qc = _load_json(pairs_qc_path)
+            lspo_pair_meta = dict(pairs_qc.get("lspo_pair_build", lspo_pair_meta))
+            ads_pair_meta = dict(pairs_qc.get("ads_pair_build", {}))
             ui.skip(f"Reused ADS pairs ({len(ads_pairs)} rows).")
         else:
-            ads_pairs = build_pairs_within_blocks(
+            ads_pairs, ads_pair_meta = build_pairs_within_blocks(
                 mentions=ads_subset,
                 max_pairs_per_block=run_cfg.get("max_pairs_per_block"),
                 seed=int(run_cfg.get("seed", 11)),
                 require_same_split=False,
                 labeled_only=False,
                 balance_train=False,
+                exclude_same_bibcode=bool(pair_build_cfg["exclude_same_bibcode"]),
                 show_progress=args.progress,
+                return_meta=True,
             )
             write_pairs(ads_pairs, ads_pairs_path)
             pairs_qc = build_pairs_qc(
@@ -649,6 +835,8 @@ def cmd_run_stage(args):
                 lspo_pairs=lspo_pairs,
                 ads_pairs=ads_pairs,
                 split_meta=split_meta,
+                lspo_pair_build_meta=lspo_pair_meta,
+                ads_pair_build_meta=ads_pair_meta,
             )
             write_json(pairs_qc, pairs_qc_path)
             ui.done(f"Built ADS pairs ({len(ads_pairs)} rows).")
@@ -729,8 +917,21 @@ def cmd_run_stage(args):
         else:
             best_threshold = float(train_manifest["best_threshold"])
             cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
-            resolved_eps, eps_meta = resolve_dbscan_eps(cluster_cfg_used, cosine_threshold=best_threshold)
+            resolved_eps, eps_meta = _resolve_stage_eps(
+                cluster_cfg=cluster_cfg_used,
+                best_threshold=best_threshold,
+                lspo_mentions_split=lspo_mentions_split,
+                lspo_pairs=lspo_pairs,
+                lspo_chars=lspo_chars,
+                lspo_text=lspo_text,
+                checkpoint_path=str(train_manifest["best_checkpoint"]),
+                score_batch_size=int(args.score_batch_size),
+                device=args.device,
+                show_progress=args.progress,
+            )
             cluster_cfg_used["eps"] = resolved_eps
+            if eps_meta.get("selected_eps") is not None:
+                cluster_cfg_used["selected_eps"] = float(eps_meta["selected_eps"])
             write_json(
                 {
                     "run_id": run_id,

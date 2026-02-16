@@ -3,6 +3,11 @@ subset_target_mentions: 10000
 seed: 11
 subset_sampling:
   target_mean_block_size: 4
+split_assignment:
+  train_ratio: 0.6
+  val_ratio: 0.2
+pair_building:
+  exclude_same_bibcode: true
 max_pairs_per_block: 100000
 split_balance:
   min_neg_val: 50

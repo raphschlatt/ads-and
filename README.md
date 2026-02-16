@@ -6,6 +6,14 @@ Research-first setup to:
 2. Apply the trained model to ADS mentions.
 3. Execute the workflow from notebook cells with visible intermediate QC.
 
+Default methodology is paper-fair:
+
+- ORCID split defaults to `60/20/20` (train/val/test).
+- Pair building excludes same-`bibcode` mention pairs.
+- Train loss uses positives and explicit negatives (`InfoNCE + negative margin`).
+- DBSCAN `eps` defaults to validation sweep (`0.20..0.50`), not threshold coupling.
+- Stage metric `lspo_pairwise_f1` is canonical test-F1 (val-F1 still reported separately).
+
 ## Notebook Calling Layer
 
 Run these notebooks in order:
@@ -37,7 +45,7 @@ Contracts are documented in `docs/data_contracts.md`.
 
 ## Stage Ladder (Gate Before Full)
 
-- `smoke`: 1k mentions
+- `smoke`: 5k mentions
 - `mini`: 10k mentions
 - `mid`: 100k mentions
 - `full`: complete dataset
@@ -82,6 +90,9 @@ python3 -m src.cli run-stage \
 - `--device cuda` is strict and fails if GPU is not usable.
 - `--quiet-libs` is the default and suppresses noisy third-party logs; use `--verbose-libs` for deep debugging.
 - Training seeds are stage-specific via `configs/runs/*.yaml` (`train_seeds`) and can be overridden with `--seeds`.
+- Split assignment defaults are explicit via `split_assignment` in `configs/runs/*.yaml`.
+- Pair-building defaults are explicit via `pair_building` in `configs/runs/*.yaml`.
+- DBSCAN defaults use `eps_mode: val_sweep` with sweep range in `configs/clustering/dbscan_paper.yaml`.
 - Metrics and reports are written to `artifacts/metrics/<run_id>/` (`05_*` and optional `99_compare_to_baseline.json`).
 
 ## Environment
@@ -96,3 +107,4 @@ Install with your preferred environment manager; a minimal pip list is in:
 - Research setup, not production hardening.
 - `smoke/mini` are intended for fast validation before expensive full runs.
 - For real reproduction/training you need `torch`, `transformers`, and GPU runtime.
+- Legacy manifests that only contain `best_val_f1` remain readable; reporting marks them via `lspo_pairwise_f1_source=best_val_f1_legacy`.

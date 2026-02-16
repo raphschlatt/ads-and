@@ -62,6 +62,42 @@ def test_assign_lspo_splits_marks_degraded_when_targets_impossible():
     assert meta["status"] == "split_balance_degraded"
 
 
+def test_assign_lspo_splits_marks_infeasible_when_total_negatives_too_low():
+    rows = []
+    for i in range(8):
+        for rep in range(2):
+            rows.append(
+                {
+                    "mention_id": f"b{i}_{rep}::0",
+                    "bibcode": f"b{i}_{rep}",
+                    "author_idx": 0,
+                    "author_raw": f"Smith, A{i}",
+                    "title": "t",
+                    "abstract": "a",
+                    "year": 2000 + rep,
+                    "source_type": "lspo",
+                    "block_key": f"blk{i}",  # no cross-ORCID negatives within block
+                    "orcid": f"o{i}",
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    _, meta = assign_lspo_splits(
+        df,
+        seed=11,
+        train_ratio=0.6,
+        val_ratio=0.2,
+        min_neg_val=1,
+        min_neg_test=1,
+        max_attempts=100,
+        return_meta=True,
+    )
+
+    assert meta["status"] == "split_balance_infeasible"
+    assert meta["max_possible_neg_total"] == 0
+    assert meta["required_neg_total"] == 2
+
+
 def _rich_block_mentions(n_blocks: int = 400) -> pd.DataFrame:
     rows = []
     for block in range(n_blocks):

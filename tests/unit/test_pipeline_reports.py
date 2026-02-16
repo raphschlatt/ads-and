@@ -126,6 +126,7 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
     )
     train_manifest = {
         "best_val_f1": 0.91,
+        "best_test_f1": 0.89,
         "best_threshold": 0.12,
         "best_threshold_selection_status": "ok",
         "best_threshold_source": "val_f1_opt",
@@ -157,7 +158,8 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
     assert stage_metrics["schema_valid"] is True
     assert stage_metrics["run_id_consistent"] is True
     assert stage_metrics["determinism_valid"] is True
-    assert stage_metrics["lspo_pairwise_f1"] == 0.91
+    assert stage_metrics["lspo_pairwise_f1"] == 0.89
+    assert stage_metrics["lspo_pairwise_f1_val"] == 0.91
 
     write_json(stage_metrics, current_dir / "05_stage_metrics_smoke.json")
     write_json({"go": True, "blockers": []}, current_dir / "05_go_no_go_smoke.json")
