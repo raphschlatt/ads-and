@@ -4,21 +4,37 @@ defaults:
     max: 0.95
   mention_coverage_min: 1.0
   uid_uniqueness_max: 1
+  cluster_quality:
+    singleton_ratio_max: 0.45
+    split_high_sim_rate_probe_max: 0.20
+  split_balance_policy:
+    infeasible_severity: blocker
+    degraded_severity: warning
+  eps_policy:
+    boundary_hit_severity: warning
 
 stages:
   smoke:
     f1_min: 0.80
     min_neg_val: 20
     min_neg_test: 20
+    cluster_quality_severity: warning
+    split_balance_degraded_severity: warning
   mini:
     f1_min: 0.88
     min_neg_val: 50
     min_neg_test: 50
+    cluster_quality_severity: warning
+    split_balance_degraded_severity: warning
   mid:
     f1_min: 0.90
     min_neg_val: 200
     min_neg_test: 200
+    cluster_quality_severity: blocker
+    split_balance_degraded_severity: blocker
   full:
     f1_min: 0.90
     min_neg_val: 500
     min_neg_test: 500
+    cluster_quality_severity: blocker
+    split_balance_degraded_severity: blocker

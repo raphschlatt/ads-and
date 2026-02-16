@@ -230,6 +230,10 @@ def _resolve_stage_eps(
             {
                 "sweep_status": "fallback_no_val_pairs",
                 "sweep_results": sweep_rows,
+                "n_valid_candidates": 0,
+                "boundary_hit": False,
+                "boundary_side": None,
+                "f1_gap_best_second": None,
             }
         )
         return resolved, base_meta
@@ -274,13 +278,32 @@ def _resolve_stage_eps(
             {
                 "sweep_status": "fallback_no_valid_candidates",
                 "sweep_results": sweep_rows,
+                "n_valid_candidates": 0,
+                "boundary_hit": False,
+                "boundary_side": None,
+                "f1_gap_best_second": None,
             }
         )
         return resolved, base_meta
 
     sweep_center = (float(cluster_cfg.get("eps_sweep_min", 0.2)) + float(cluster_cfg.get("eps_sweep_max", 0.5))) / 2.0
-    best_row = max(valid_rows, key=lambda r: (float(r["f1"]), -abs(float(r["eps"]) - sweep_center)))
+    ranked_rows = sorted(valid_rows, key=lambda r: (float(r["f1"]), -abs(float(r["eps"]) - sweep_center)), reverse=True)
+    best_row = ranked_rows[0]
+    second_row = ranked_rows[1] if len(ranked_rows) > 1 else None
     selected_eps = float(best_row["eps"])
+    f1_gap_best_second = None
+    if second_row is not None:
+        f1_gap_best_second = float(best_row["f1"]) - float(second_row["f1"])
+    sweep_min = float(cluster_cfg.get("eps_sweep_min", 0.2))
+    sweep_max = float(cluster_cfg.get("eps_sweep_max", 0.5))
+    eps_tol = 1e-9
+    boundary_side = None
+    if abs(selected_eps - sweep_min) <= eps_tol:
+        boundary_side = "min"
+    elif abs(selected_eps - sweep_max) <= eps_tol:
+        boundary_side = "max"
+    boundary_hit = boundary_side is not None
+
     selected_cfg = dict(cluster_cfg)
     selected_cfg["selected_eps"] = selected_eps
     resolved, base_meta = resolve_dbscan_eps(selected_cfg, cosine_threshold=best_threshold)
@@ -288,6 +311,10 @@ def _resolve_stage_eps(
         {
             "sweep_status": "ok",
             "selected_eps": selected_eps,
+            "n_valid_candidates": int(len(valid_rows)),
+            "boundary_hit": bool(boundary_hit),
+            "boundary_side": boundary_side,
+            "f1_gap_best_second": f1_gap_best_second,
             "selected_metrics": {
                 "f1": best_row.get("f1"),
                 "precision": best_row.get("precision"),
@@ -910,9 +937,12 @@ def cmd_run_stage(args):
             and not args.force
         )
 
+        eps_meta: dict[str, Any] = {}
         if cluster_cache_hit:
             clusters = read_parquet(clusters_path)
             cluster_qc = _load_json(cluster_qc_path)
+            cfg_payload = _load_json(cluster_cfg_used_path) or {}
+            eps_meta = dict(cfg_payload.get("eps_resolution", {}) or {})
             ui.skip(f"Reused clustering outputs ({len(clusters)} mentions).")
         else:
             best_threshold = float(train_manifest["best_threshold"])
@@ -1001,6 +1031,9 @@ def cmd_run_stage(args):
                 train_manifest=train_manifest,
                 consistency_files=consistency_files,
                 determinism_paths=determinism_paths,
+                cluster_qc=cluster_qc,
+                split_meta=split_meta,
+                eps_meta=eps_meta,
             )
             write_json(stage_metrics, stage_metrics_path)
 

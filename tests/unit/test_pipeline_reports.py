@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -99,7 +100,15 @@ def test_build_pairs_qc_and_cluster_qc():
 
     assert cluster_qc["cluster_count"] == 2
     assert cluster_qc["split_high_sim_count"] == 1
+    assert cluster_qc["split_high_sim_rate"] == 1.0
     assert cluster_qc["merged_low_conf_count"] == 0
+    assert cluster_qc["merged_low_conf_rate"] == 0.0
+    assert cluster_qc["probe_threshold"] == 0.35
+    assert cluster_qc["split_high_sim_count_probe"] == 1
+    assert cluster_qc["split_high_sim_rate_probe"] == 1.0
+    assert cluster_qc["merged_low_conf_count_probe"] == 0
+    assert cluster_qc["merged_low_conf_rate_probe"] == 0.0
+    assert cluster_qc["n_pairs_evaluated"] == 1
     assert cluster_qc["pair_score_range_ok"] is True
     assert cluster_qc["negative_distance_count"] == 0
     assert cluster_qc["cosine_out_of_range_count"] == 0
@@ -133,6 +142,21 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         "best_val_class_counts": {"pos": 20, "neg": 5},
         "best_test_class_counts": {"pos": 18, "neg": 4},
     }
+    cluster_qc = {
+        "pair_score_range_ok": True,
+        "singleton_ratio": 0.20,
+        "split_high_sim_rate": 0.11,
+        "split_high_sim_rate_probe": 0.13,
+        "merged_low_conf_rate": 0.07,
+        "merged_low_conf_rate_probe": 0.09,
+    }
+    split_meta = {"status": "ok"}
+    eps_meta = {
+        "boundary_hit": True,
+        "boundary_side": "max",
+        "n_valid_candidates": 7,
+        "f1_gap_best_second": 0.0123,
+    }
 
     consistency_files = []
     for i in range(6):
@@ -153,6 +177,9 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         train_manifest=train_manifest,
         consistency_files=consistency_files,
         determinism_paths=determinism_paths,
+        cluster_qc=cluster_qc,
+        split_meta=split_meta,
+        eps_meta=eps_meta,
     )
     assert stage_metrics["run_id"] == run_id
     assert stage_metrics["schema_valid"] is True
@@ -160,9 +187,17 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
     assert stage_metrics["determinism_valid"] is True
     assert stage_metrics["lspo_pairwise_f1"] == 0.89
     assert stage_metrics["lspo_pairwise_f1_val"] == 0.91
+    assert stage_metrics["split_balance_status"] == "ok"
+    assert stage_metrics["pair_score_range_ok"] is True
+    assert stage_metrics["split_high_sim_rate_probe"] == 0.13
+    assert stage_metrics["eps_boundary_hit"] is True
+    assert stage_metrics["eps_boundary_side"] == "max"
+    assert stage_metrics["counts"]["ads_clusters"] == 3
+    assert stage_metrics["counts"]["ads_cluster_assignments"] == 4
+    assert stage_metrics["counts"]["ads_blocks"] == 2
 
     write_json(stage_metrics, current_dir / "05_stage_metrics_smoke.json")
-    write_json({"go": True, "blockers": []}, current_dir / "05_go_no_go_smoke.json")
+    write_json({"go": True, "blockers": [], "warnings": ["eps_boundary_hit"]}, current_dir / "05_go_no_go_smoke.json")
     write_json(
         {
             "status": "ok",
@@ -171,8 +206,17 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         current_dir / "02_split_balance.json",
     )
 
-    write_json({"lspo_pairwise_f1": 0.88}, baseline_dir / "05_stage_metrics_smoke.json")
-    write_json({"go": False}, baseline_dir / "05_go_no_go_smoke.json")
+    write_json(
+        {
+            "lspo_pairwise_f1": 0.88,
+            "singleton_ratio": 0.10,
+            "split_high_sim_rate_probe": 0.20,
+            "merged_low_conf_rate_probe": 0.05,
+            "counts": {"ads_clusters": 2, "ads_cluster_assignments": 4},
+        },
+        baseline_dir / "05_stage_metrics_smoke.json",
+    )
+    write_json({"go": False, "warnings": []}, baseline_dir / "05_go_no_go_smoke.json")
     write_json(
         {
             "status": "split_balance_degraded",
@@ -189,6 +233,11 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         metrics_root=metrics_root,
         output_path=out,
     )
-    payload = out.read_text(encoding="utf-8")
-    assert "\"split_status_current\": \"ok\"" in payload
-    assert "\"go_current\": true" in payload
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["split_status_current"] == "ok"
+    assert payload["go_current"] is True
+    assert payload["warnings_current"] == ["eps_boundary_hit"]
+    assert payload["ads_clusters_baseline"] == 2
+    assert payload["ads_clusters_current"] == 3
+    assert payload["ads_clusters_delta"] == 1.0
+    assert round(float(payload["split_high_sim_rate_probe_delta"]), 6) == -0.07

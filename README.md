@@ -94,6 +94,7 @@ python3 -m src.cli run-stage \
 - Pair-building defaults are explicit via `pair_building` in `configs/runs/*.yaml`.
 - DBSCAN defaults use `eps_mode: val_sweep` with sweep range in `configs/clustering/dbscan_paper.yaml`.
 - Metrics and reports are written to `artifacts/metrics/<run_id>/` (`05_*` and optional `99_compare_to_baseline.json`).
+- `05_go_no_go_<stage>.json` now separates hard `blockers` from non-blocking `warnings`.
 
 ## Environment
 

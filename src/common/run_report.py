@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Dict, List
 import json
+from pathlib import Path
+from typing import Any, Dict, List
 
 import pandas as pd
 
@@ -19,12 +19,23 @@ def _default_gate_config() -> Dict:
             "threshold_bounds": {"min": -0.95, "max": 0.95},
             "mention_coverage_min": 1.0,
             "uid_uniqueness_max": 1,
+            "cluster_quality": {
+                "singleton_ratio_max": 0.45,
+                "split_high_sim_rate_probe_max": 0.20,
+            },
+            "split_balance_policy": {
+                "infeasible_severity": "blocker",
+                "degraded_severity": "warning",
+            },
+            "eps_policy": {
+                "boundary_hit_severity": "warning",
+            },
         },
         "stages": {
-            "smoke": {"f1_min": 0.80, "min_neg_val": 20, "min_neg_test": 20},
-            "mini": {"f1_min": 0.88, "min_neg_val": 50, "min_neg_test": 50},
-            "mid": {"f1_min": 0.90, "min_neg_val": 200, "min_neg_test": 200},
-            "full": {"f1_min": 0.90, "min_neg_val": 500, "min_neg_test": 500},
+            "smoke": {"f1_min": 0.80, "min_neg_val": 20, "min_neg_test": 20, "cluster_quality_severity": "warning"},
+            "mini": {"f1_min": 0.88, "min_neg_val": 50, "min_neg_test": 50, "cluster_quality_severity": "warning"},
+            "mid": {"f1_min": 0.90, "min_neg_val": 200, "min_neg_test": 200, "cluster_quality_severity": "blocker"},
+            "full": {"f1_min": 0.90, "min_neg_val": 500, "min_neg_test": 500, "cluster_quality_severity": "blocker"},
         },
     }
 
@@ -35,6 +46,15 @@ def load_stage_metrics(metrics_file: str | Path) -> Dict:
         raise FileNotFoundError(p)
     with p.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _normalize_severity(value: Any, default: str = "blocker") -> str:
+    raw = str(value if value is not None else default).strip().lower()
+    if raw in {"block", "blocker", "hard"}:
+        return "blocker"
+    if raw in {"warn", "warning", "soft"}:
+        return "warning"
+    return "blocker" if default == "blocker" else "warning"
 
 
 def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> Dict:
@@ -51,11 +71,40 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     thr_max = float(threshold_bounds.get("max", 0.95))
     coverage_min = float(defaults.get("mention_coverage_min", 1.0))
     uid_uniqueness_max = int(defaults.get("uid_uniqueness_max", 1))
+    cluster_defaults = dict(defaults.get("cluster_quality", {}) or {})
+    singleton_ratio_max = float(stage_gates.get("singleton_ratio_max", cluster_defaults.get("singleton_ratio_max", 1.0)))
+    split_high_sim_rate_probe_max = float(
+        stage_gates.get("split_high_sim_rate_probe_max", cluster_defaults.get("split_high_sim_rate_probe_max", 1.0))
+    )
+    cluster_quality_severity = _normalize_severity(stage_gates.get("cluster_quality_severity", "warning"), default="warning")
+
+    split_defaults = dict(defaults.get("split_balance_policy", {}) or {})
+    split_infeasible_severity = _normalize_severity(
+        stage_gates.get("split_balance_infeasible_severity", split_defaults.get("infeasible_severity", "blocker")),
+        default="blocker",
+    )
+    split_degraded_severity = _normalize_severity(
+        stage_gates.get("split_balance_degraded_severity", split_defaults.get("degraded_severity", cluster_quality_severity)),
+        default=cluster_quality_severity,
+    )
+
+    eps_defaults = dict(defaults.get("eps_policy", {}) or {})
+    eps_boundary_severity = _normalize_severity(
+        stage_gates.get("eps_boundary_severity", eps_defaults.get("boundary_hit_severity", "warning")),
+        default="warning",
+    )
 
     checks: List[Dict] = []
 
-    def add_check(name: str, passed: bool, detail: str) -> None:
-        checks.append({"name": name, "passed": bool(passed), "detail": detail})
+    def add_check(name: str, passed: bool, detail: str, severity: str = "blocker") -> None:
+        checks.append(
+            {
+                "name": name,
+                "passed": bool(passed),
+                "detail": detail,
+                "severity": _normalize_severity(severity, default="blocker"),
+            }
+        )
 
     add_check(
         "schema_valid",
@@ -127,14 +176,87 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         f"status={threshold_status}, allowed={sorted(valid_threshold_status)}",
     )
 
+    split_status = str(stage_metrics.get("split_balance_status", "") or "").strip().lower()
+    if split_status in {"", "unknown"}:
+        add_check("split_balance_status", True, "status unavailable (legacy or missing split metadata)")
+    elif split_status == "split_balance_infeasible":
+        add_check(
+            "split_balance_status",
+            False,
+            f"status={split_status}",
+            severity=split_infeasible_severity,
+        )
+    elif split_status == "split_balance_degraded":
+        add_check(
+            "split_balance_status",
+            False,
+            f"status={split_status}",
+            severity=split_degraded_severity,
+        )
+    else:
+        add_check("split_balance_status", True, f"status={split_status}")
+
+    pair_score_range_ok = stage_metrics.get("pair_score_range_ok")
+    if pair_score_range_ok is None:
+        add_check("pair_score_range_ok", True, "not available")
+    else:
+        add_check(
+            "pair_score_range_ok",
+            bool(pair_score_range_ok),
+            f"Observed pair_score_range_ok={bool(pair_score_range_ok)}",
+            severity=cluster_quality_severity,
+        )
+
+    singleton_ratio = stage_metrics.get("singleton_ratio")
+    if singleton_ratio is None:
+        add_check("singleton_ratio", True, "not available")
+    else:
+        singleton_ratio = float(singleton_ratio)
+        add_check(
+            "singleton_ratio",
+            singleton_ratio <= singleton_ratio_max,
+            f"Observed singleton_ratio={singleton_ratio:.4f}, required<={singleton_ratio_max:.4f}",
+            severity=cluster_quality_severity,
+        )
+
+    split_high_sim_rate_probe = stage_metrics.get("split_high_sim_rate_probe")
+    if split_high_sim_rate_probe is None:
+        add_check("split_high_sim_rate_probe", True, "not available")
+    else:
+        split_high_sim_rate_probe = float(split_high_sim_rate_probe)
+        add_check(
+            "split_high_sim_rate_probe",
+            split_high_sim_rate_probe <= split_high_sim_rate_probe_max,
+            (
+                f"Observed split_high_sim_rate_probe={split_high_sim_rate_probe:.4f}, "
+                f"required<={split_high_sim_rate_probe_max:.4f}"
+            ),
+            severity=cluster_quality_severity,
+        )
+
+    eps_boundary_hit = stage_metrics.get("eps_boundary_hit")
+    if eps_boundary_hit is None:
+        add_check("eps_boundary_hit", True, "not available")
+    elif bool(eps_boundary_hit):
+        boundary_side = stage_metrics.get("eps_boundary_side")
+        add_check(
+            "eps_boundary_hit",
+            False,
+            f"Observed boundary_hit=true (side={boundary_side})",
+            severity=eps_boundary_severity,
+        )
+    else:
+        add_check("eps_boundary_hit", True, "Observed boundary_hit=false")
+
     # If LSPO metrics are present, apply loose stage-aware sanity bounds.
     lspo_f1 = stage_metrics.get("lspo_pairwise_f1")
     if lspo_f1 is not None:
         add_check("lspo_pairwise_f1_sanity", lspo_f1 >= f1_min, f"Observed F1={lspo_f1:.4f}, required>={f1_min:.4f}")
 
-    passed = all(c["passed"] for c in checks)
-    blockers = [c["name"] for c in checks if not c["passed"]]
-    return {"go": passed, "checks": checks, "blockers": blockers}
+    blockers = [c["name"] for c in checks if (not c["passed"]) and c["severity"] == "blocker"]
+    warnings = [c["name"] for c in checks if (not c["passed"]) and c["severity"] == "warning"]
+    passed = len(blockers) == 0
+    return {"go": passed, "checks": checks, "blockers": blockers, "warnings": warnings}
 
 
 def write_go_no_go_report(result: Dict, output_path: str | Path) -> Path:

@@ -375,6 +375,12 @@ def test_cli_run_stage_smoke_stub(monkeypatch, tmp_path: Path):
     assert (metrics_dir / "04_cluster_qc.json").exists()
     assert (metrics_dir / "05_stage_metrics_smoke.json").exists()
     assert (metrics_dir / "05_go_no_go_smoke.json").exists()
+    stage_metrics = json.loads((metrics_dir / "05_stage_metrics_smoke.json").read_text(encoding="utf-8"))
+    assert "ads_cluster_assignments" in stage_metrics["counts"]
+    assert "ads_blocks" in stage_metrics["counts"]
+    assert "split_balance_status" in stage_metrics
+    go_payload = json.loads((metrics_dir / "05_go_no_go_smoke.json").read_text(encoding="utf-8"))
+    assert "warnings" in go_payload
 
 
 def test_cli_run_stage_resume_behavior(monkeypatch, tmp_path: Path):
@@ -447,9 +453,72 @@ def test_cli_run_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path: Path
     eps_meta = payload["eps_resolution"]
     assert eps_meta["eps_mode"] == "val_sweep"
     assert eps_meta["sweep_status"] in {"ok", "fallback_no_val_pairs", "fallback_no_valid_candidates"}
+    assert "n_valid_candidates" in eps_meta
+    assert "boundary_hit" in eps_meta
+    assert "boundary_side" in eps_meta
+    assert "f1_gap_best_second" in eps_meta
     if eps_meta["sweep_status"] == "ok":
         assert len(eps_meta["sweep_results"]) >= 1
         assert 0.2 <= float(payload["cluster_config_used"]["eps"]) <= 0.5
+
+
+def test_cli_run_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    state: dict[str, float] = {}
+
+    base_cluster = cli.cluster_blockwise_dbscan
+
+    def _cluster_capture_eps(mentions, pair_scores, cluster_config, output_path=None, **kwargs):
+        state["eps"] = float(cluster_config.get("eps", 0.0))
+        return base_cluster(mentions, pair_scores, output_path=output_path, **kwargs)
+
+    def _metrics_force_edge(_pairs, _clusters):
+        eps = float(state.get("eps", 0.0))
+        return {
+            "f1": eps,
+            "precision": eps,
+            "recall": eps,
+            "accuracy": eps,
+            "n_pairs": int(len(_pairs)),
+        }
+
+    monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster_capture_eps)
+    monkeypatch.setattr(cli, "_cluster_pairwise_metrics", _metrics_force_edge)
+
+    def _assign_all_val(mentions, return_meta=False, **_kwargs):
+        out = mentions.copy()
+        out["split"] = "val"
+        if "orcid" not in out.columns:
+            out["orcid"] = [f"o{i // 2}" for i in range(len(out))]
+        meta = {
+            "status": "ok",
+            "attempts": 1,
+            "min_neg_val": 0,
+            "min_neg_test": 0,
+            "split_label_counts": {
+                "train": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                "val": {"pos": 3, "neg": 0, "labeled_pairs": 3},
+                "test": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+            },
+        }
+        return (out, meta) if return_meta else out
+
+    monkeypatch.setattr(cli, "assign_lspo_splits", _assign_all_val)
+
+    parser = cli.build_parser()
+    run_id = "smoke_test_eps_boundary"
+    _run_stage(parser, cfg, run_id, extra=["--force"])
+
+    meta_path = cfg["metrics_dir"] / run_id / "04_clustering_config_used.json"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    eps_meta = payload["eps_resolution"]
+    assert eps_meta["sweep_status"] == "ok"
+    assert eps_meta["boundary_hit"] is True
+    assert eps_meta["boundary_side"] == "max"
+    assert float(eps_meta["selected_eps"]) == 0.5
+    assert int(eps_meta["n_valid_candidates"]) >= 1
+    assert eps_meta["f1_gap_best_second"] is not None
 
 
 def test_cli_run_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path):
