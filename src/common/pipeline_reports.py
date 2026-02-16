@@ -58,6 +58,11 @@ def build_subset_summary(
     lspo_subset: pd.DataFrame,
     ads_subset: pd.DataFrame,
     timings: Mapping[str, float] | None = None,
+    cache_key: str | None = None,
+    cache_valid: bool | None = None,
+    cache_invalid_reason: str | None = None,
+    cache_rebuilt: bool = False,
+    cache_version: str = "v3",
 ) -> dict[str, Any]:
     timings = dict(timings or {})
     return {
@@ -65,7 +70,12 @@ def build_subset_summary(
         "stage": str(stage),
         "source_fp": str(source_fp),
         "subset_tag": str(subset_tag),
+        "cache_key": str(cache_key) if cache_key is not None else str(subset_tag),
         "cache_hit": bool(cache_hit),
+        "cache_valid": None if cache_valid is None else bool(cache_valid),
+        "cache_invalid_reason": None if cache_invalid_reason is None else str(cache_invalid_reason),
+        "cache_rebuilt": bool(cache_rebuilt),
+        "cache_version": str(cache_version),
         "read_lspo_s": float(timings.get("read_lspo_s", 0.0)),
         "read_ads_s": float(timings.get("read_ads_s", 0.0)),
         "build_lspo_s": float(timings.get("build_lspo_s", 0.0)),
@@ -235,6 +245,8 @@ def build_stage_metrics(
     cluster_qc: Mapping[str, Any] | None = None,
     split_meta: Mapping[str, Any] | None = None,
     eps_meta: Mapping[str, Any] | None = None,
+    subset_cache_key: str | None = None,
+    lspo_pairs_count: int | None = None,
 ) -> dict[str, Any]:
     cluster_qc = dict(cluster_qc or {})
     split_meta = dict(split_meta or {})
@@ -261,6 +273,13 @@ def build_stage_metrics(
     lspo_pairwise_f1 = float(lspo_pairwise_f1) if lspo_pairwise_f1 is not None else None
     lspo_pairwise_f1_val = train_manifest.get("best_val_f1")
     lspo_pairwise_f1_val = float(lspo_pairwise_f1_val) if lspo_pairwise_f1_val is not None else None
+    lspo_pairs_total = int(lspo_pairs_count) if lspo_pairs_count is not None else None
+    split_counts = split_meta.get("split_label_counts") if isinstance(split_meta, Mapping) else None
+    if lspo_pairs_total is None and isinstance(split_counts, Mapping):
+        lspo_pairs_total = int(sum(int((split_counts.get(k) or {}).get("labeled_pairs", 0)) for k in ["train", "val", "test"]))
+    lspo_block_size_p95 = float(_block_p95(lspo_mentions))
+    max_possible_neg_total = split_meta.get("max_possible_neg_total")
+    required_neg_total = split_meta.get("required_neg_total")
 
     return {
         "run_id": str(run_id),
@@ -279,6 +298,11 @@ def build_stage_metrics(
         "threshold_source": train_manifest.get("best_threshold_source", "unknown"),
         "val_class_counts": train_manifest.get("best_val_class_counts", {}),
         "test_class_counts": train_manifest.get("best_test_class_counts", {}),
+        "subset_cache_key": subset_cache_key,
+        "lspo_pairs": lspo_pairs_total,
+        "lspo_block_size_p95": lspo_block_size_p95,
+        "max_possible_neg_total": max_possible_neg_total,
+        "required_neg_total": required_neg_total,
         "split_balance_status": split_meta.get("status"),
         "pair_score_range_ok": cluster_qc.get("pair_score_range_ok"),
         "singleton_ratio": _optional_float(cluster_qc.get("singleton_ratio")),

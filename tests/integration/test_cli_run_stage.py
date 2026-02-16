@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from src import cli
@@ -537,3 +538,83 @@ def test_cli_run_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path
     _run_stage(parser, cfg, "smoke_test_train_seeds_override", extra=["--force", "--seeds", "2", "4"])
 
     assert captured["seeds"] == [2, 4]
+
+
+def test_cli_run_stage_rebuilds_invalid_shared_subset_cache(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    parser = cli.build_parser()
+
+    prime_run = "smoke_test_cache_prime"
+    _run_stage(parser, cfg, prime_run, extra=["--force"])
+    prime_summary = json.loads((cfg["metrics_dir"] / prime_run / "01_subset_summary.json").read_text(encoding="utf-8"))
+    subset_tag = prime_summary["subset_tag"]
+
+    shared_subsets_dir = tmp_path / "data/cache/_shared/subsets"
+    lspo_shared = shared_subsets_dir / f"lspo_mentions_{subset_tag}.parquet"
+    ads_shared = shared_subsets_dir / f"ads_mentions_{subset_tag}.parquet"
+    assert lspo_shared.exists()
+    assert ads_shared.exists()
+
+    # Corrupt cache shape to force validator rebuild.
+    _toy_lspo_mentions().head(1).to_parquet(lspo_shared, index=False)
+
+    run_id = "smoke_test_cache_rebuild"
+    _run_stage(parser, cfg, run_id)
+
+    summary = json.loads((cfg["metrics_dir"] / run_id / "01_subset_summary.json").read_text(encoding="utf-8"))
+    assert summary["cache_rebuilt"] is True
+    assert summary["cache_valid"] is True
+    assert "expected" in str(summary.get("cache_invalid_reason"))
+
+
+def test_cli_run_stage_aborts_early_on_split_balance_infeasible(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+
+    def _assign_infeasible(
+        mentions,
+        seed=11,
+        train_ratio=0.6,
+        val_ratio=0.2,
+        min_neg_val=0,
+        min_neg_test=0,
+        max_attempts=1,
+        return_meta=False,
+        **_kwargs,
+    ):
+        out = mentions.copy()
+        out["split"] = "train"
+        if "orcid" not in out.columns:
+            out["orcid"] = [f"o{i // 2}" for i in range(len(out))]
+        if int(max_attempts) == 1:
+            meta = {
+                "status": "ok",
+                "attempts": 1,
+                "min_neg_val": int(min_neg_val),
+                "min_neg_test": int(min_neg_test),
+                "required_neg_total": int(min_neg_val + min_neg_test),
+                "max_possible_neg_total": 1000,
+                "split_label_counts": {"train": {"pos": 10, "neg": 10, "labeled_pairs": 20}, "val": {"pos": 0, "neg": 0, "labeled_pairs": 0}, "test": {"pos": 0, "neg": 0, "labeled_pairs": 0}},
+            }
+        else:
+            meta = {
+                "status": "split_balance_infeasible",
+                "attempts": 1,
+                "min_neg_val": int(min_neg_val),
+                "min_neg_test": int(min_neg_test),
+                "required_neg_total": int(min_neg_val + min_neg_test),
+                "max_possible_neg_total": 0,
+                "split_label_counts": {"train": {"pos": 10, "neg": 0, "labeled_pairs": 10}, "val": {"pos": 0, "neg": 0, "labeled_pairs": 0}, "test": {"pos": 0, "neg": 0, "labeled_pairs": 0}},
+            }
+        return (out, meta) if return_meta else out
+
+    def _train_should_not_run(*_args, **_kwargs):
+        raise AssertionError("train should not run when split balance is infeasible")
+
+    monkeypatch.setattr(cli, "assign_lspo_splits", _assign_infeasible)
+    monkeypatch.setattr(cli, "train_nand_across_seeds", _train_should_not_run)
+
+    parser = cli.build_parser()
+    with pytest.raises(RuntimeError, match="split_balance_infeasible"):
+        _run_stage(parser, cfg, "smoke_test_infeasible_abort", extra=["--force"])

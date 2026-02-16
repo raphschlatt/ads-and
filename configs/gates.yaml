@@ -32,9 +32,13 @@ stages:
     min_neg_test: 200
     cluster_quality_severity: blocker
     split_balance_degraded_severity: blocker
+    lspo_block_size_p95_min: 2
+    lspo_pairs_min: 50000
   full:
     f1_min: 0.90
     min_neg_val: 500
     min_neg_test: 500
     cluster_quality_severity: blocker
     split_balance_degraded_severity: blocker
+    lspo_block_size_p95_min: 2
+    lspo_pairs_min: 300000

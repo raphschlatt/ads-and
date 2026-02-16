@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.common.cache_ops import resolve_shared_cache_root
 from src.common.io_schema import save_parquet
 from src.common.subset_artifacts import (
     compute_source_fp,
@@ -46,10 +47,10 @@ def test_source_fingerprint_is_deterministic_and_input_sensitive(tmp_path: Path)
 
 def test_subset_identity_changes_when_sampling_config_changes():
     base_cfg = {"stage": "smoke", "seed": 11, "subset_target_mentions": 5000, "subset_sampling": {"target_mean_block_size": 4}}
-    id1 = compute_subset_identity(base_cfg, source_fp="abc123def456", sampler_version="v2")
+    id1 = compute_subset_identity(base_cfg, source_fp="abc123def456", sampler_version="v3")
 
     changed_cfg = {"stage": "smoke", "seed": 11, "subset_target_mentions": 5000, "subset_sampling": {"target_mean_block_size": 5}}
-    id2 = compute_subset_identity(changed_cfg, source_fp="abc123def456", sampler_version="v2")
+    id2 = compute_subset_identity(changed_cfg, source_fp="abc123def456", sampler_version="v3")
 
     assert id1.subset_tag != id2.subset_tag
     assert id1.cfg_fp != id2.cfg_fp
@@ -74,9 +75,9 @@ def test_load_subset_mentions_prefers_shared_over_legacy(tmp_path: Path):
         Path(run_dirs["interim"]) / "lspo_mentions.parquet",
         Path(run_dirs["interim"]) / "ads_mentions.parquet",
     )
-    identity = compute_subset_identity(run_cfg, source_fp=source_fp, sampler_version="v2")
+    identity = compute_subset_identity(run_cfg, source_fp=source_fp, sampler_version="v3")
 
-    shared_dir = Path(data_cfg["subset_cache_dir"]) / "_shared"
+    shared_dir = resolve_shared_cache_root(data_cfg) / "subsets"
     shared_dir.mkdir(parents=True, exist_ok=True)
     save_parquet(_mention_df("lspo_shared"), shared_dir / f"lspo_mentions_{identity.subset_tag}.parquet", index=False)
     save_parquet(_mention_df("ads_shared"), shared_dir / f"ads_mentions_{identity.subset_tag}.parquet", index=False)
@@ -90,7 +91,7 @@ def test_load_subset_mentions_prefers_shared_over_legacy(tmp_path: Path):
         run_cfg=run_cfg,
         run_stage=run_stage,
         allow_legacy=True,
-        sampler_version="v2",
+        sampler_version="v3",
     )
     assert meta.source == "shared"
     assert lspo.iloc[0]["bibcode"] == "lspo_shared"
@@ -119,7 +120,7 @@ def test_load_subset_mentions_falls_back_to_legacy(tmp_path: Path):
         run_cfg=run_cfg,
         run_stage="smoke",
         allow_legacy=True,
-        sampler_version="v2",
+        sampler_version="v3",
     )
     assert meta.source == "legacy"
     assert lspo.iloc[0]["bibcode"] == "lspo_legacy"
@@ -130,7 +131,7 @@ def test_manifest_paths_include_new_and_legacy_names():
     identity = compute_subset_identity(
         {"stage": "mini", "seed": 11, "subset_target_mentions": 10000, "subset_sampling": {"target_mean_block_size": 4}},
         source_fp="0123456789ab",
-        sampler_version="v2",
+        sampler_version="v3",
     )
     paths = resolve_manifest_paths(
         run_id="mini_20260213T000000Z_abcd",

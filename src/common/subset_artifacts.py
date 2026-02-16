@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -10,6 +11,7 @@ from typing import Any, Mapping
 import pandas as pd
 
 from src.common.io_schema import read_parquet, save_parquet
+from src.common.cache_ops import resolve_shared_cache_root
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class SubsetPaths:
     shared_dir: Path
     lspo_shared: Path
     ads_shared: Path
+    lspo_shared_legacy: Path | None
+    ads_shared_legacy: Path | None
     lspo_legacy: Path
     ads_legacy: Path
 
@@ -72,7 +76,7 @@ def compute_source_fp(lspo_interim_path: Path, ads_interim_path: Path) -> str:
 def compute_subset_identity(
     run_cfg: Mapping[str, Any],
     source_fp: str,
-    sampler_version: str = "v2",
+    sampler_version: str = "v3",
 ) -> SubsetIdentity:
     stage = str(run_cfg["stage"])
     seed = int(run_cfg.get("seed", 11))
@@ -108,16 +112,20 @@ def resolve_shared_subset_paths(
     data_cfg: Mapping[str, Any],
     identity: SubsetIdentity,
 ) -> SubsetPaths:
-    shared_dir = Path(data_cfg["subset_cache_dir"]) / "_shared"
+    shared_dir = resolve_shared_cache_root(data_cfg) / "subsets"
     lspo_shared = shared_dir / f"lspo_mentions_{identity.subset_tag}.parquet"
     ads_shared = shared_dir / f"ads_mentions_{identity.subset_tag}.parquet"
-    # Legacy stage-local naming.
+    legacy_shared_dir = Path(data_cfg["subset_cache_dir"]) / "_shared"
+    lspo_shared_legacy = legacy_shared_dir / f"lspo_mentions_{identity.subset_tag}.parquet"
+    ads_shared_legacy = legacy_shared_dir / f"ads_mentions_{identity.subset_tag}.parquet"
     lspo_legacy = Path(data_cfg["subset_cache_dir"]) / f"lspo_mentions_{identity.stage}.parquet"
     ads_legacy = Path(data_cfg["subset_cache_dir"]) / f"ads_mentions_{identity.stage}.parquet"
     return SubsetPaths(
         shared_dir=shared_dir,
         lspo_shared=lspo_shared,
         ads_shared=ads_shared,
+        lspo_shared_legacy=lspo_shared_legacy,
+        ads_shared_legacy=ads_shared_legacy,
         lspo_legacy=lspo_legacy,
         ads_legacy=ads_legacy,
     )
@@ -144,11 +152,14 @@ def resolve_shared_and_legacy_subset_paths(
     identity: SubsetIdentity,
     run_stage: str,
 ) -> SubsetPaths:
-    shared_dir = Path(data_cfg["subset_cache_dir"]) / "_shared"
+    shared_dir = resolve_shared_cache_root(data_cfg) / "subsets"
+    legacy_shared_dir = Path(data_cfg["subset_cache_dir"]) / "_shared"
     return SubsetPaths(
         shared_dir=shared_dir,
         lspo_shared=shared_dir / f"lspo_mentions_{identity.subset_tag}.parquet",
         ads_shared=shared_dir / f"ads_mentions_{identity.subset_tag}.parquet",
+        lspo_shared_legacy=legacy_shared_dir / f"lspo_mentions_{identity.subset_tag}.parquet",
+        ads_shared_legacy=legacy_shared_dir / f"ads_mentions_{identity.subset_tag}.parquet",
         lspo_legacy=Path(run_subset_dir) / f"lspo_mentions_{run_stage}.parquet",
         ads_legacy=Path(run_subset_dir) / f"ads_mentions_{run_stage}.parquet",
     )
@@ -161,7 +172,7 @@ def load_subset_mentions(
     run_cfg: Mapping[str, Any],
     run_stage: str,
     allow_legacy: bool = True,
-    sampler_version: str = "v2",
+    sampler_version: str = "v3",
 ) -> tuple[pd.DataFrame, pd.DataFrame, LoadMeta]:
     source_fp = compute_source_fp(
         lspo_interim_path=Path(run_dirs["interim"]) / "lspo_mentions.parquet",
@@ -182,7 +193,35 @@ def load_subset_mentions(
             LoadMeta(source="shared", identity=identity, lspo_path=paths.lspo_shared, ads_path=paths.ads_shared),
         )
 
+    if (
+        allow_legacy
+        and paths.lspo_shared_legacy is not None
+        and paths.ads_shared_legacy is not None
+        and paths.lspo_shared_legacy.exists()
+        and paths.ads_shared_legacy.exists()
+    ):
+        warnings.warn(
+            "legacy_read_mode=true: loading subset cache from legacy shared location",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return (
+            read_parquet(paths.lspo_shared_legacy),
+            read_parquet(paths.ads_shared_legacy),
+            LoadMeta(
+                source="legacy_shared",
+                identity=identity,
+                lspo_path=paths.lspo_shared_legacy,
+                ads_path=paths.ads_shared_legacy,
+            ),
+        )
+
     if allow_legacy and paths.lspo_legacy.exists() and paths.ads_legacy.exists():
+        warnings.warn(
+            "legacy_read_mode=true: loading subset cache from legacy run-local location",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return (
             read_parquet(paths.lspo_legacy),
             read_parquet(paths.ads_legacy),
@@ -192,6 +231,7 @@ def load_subset_mentions(
     raise FileNotFoundError(
         "Subset mentions not found for current config. "
         f"Checked shared: {paths.lspo_shared}, {paths.ads_shared}; "
+        f"legacy_shared: {paths.lspo_shared_legacy}, {paths.ads_shared_legacy}; "
         f"legacy: {paths.lspo_legacy}, {paths.ads_legacy}"
     )
 

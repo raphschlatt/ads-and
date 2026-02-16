@@ -5,6 +5,7 @@ __pycache__/
 
 # Data and artifacts
 artifacts/
+data/cache/
 data/raw/
 data/interim/
 data/processed/

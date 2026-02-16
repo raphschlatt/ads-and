@@ -21,6 +21,10 @@ def _base_metrics():
         "singleton_ratio": 0.10,
         "split_high_sim_rate_probe": 0.05,
         "eps_boundary_hit": False,
+        "lspo_block_size_p95": 3.5,
+        "lspo_pairs": 1000,
+        "max_possible_neg_total": 1000,
+        "required_neg_total": 40,
     }
 
 
@@ -56,6 +60,8 @@ def _gate_cfg():
                 "min_neg_test": 0,
                 "cluster_quality_severity": "blocker",
                 "split_balance_degraded_severity": "blocker",
+                "lspo_block_size_p95_min": 2.0,
+                "lspo_pairs_min": 500,
             },
         },
     }
@@ -116,3 +122,13 @@ def test_go_no_go_eps_boundary_is_warning():
     go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
     assert go["go"] is True
     assert "eps_boundary_hit" in go["warnings"]
+
+
+def test_go_no_go_blocks_when_split_feasibility_fails():
+    metrics = _base_metrics()
+    metrics["max_possible_neg_total"] = 10
+    metrics["required_neg_total"] = 40
+
+    go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
+    assert go["go"] is False
+    assert "split_neg_feasible" in go["blockers"]

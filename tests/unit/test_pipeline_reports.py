@@ -150,7 +150,7 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         "merged_low_conf_rate": 0.07,
         "merged_low_conf_rate_probe": 0.09,
     }
-    split_meta = {"status": "ok"}
+    split_meta = {"status": "ok", "max_possible_neg_total": 1234, "required_neg_total": 400}
     eps_meta = {
         "boundary_hit": True,
         "boundary_side": "max",
@@ -180,6 +180,8 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
         cluster_qc=cluster_qc,
         split_meta=split_meta,
         eps_meta=eps_meta,
+        subset_cache_key="smoke_seed11_target5000_cfg123_srcabc",
+        lspo_pairs_count=42,
     )
     assert stage_metrics["run_id"] == run_id
     assert stage_metrics["schema_valid"] is True
@@ -192,6 +194,10 @@ def test_stage_metrics_and_compare_to_baseline(tmp_path: Path):
     assert stage_metrics["split_high_sim_rate_probe"] == 0.13
     assert stage_metrics["eps_boundary_hit"] is True
     assert stage_metrics["eps_boundary_side"] == "max"
+    assert stage_metrics["subset_cache_key"] == "smoke_seed11_target5000_cfg123_srcabc"
+    assert stage_metrics["lspo_pairs"] == 42
+    assert stage_metrics["max_possible_neg_total"] == 1234
+    assert stage_metrics["required_neg_total"] == 400
     assert stage_metrics["counts"]["ads_clusters"] == 3
     assert stage_metrics["counts"]["ads_cluster_assignments"] == 4
     assert stage_metrics["counts"]["ads_blocks"] == 2

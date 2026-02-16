@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable
 
 import yaml
 
+from src.common.cache_ops import resolve_shared_cache_root
+
 
 def load_yaml(path: str | Path) -> Dict[str, Any]:
     p = Path(path)
@@ -134,6 +136,7 @@ def load_notebook_context(
 
 
 def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_id: str) -> Dict[str, Path]:
+    shared_root = resolve_shared_cache_root(data_cfg)
     dirs = {
         "metrics": Path(artifacts_cfg["metrics_dir"]) / run_id,
         "checkpoints": Path(artifacts_cfg["checkpoints_dir"]) / run_id,
@@ -144,6 +147,12 @@ def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_
         "subset_manifests": Path(data_cfg["subset_manifest_dir"]),
         "interim": Path(data_cfg["interim_dir"]),
         "processed": Path(data_cfg["processed_dir"]),
+        "shared_cache_root": shared_root,
+        "shared_subsets": shared_root / "subsets",
+        "shared_embeddings": shared_root / "embeddings",
+        "shared_pairs": shared_root / "pairs",
+        "shared_pair_scores": shared_root / "pair_scores",
+        "shared_eps_sweeps": shared_root / "eps_sweeps",
     }
     return dirs
 

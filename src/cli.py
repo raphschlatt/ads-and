@@ -20,6 +20,7 @@ from src.approaches.nand.export import build_publication_author_mapping
 from src.approaches.nand.infer_pairs import score_pairs_with_checkpoint
 from src.approaches.nand.train import train_nand_across_seeds
 from src.common.cli_ui import CliUI
+from src.common.cache_ops import hash_file, link_or_copy, resolve_shared_cache_root, stable_hash
 from src.common.config import (
     build_run_dirs,
     find_project_root,
@@ -51,6 +52,8 @@ from src.data.prepare_ads import prepare_ads_mentions
 from src.data.prepare_lspo import prepare_lspo_mentions
 from src.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from src.features.embed_specter import get_or_create_specter_embeddings
+
+SUBSET_CACHE_VERSION = "v3"
 
 
 def _load_run_cfg(path: str | Path) -> dict:
@@ -156,6 +159,100 @@ def _resolve_pair_build_cfg(run_cfg: dict[str, Any]) -> dict[str, Any]:
     return {
         "exclude_same_bibcode": bool(cfg.get("exclude_same_bibcode", True)),
     }
+
+
+def _block_size_p95(mentions) -> float:
+    if len(mentions) == 0 or "block_key" not in mentions.columns:
+        return 0.0
+    block_sizes = mentions.groupby("block_key").size()
+    if len(block_sizes) == 0:
+        return 0.0
+    return float(block_sizes.quantile(0.95))
+
+
+def _singleton_ratio_blocks(mentions) -> float:
+    if len(mentions) == 0 or "block_key" not in mentions.columns:
+        return 0.0
+    block_sizes = mentions.groupby("block_key").size()
+    if len(block_sizes) == 0:
+        return 0.0
+    return float((block_sizes == 1).mean())
+
+
+def _subset_meta_path(shared_subset_dir: Path, subset_tag: str) -> Path:
+    return Path(shared_subset_dir) / f"subset_{subset_tag}.meta.json"
+
+
+def _validate_cached_subset(
+    *,
+    lspo_subset,
+    ads_subset,
+    run_cfg: dict[str, Any],
+    stage: str,
+    split_assignment_cfg: dict[str, float],
+    split_balance_cfg: dict[str, Any],
+) -> tuple[bool, list[str], dict[str, Any]]:
+    reasons: list[str] = []
+    checks: dict[str, Any] = {}
+
+    target_mentions = run_cfg.get("subset_target_mentions")
+    if stage != "full" and target_mentions is not None:
+        target_n = int(target_mentions)
+        if int(len(lspo_subset)) != target_n:
+            reasons.append(f"lspo_rows={len(lspo_subset)} expected={target_n}")
+        if int(len(ads_subset)) != target_n:
+            reasons.append(f"ads_rows={len(ads_subset)} expected={target_n}")
+    checks["rows_lspo"] = int(len(lspo_subset))
+    checks["rows_ads"] = int(len(ads_subset))
+
+    block_p95 = _block_size_p95(lspo_subset)
+    singleton_ratio = _singleton_ratio_blocks(lspo_subset)
+    checks["lspo_block_p95"] = float(block_p95)
+    checks["lspo_singleton_ratio_blocks"] = float(singleton_ratio)
+    if stage in {"mid", "full"}:
+        if block_p95 < 2.0:
+            reasons.append(f"lspo_block_p95={block_p95:.3f} < 2.0")
+        if singleton_ratio > 0.90:
+            reasons.append(f"lspo_singleton_ratio_blocks={singleton_ratio:.3f} > 0.90")
+
+    _, feasibility_meta = assign_lspo_splits(
+        lspo_subset,
+        seed=int(run_cfg.get("seed", 11)),
+        train_ratio=float(split_assignment_cfg["train_ratio"]),
+        val_ratio=float(split_assignment_cfg["val_ratio"]),
+        min_neg_val=int(split_balance_cfg.get("min_neg_val", 0)),
+        min_neg_test=int(split_balance_cfg.get("min_neg_test", 0)),
+        max_attempts=1,
+        return_meta=True,
+    )
+    max_possible = feasibility_meta.get("max_possible_neg_total")
+    required = feasibility_meta.get("required_neg_total")
+    checks["max_possible_neg_total"] = max_possible
+    checks["required_neg_total"] = required
+    if max_possible is not None and required is not None and int(max_possible) < int(required):
+        reasons.append(f"max_possible_neg_total={int(max_possible)} < required_neg_total={int(required)}")
+
+    return (len(reasons) == 0), reasons, checks
+
+
+def _record_cache_ref(
+    refs: list[dict[str, Any]],
+    *,
+    artifact_type: str,
+    artifact_id: str,
+    shared_path: Path,
+    run_path: Path,
+    mode: str,
+) -> None:
+    refs.append(
+        {
+            "artifact_type": str(artifact_type),
+            "artifact_id": str(artifact_id),
+            "shared_path": str(shared_path),
+            "run_path": str(run_path),
+            "materialization_mode": str(mode),
+        }
+    )
 
 
 def _build_eps_sweep_values(cluster_cfg: dict[str, Any]) -> list[float]:
@@ -528,6 +625,161 @@ def cmd_report(args):
     print(f"Go/No-Go: {'GO' if go['go'] else 'NO-GO'} -> {args.output}")
 
 
+def _cache_version_num(raw: Any) -> int:
+    text = str(raw or "").strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    try:
+        return int(text)
+    except Exception:
+        return 0
+
+
+def _collect_stale_subset_records(data_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    dirs = [
+        resolve_shared_cache_root(data_cfg) / "subsets",
+        Path(data_cfg["subset_cache_dir"]) / "_shared",
+    ]
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for base in dirs:
+        if not base.exists():
+            continue
+        for lspo_path in sorted(base.glob("lspo_mentions_*.parquet")):
+            subset_tag = lspo_path.name[len("lspo_mentions_") : -len(".parquet")]
+            key = (str(base), subset_tag)
+            if key in seen:
+                continue
+            seen.add(key)
+            ads_path = base / f"ads_mentions_{subset_tag}.parquet"
+            meta_path = _subset_meta_path(base, subset_tag)
+            reason = None
+            cache_version = None
+            if not ads_path.exists():
+                reason = "missing_ads_pair"
+            elif not meta_path.exists():
+                reason = "missing_meta"
+            else:
+                try:
+                    meta = _load_json(meta_path)
+                except Exception:
+                    meta = {}
+                    reason = "invalid_meta_json"
+                cache_version = (meta or {}).get("cache_version")
+                if reason is None and _cache_version_num(cache_version) < _cache_version_num(SUBSET_CACHE_VERSION):
+                    reason = f"cache_version_lt_{SUBSET_CACHE_VERSION}"
+                health = (meta or {}).get("health") or {}
+                max_possible = health.get("max_possible_neg_total")
+                required = health.get("required_neg_total")
+                if reason is None and max_possible is not None and required is not None and int(max_possible) < int(required):
+                    reason = "split_feasibility_failed"
+            if reason is not None:
+                out.append(
+                    {
+                        "type": "stale_subset",
+                        "reason": str(reason),
+                        "subset_tag": subset_tag,
+                        "cache_version": cache_version,
+                        "lspo_path": str(lspo_path),
+                        "ads_path": str(ads_path),
+                        "meta_path": str(meta_path),
+                    }
+                )
+    return out
+
+
+def _collect_redundant_run_copies(paths_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    metrics_root = Path(paths_cfg["artifacts"]["metrics_dir"])
+    out: list[dict[str, Any]] = []
+    if not metrics_root.exists():
+        return out
+    for ref_file in sorted(metrics_root.glob("*/00_cache_refs.json")):
+        payload = _load_json(ref_file)
+        run_id = str(payload.get("run_id", ref_file.parent.name))
+        for ref in list(payload.get("cache_refs") or []):
+            run_path = Path(str(ref.get("run_path", "")))
+            shared_path = Path(str(ref.get("shared_path", "")))
+            if not run_path.exists() or not shared_path.exists():
+                continue
+            try:
+                if os.path.samefile(run_path, shared_path):
+                    continue
+            except Exception:
+                pass
+            if run_path.stat().st_size != shared_path.stat().st_size:
+                continue
+            try:
+                if hash_file(run_path) != hash_file(shared_path):
+                    continue
+            except Exception:
+                continue
+            out.append(
+                {
+                    "type": "redundant_run_copy",
+                    "run_id": run_id,
+                    "artifact_type": ref.get("artifact_type"),
+                    "artifact_id": ref.get("artifact_id"),
+                    "run_path": str(run_path),
+                    "shared_path": str(shared_path),
+                }
+            )
+    return out
+
+
+def cmd_cache_doctor(args):
+    paths = _load_paths_cfg(args.paths_config)
+    stale_subsets = _collect_stale_subset_records(paths["data"])
+    redundant_run_copies = _collect_redundant_run_copies(paths)
+    payload = {
+        "stale_subsets": stale_subsets,
+        "redundant_run_copies": redundant_run_copies,
+        "counts": {
+            "stale_subsets": int(len(stale_subsets)),
+            "redundant_run_copies": int(len(redundant_run_copies)),
+        },
+    }
+    print(json.dumps(payload, indent=2))
+
+
+def cmd_cache_purge(args):
+    paths = _load_paths_cfg(args.paths_config)
+    targets = {
+        "stale-subsets": _collect_stale_subset_records(paths["data"]),
+        "redundant-run-copies": _collect_redundant_run_copies(paths),
+    }
+    rows = list(targets[args.target])
+    purged = 0
+    relinked = 0
+
+    if args.target == "stale-subsets":
+        for row in rows:
+            for key in ["lspo_path", "ads_path", "meta_path"]:
+                p = Path(str(row.get(key, "")))
+                if not p.exists():
+                    continue
+                if args.yes:
+                    p.unlink()
+                    purged += 1
+    elif args.target == "redundant-run-copies":
+        for row in rows:
+            run_path = Path(str(row["run_path"]))
+            shared_path = Path(str(row["shared_path"]))
+            if args.yes:
+                mode = link_or_copy(shared_path, run_path)
+                relinked += int(mode in {"hardlink", "symlink", "existing"})
+                purged += 1
+
+    payload = {
+        "target": args.target,
+        "dry_run": not bool(args.yes),
+        "candidates": rows,
+        "candidate_count": int(len(rows)),
+        "purged_count": int(purged),
+        "relinked_count": int(relinked),
+    }
+    print(json.dumps(payload, indent=2))
+
+
 def cmd_run_stage(args):
     ui = CliUI(total_steps=11, progress=args.progress)
 
@@ -597,6 +849,15 @@ def cmd_run_stage(args):
         checkpoint_dir = Path(run_dirs["checkpoints"])
         pair_score_dir = Path(run_dirs["pair_scores"])
         cluster_dir = Path(run_dirs["clusters"])
+        shared_cache_root = resolve_shared_cache_root(data_cfg)
+        shared_subsets_dir = Path(run_dirs["shared_subsets"])
+        shared_embeddings_dir = Path(run_dirs["shared_embeddings"])
+        shared_pairs_dir = Path(run_dirs["shared_pairs"])
+        shared_pair_scores_dir = Path(run_dirs["shared_pair_scores"])
+        shared_eps_sweeps_dir = Path(run_dirs["shared_eps_sweeps"])
+
+        for p in [shared_cache_root, shared_subsets_dir, shared_embeddings_dir, shared_pairs_dir, shared_pair_scores_dir, shared_eps_sweeps_dir]:
+            p.mkdir(parents=True, exist_ok=True)
 
         lspo_mentions_path = Path(run_dirs["interim"]) / "lspo_mentions.parquet"
         ads_mentions_path = Path(run_dirs["interim"]) / "ads_mentions.parquet"
@@ -625,6 +886,8 @@ def cmd_run_stage(args):
         stage_metrics_path = metrics_dir / f"05_stage_metrics_{stage}.json"
         go_no_go_path = metrics_dir / f"05_go_no_go_{stage}.json"
         compare_path = metrics_dir / "99_compare_to_baseline.json"
+        cache_refs_path = metrics_dir / "00_cache_refs.json"
+        cache_refs: list[dict[str, Any]] = []
 
         ui.done(f"Run ID: {run_id}")
 
@@ -657,7 +920,7 @@ def cmd_run_stage(args):
         timings: dict[str, float] = {}
 
         source_fp = compute_source_fp(lspo_mentions_path, ads_mentions_path)
-        subset_identity = compute_subset_identity(run_cfg=run_cfg, source_fp=source_fp, sampler_version="v2")
+        subset_identity = compute_subset_identity(run_cfg=run_cfg, source_fp=source_fp, sampler_version=SUBSET_CACHE_VERSION)
         subset_paths = resolve_shared_subset_paths(data_cfg=data_cfg, identity=subset_identity)
         manifest_paths = resolve_manifest_paths(
             run_id=run_id,
@@ -666,18 +929,58 @@ def cmd_run_stage(args):
             run_stage=stage,
         )
         subset_paths.shared_dir.mkdir(parents=True, exist_ok=True)
+        split_balance_cfg = run_cfg.get("split_balance", {})
+        subset_meta_path = _subset_meta_path(subset_paths.shared_dir, subset_identity.subset_tag)
 
         cache_hit = False
-        if subset_paths.lspo_shared.exists() and subset_paths.ads_shared.exists() and not args.force:
+        cache_valid: bool | None = None
+        cache_invalid_reason: str | None = None
+        cache_rebuilt = False
+        cache_source = "none"
+        cache_health: dict[str, Any] = {}
+
+        if not args.force and subset_paths.lspo_shared.exists() and subset_paths.ads_shared.exists():
+            cache_source = "shared"
+        elif (
+            not args.force
+            and subset_paths.lspo_shared_legacy is not None
+            and subset_paths.ads_shared_legacy is not None
+            and subset_paths.lspo_shared_legacy.exists()
+            and subset_paths.ads_shared_legacy.exists()
+        ):
+            cache_source = "legacy_shared"
+
+        if cache_source != "none":
             cache_hit = True
             t0 = perf_counter()
-            lspo_subset = read_parquet(subset_paths.lspo_shared)
+            lspo_cache_path = subset_paths.lspo_shared if cache_source == "shared" else subset_paths.lspo_shared_legacy
+            ads_cache_path = subset_paths.ads_shared if cache_source == "shared" else subset_paths.ads_shared_legacy
+            assert lspo_cache_path is not None
+            assert ads_cache_path is not None
+            lspo_subset = read_parquet(lspo_cache_path)
             t1 = perf_counter()
-            ads_subset = read_parquet(subset_paths.ads_shared)
+            ads_subset = read_parquet(ads_cache_path)
             t2 = perf_counter()
             timings["read_lspo_s"] = t1 - t0
             timings["read_ads_s"] = t2 - t1
-        else:
+            cache_valid, reasons, cache_health = _validate_cached_subset(
+                lspo_subset=lspo_subset,
+                ads_subset=ads_subset,
+                run_cfg=run_cfg,
+                stage=stage,
+                split_assignment_cfg=split_assignment_cfg,
+                split_balance_cfg=split_balance_cfg,
+            )
+            if not cache_valid:
+                cache_invalid_reason = "; ".join(reasons)
+                cache_rebuilt = True
+                cache_hit = False
+            elif cache_source == "legacy_shared":
+                atomic_save_parquet(lspo_subset, subset_paths.lspo_shared, index=False)
+                atomic_save_parquet(ads_subset, subset_paths.ads_shared, index=False)
+                cache_source = "shared_migrated"
+
+        if cache_source == "none" or cache_rebuilt:
             t0 = perf_counter()
             lspo_subset = build_stage_subset(
                 lspo_mentions,
@@ -703,14 +1006,53 @@ def cmd_run_stage(args):
             timings["build_ads_s"] = t2 - t1
             timings["save_lspo_shared_s"] = t3 - t2
             timings["save_ads_shared_s"] = t4 - t3
+            cache_valid = True
+            _, _, cache_health = _validate_cached_subset(
+                lspo_subset=lspo_subset,
+                ads_subset=ads_subset,
+                run_cfg=run_cfg,
+                stage=stage,
+                split_assignment_cfg=split_assignment_cfg,
+                split_balance_cfg=split_balance_cfg,
+            )
+
+        write_json(
+            {
+                "cache_version": SUBSET_CACHE_VERSION,
+                "cache_key": subset_identity.subset_tag,
+                "sampler_version": subset_identity.sampler_version,
+                "run_stage": stage,
+                "source_fp": subset_identity.source_fp,
+                "subset_target_mentions": run_cfg.get("subset_target_mentions"),
+                "health": cache_health,
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+            },
+            subset_meta_path,
+        )
 
         t5 = perf_counter()
-        atomic_save_parquet(lspo_subset, lspo_subset_run_path, index=False)
+        lspo_subset_link_mode = link_or_copy(subset_paths.lspo_shared, lspo_subset_run_path)
         t6 = perf_counter()
-        atomic_save_parquet(ads_subset, ads_subset_run_path, index=False)
+        ads_subset_link_mode = link_or_copy(subset_paths.ads_shared, ads_subset_run_path)
         t7 = perf_counter()
         timings["save_lspo_run_s"] = t6 - t5
         timings["save_ads_run_s"] = t7 - t6
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="subset_lspo",
+            artifact_id=subset_identity.subset_tag,
+            shared_path=subset_paths.lspo_shared,
+            run_path=lspo_subset_run_path,
+            mode=lspo_subset_link_mode,
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="subset_ads",
+            artifact_id=subset_identity.subset_tag,
+            shared_path=subset_paths.ads_shared,
+            run_path=ads_subset_run_path,
+            mode=ads_subset_link_mode,
+        )
 
         if args.force or not manifest_paths.lspo_primary.exists():
             write_subset_manifest(lspo_subset, manifest_paths.lspo_primary)
@@ -724,7 +1066,12 @@ def cmd_run_stage(args):
             stage=stage,
             source_fp=subset_identity.source_fp,
             subset_tag=subset_identity.subset_tag,
+            cache_key=subset_identity.subset_tag,
             cache_hit=cache_hit,
+            cache_valid=cache_valid,
+            cache_invalid_reason=cache_invalid_reason,
+            cache_rebuilt=cache_rebuilt,
+            cache_version=SUBSET_CACHE_VERSION,
             lspo_subset=lspo_subset,
             ads_subset=ads_subset,
             timings=timings,
@@ -737,30 +1084,46 @@ def cmd_run_stage(args):
             output_path=metrics_dir / "01_run_consistency.json",
             extras={"subset_tag": subset_identity.subset_tag, "cache_hit": cache_hit},
         )
-        if cache_hit:
+        if cache_hit and not cache_rebuilt:
             ui.skip(f"Shared cache hit: {subset_identity.subset_tag}")
+        elif cache_rebuilt:
+            ui.done(f"Invalid cache rebuilt: {cache_invalid_reason}")
         else:
             ui.done(f"Built subsets ({len(lspo_subset)} LSPO / {len(ads_subset)} ADS).")
 
         ui.start("Build or load embeddings")
+        representation_cfg_hash = stable_hash(rep_cfg)
+        model_version = str(model_cfg.get("name", "nand"))
+        embedding_id = stable_hash(
+            {
+                "subset_id": subset_identity.subset_tag,
+                "representation_cfg_hash": representation_cfg_hash,
+                "model_version": model_version,
+            }
+        )
+        lspo_chars_shared_path = shared_embeddings_dir / f"lspo_chars2vec_{embedding_id}.npy"
+        lspo_text_shared_path = shared_embeddings_dir / f"lspo_specter_{embedding_id}.npy"
+        ads_chars_shared_path = shared_embeddings_dir / f"ads_chars2vec_{embedding_id}.npy"
+        ads_text_shared_path = shared_embeddings_dir / f"ads_specter_{embedding_id}.npy"
+
         emb_cache_hit = (
-            lspo_chars_path.exists()
-            and lspo_text_path.exists()
-            and ads_chars_path.exists()
-            and ads_text_path.exists()
+            lspo_chars_shared_path.exists()
+            and lspo_text_shared_path.exists()
+            and ads_chars_shared_path.exists()
+            and ads_text_shared_path.exists()
             and not args.force
         )
 
         lspo_chars = get_or_create_chars2vec_embeddings(
             mentions=lspo_subset,
-            output_path=lspo_chars_path,
+            output_path=lspo_chars_shared_path,
             force_recompute=args.force,
             use_stub_if_missing=args.use_stub_embeddings,
             quiet_libraries=args.quiet_libs,
         )
         lspo_text = get_or_create_specter_embeddings(
             mentions=lspo_subset,
-            output_path=lspo_text_path,
+            output_path=lspo_text_shared_path,
             force_recompute=args.force,
             model_name=rep_cfg.get("text_model_name", "allenai/specter"),
             max_length=int(rep_cfg.get("max_length", 256)),
@@ -774,14 +1137,14 @@ def cmd_run_stage(args):
         )
         ads_chars = get_or_create_chars2vec_embeddings(
             mentions=ads_subset,
-            output_path=ads_chars_path,
+            output_path=ads_chars_shared_path,
             force_recompute=args.force,
             use_stub_if_missing=args.use_stub_embeddings,
             quiet_libraries=args.quiet_libs,
         )
         ads_text = get_or_create_specter_embeddings(
             mentions=ads_subset,
-            output_path=ads_text_path,
+            output_path=ads_text_shared_path,
             force_recompute=args.force,
             model_name=rep_cfg.get("text_model_name", "allenai/specter"),
             max_length=int(rep_cfg.get("max_length", 256)),
@@ -793,6 +1156,38 @@ def cmd_run_stage(args):
             quiet_libraries=args.quiet_libs,
             reuse_model=True,
         )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="embedding_lspo_chars",
+            artifact_id=embedding_id,
+            shared_path=lspo_chars_shared_path,
+            run_path=lspo_chars_path,
+            mode=link_or_copy(lspo_chars_shared_path, lspo_chars_path),
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="embedding_lspo_text",
+            artifact_id=embedding_id,
+            shared_path=lspo_text_shared_path,
+            run_path=lspo_text_path,
+            mode=link_or_copy(lspo_text_shared_path, lspo_text_path),
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="embedding_ads_chars",
+            artifact_id=embedding_id,
+            shared_path=ads_chars_shared_path,
+            run_path=ads_chars_path,
+            mode=link_or_copy(ads_chars_shared_path, ads_chars_path),
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="embedding_ads_text",
+            artifact_id=embedding_id,
+            shared_path=ads_text_shared_path,
+            run_path=ads_text_path,
+            mode=link_or_copy(ads_text_shared_path, ads_text_path),
+        )
 
         if emb_cache_hit:
             ui.skip("Reused cached embeddings.")
@@ -803,14 +1198,45 @@ def cmd_run_stage(args):
             )
 
         ui.start("Assign LSPO splits and build LSPO pairs")
-        if lspo_pairs_path.exists() and split_meta_path.exists() and lspo_subset_run_path.exists() and not args.force:
-            lspo_mentions_split = read_parquet(lspo_subset_run_path)
-            lspo_pairs = read_parquet(lspo_pairs_path)
-            split_meta = _load_json(split_meta_path)
+        pair_cfg_hash = stable_hash(
+            {
+                "max_pairs_per_block": run_cfg.get("max_pairs_per_block"),
+                "exclude_same_bibcode": bool(pair_build_cfg["exclude_same_bibcode"]),
+            }
+        )
+        split_cfg_hash = stable_hash(
+            {
+                "split_assignment": split_assignment_cfg,
+                "split_balance": split_balance_cfg,
+                "seed": int(run_cfg.get("seed", 11)),
+            }
+        )
+        lspo_pairs_id = stable_hash(
+            {
+                "subset_id": subset_identity.subset_tag,
+                "split_cfg_hash": split_cfg_hash,
+                "pair_cfg_hash": pair_cfg_hash,
+            }
+        )
+        ads_pairs_id = stable_hash({"subset_id": subset_identity.subset_tag, "pair_cfg_hash": pair_cfg_hash})
+        lspo_split_shared_path = shared_pairs_dir / f"lspo_mentions_split_{lspo_pairs_id}.parquet"
+        lspo_pairs_shared_path = shared_pairs_dir / f"lspo_pairs_{lspo_pairs_id}.parquet"
+        split_meta_shared_path = shared_pairs_dir / f"split_balance_{lspo_pairs_id}.json"
+        ads_pairs_shared_path = shared_pairs_dir / f"ads_pairs_{ads_pairs_id}.parquet"
+        pairs_qc_shared_path = shared_pairs_dir / f"pairs_qc_{lspo_pairs_id}_{ads_pairs_id}.json"
+
+        if (
+            lspo_pairs_shared_path.exists()
+            and split_meta_shared_path.exists()
+            and lspo_split_shared_path.exists()
+            and not args.force
+        ):
+            lspo_mentions_split = read_parquet(lspo_split_shared_path)
+            lspo_pairs = read_parquet(lspo_pairs_shared_path)
+            split_meta = _load_json(split_meta_shared_path)
             lspo_pair_meta: dict[str, Any] = {}
             ui.skip(f"Reused LSPO split+pairs ({len(lspo_pairs)} pairs).")
         else:
-            split_balance_cfg = run_cfg.get("split_balance", {})
             lspo_mentions_split, split_meta = assign_lspo_splits(
                 lspo_subset,
                 seed=int(run_cfg.get("seed", 11)),
@@ -821,6 +1247,16 @@ def cmd_run_stage(args):
                 max_attempts=int(split_balance_cfg.get("max_attempts", 1)),
                 return_meta=True,
             )
+            atomic_save_parquet(lspo_mentions_split, lspo_split_shared_path, index=False)
+            write_json(split_meta, split_meta_shared_path)
+            if str(split_meta.get("status", "")).strip().lower() == "split_balance_infeasible":
+                link_or_copy(lspo_split_shared_path, lspo_subset_run_path)
+                link_or_copy(split_meta_shared_path, split_meta_path)
+                raise RuntimeError(
+                    "split_balance_infeasible: "
+                    f"max_possible_neg_total={split_meta.get('max_possible_neg_total')} "
+                    f"< required_neg_total={split_meta.get('required_neg_total')}"
+                )
             lspo_pairs, lspo_pair_meta = build_pairs_within_blocks(
                 mentions=lspo_mentions_split,
                 max_pairs_per_block=run_cfg.get("max_pairs_per_block"),
@@ -832,15 +1268,47 @@ def cmd_run_stage(args):
                 show_progress=args.progress,
                 return_meta=True,
             )
-            write_pairs(lspo_pairs, lspo_pairs_path)
-            save_parquet(lspo_mentions_split, lspo_subset_run_path, index=False)
-            write_json(split_meta, split_meta_path)
+            write_pairs(lspo_pairs, lspo_pairs_shared_path)
             ui.done(f"Built LSPO pairs ({len(lspo_pairs)} rows).")
+        lspo_split_link_mode = link_or_copy(lspo_split_shared_path, lspo_subset_run_path)
+        lspo_pairs_link_mode = link_or_copy(lspo_pairs_shared_path, lspo_pairs_path)
+        split_meta_link_mode = link_or_copy(split_meta_shared_path, split_meta_path)
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="lspo_split",
+            artifact_id=lspo_pairs_id,
+            shared_path=lspo_split_shared_path,
+            run_path=lspo_subset_run_path,
+            mode=lspo_split_link_mode,
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="lspo_pairs",
+            artifact_id=lspo_pairs_id,
+            shared_path=lspo_pairs_shared_path,
+            run_path=lspo_pairs_path,
+            mode=lspo_pairs_link_mode,
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="split_meta",
+            artifact_id=lspo_pairs_id,
+            shared_path=split_meta_shared_path,
+            run_path=split_meta_path,
+            mode=split_meta_link_mode,
+        )
+
+        if str(split_meta.get("status", "")).strip().lower() == "split_balance_infeasible":
+            raise RuntimeError(
+                "split_balance_infeasible: "
+                f"max_possible_neg_total={split_meta.get('max_possible_neg_total')} "
+                f"< required_neg_total={split_meta.get('required_neg_total')}"
+            )
 
         ui.start("Build ADS pairs and pair QC")
-        if ads_pairs_path.exists() and pairs_qc_path.exists() and not args.force:
-            ads_pairs = read_parquet(ads_pairs_path)
-            pairs_qc = _load_json(pairs_qc_path)
+        if ads_pairs_shared_path.exists() and pairs_qc_shared_path.exists() and not args.force:
+            ads_pairs = read_parquet(ads_pairs_shared_path)
+            pairs_qc = _load_json(pairs_qc_shared_path)
             lspo_pair_meta = dict(pairs_qc.get("lspo_pair_build", lspo_pair_meta))
             ads_pair_meta = dict(pairs_qc.get("ads_pair_build", {}))
             ui.skip(f"Reused ADS pairs ({len(ads_pairs)} rows).")
@@ -856,7 +1324,7 @@ def cmd_run_stage(args):
                 show_progress=args.progress,
                 return_meta=True,
             )
-            write_pairs(ads_pairs, ads_pairs_path)
+            write_pairs(ads_pairs, ads_pairs_shared_path)
             pairs_qc = build_pairs_qc(
                 lspo_mentions=lspo_mentions_split,
                 lspo_pairs=lspo_pairs,
@@ -865,8 +1333,26 @@ def cmd_run_stage(args):
                 lspo_pair_build_meta=lspo_pair_meta,
                 ads_pair_build_meta=ads_pair_meta,
             )
-            write_json(pairs_qc, pairs_qc_path)
+            write_json(pairs_qc, pairs_qc_shared_path)
             ui.done(f"Built ADS pairs ({len(ads_pairs)} rows).")
+        ads_pairs_link_mode = link_or_copy(ads_pairs_shared_path, ads_pairs_path)
+        pairs_qc_link_mode = link_or_copy(pairs_qc_shared_path, pairs_qc_path)
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="ads_pairs",
+            artifact_id=ads_pairs_id,
+            shared_path=ads_pairs_shared_path,
+            run_path=ads_pairs_path,
+            mode=ads_pairs_link_mode,
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="pairs_qc",
+            artifact_id=f"{lspo_pairs_id}_{ads_pairs_id}",
+            shared_path=pairs_qc_shared_path,
+            run_path=pairs_qc_path,
+            mode=pairs_qc_link_mode,
+        )
 
         write_run_consistency(
             run_id=run_id,
@@ -910,8 +1396,18 @@ def cmd_run_stage(args):
         )
 
         ui.start("Score ADS pairs")
-        if pair_scores_path.exists() and not args.force:
-            pair_scores = read_parquet(pair_scores_path)
+        checkpoint_hash = hash_file(train_manifest["best_checkpoint"])
+        score_cfg_hash = stable_hash({"score_batch_size": int(args.score_batch_size)})
+        pair_scores_id = stable_hash(
+            {
+                "ads_pairs_id": ads_pairs_id,
+                "checkpoint_hash": checkpoint_hash,
+                "score_cfg_hash": score_cfg_hash,
+            }
+        )
+        pair_scores_shared_path = shared_pair_scores_dir / f"ads_pair_scores_{pair_scores_id}.parquet"
+        if pair_scores_shared_path.exists() and not args.force:
+            pair_scores = read_parquet(pair_scores_shared_path)
             ui.skip(f"Reused pair scores ({len(pair_scores)} rows).")
         else:
             pair_scores = score_pairs_with_checkpoint(
@@ -920,12 +1416,21 @@ def cmd_run_stage(args):
                 chars2vec=ads_chars,
                 text_emb=ads_text,
                 checkpoint_path=train_manifest["best_checkpoint"],
-                output_path=pair_scores_path,
+                output_path=pair_scores_shared_path,
                 batch_size=int(args.score_batch_size),
                 device=args.device,
                 show_progress=args.progress,
             )
             ui.done(f"Scored {len(pair_scores)} ADS pairs.")
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="pair_scores",
+            artifact_id=pair_scores_id,
+            shared_path=pair_scores_shared_path,
+            run_path=pair_scores_path,
+            mode=link_or_copy(pair_scores_shared_path, pair_scores_path),
+        )
+        write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
 
         ui.start("Cluster ADS mentions and export mappings")
         cluster_cache_hit = (
@@ -947,6 +1452,24 @@ def cmd_run_stage(args):
         else:
             best_threshold = float(train_manifest["best_threshold"])
             cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
+            sweep_cfg_hash = stable_hash(
+                {
+                    "eps_mode": cluster_cfg_used.get("eps_mode"),
+                    "eps_sweep_min": cluster_cfg_used.get("eps_sweep_min"),
+                    "eps_sweep_max": cluster_cfg_used.get("eps_sweep_max"),
+                    "eps_sweep_step": cluster_cfg_used.get("eps_sweep_step"),
+                    "min_samples": cluster_cfg_used.get("min_samples"),
+                    "constraint_mode": cluster_cfg_used.get("constraint_mode"),
+                    "constraints": cluster_cfg_used.get("constraints"),
+                }
+            )
+            eps_sweep_id = stable_hash(
+                {
+                    "lspo_pairs_id": lspo_pairs_id,
+                    "checkpoint_hash": checkpoint_hash,
+                    "sweep_cfg_hash": sweep_cfg_hash,
+                }
+            )
             resolved_eps, eps_meta = _resolve_stage_eps(
                 cluster_cfg=cluster_cfg_used,
                 best_threshold=best_threshold,
@@ -958,6 +1481,19 @@ def cmd_run_stage(args):
                 score_batch_size=int(args.score_batch_size),
                 device=args.device,
                 show_progress=args.progress,
+            )
+            eps_meta["eps_sweep_id"] = eps_sweep_id
+            eps_sweep_shared_path = shared_eps_sweeps_dir / f"eps_sweep_{eps_sweep_id}.json"
+            write_json(
+                {
+                    "eps_sweep_id": eps_sweep_id,
+                    "run_stage": stage,
+                    "run_id": run_id,
+                    "checkpoint_hash": checkpoint_hash,
+                    "sweep_cfg_hash": sweep_cfg_hash,
+                    "eps_resolution": eps_meta,
+                },
+                eps_sweep_shared_path,
             )
             cluster_cfg_used["eps"] = resolved_eps
             if eps_meta.get("selected_eps") is not None:
@@ -1026,6 +1562,7 @@ def cmd_run_stage(args):
                 run_id=run_id,
                 run_stage=stage,
                 lspo_mentions=lspo_subset,
+                lspo_pairs_count=int(len(lspo_pairs)),
                 ads_mentions=ads_subset,
                 clusters=clusters,
                 train_manifest=train_manifest,
@@ -1034,6 +1571,7 @@ def cmd_run_stage(args):
                 cluster_qc=cluster_qc,
                 split_meta=split_meta,
                 eps_meta=eps_meta,
+                subset_cache_key=subset_identity.subset_tag,
             )
             write_json(stage_metrics, stage_metrics_path)
 
@@ -1192,6 +1730,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gates-config", default="configs/gates.yaml")
     sp.add_argument("--output", required=True)
     sp.set_defaults(func=cmd_report)
+
+    sp = sub.add_parser("cache")
+    cache_sub = sp.add_subparsers(dest="cache_command", required=True)
+
+    cdoc = cache_sub.add_parser("doctor")
+    cdoc.add_argument("--paths-config", default="configs/paths.local.yaml")
+    cdoc.set_defaults(func=cmd_cache_doctor)
+
+    cpurge = cache_sub.add_parser("purge")
+    cpurge.add_argument("--paths-config", default="configs/paths.local.yaml")
+    cpurge.add_argument("--target", required=True, choices=["stale-subsets", "redundant-run-copies"])
+    cpurge.add_argument("--yes", action="store_true")
+    cpurge.set_defaults(func=cmd_cache_purge)
 
     return p
 

@@ -34,8 +34,22 @@ def _default_gate_config() -> Dict:
         "stages": {
             "smoke": {"f1_min": 0.80, "min_neg_val": 20, "min_neg_test": 20, "cluster_quality_severity": "warning"},
             "mini": {"f1_min": 0.88, "min_neg_val": 50, "min_neg_test": 50, "cluster_quality_severity": "warning"},
-            "mid": {"f1_min": 0.90, "min_neg_val": 200, "min_neg_test": 200, "cluster_quality_severity": "blocker"},
-            "full": {"f1_min": 0.90, "min_neg_val": 500, "min_neg_test": 500, "cluster_quality_severity": "blocker"},
+            "mid": {
+                "f1_min": 0.90,
+                "min_neg_val": 200,
+                "min_neg_test": 200,
+                "cluster_quality_severity": "blocker",
+                "lspo_block_size_p95_min": 2,
+                "lspo_pairs_min": 50000,
+            },
+            "full": {
+                "f1_min": 0.90,
+                "min_neg_val": 500,
+                "min_neg_test": 500,
+                "cluster_quality_severity": "blocker",
+                "lspo_block_size_p95_min": 2,
+                "lspo_pairs_min": 300000,
+            },
         },
     }
 
@@ -77,6 +91,13 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         stage_gates.get("split_high_sim_rate_probe_max", cluster_defaults.get("split_high_sim_rate_probe_max", 1.0))
     )
     cluster_quality_severity = _normalize_severity(stage_gates.get("cluster_quality_severity", "warning"), default="warning")
+    lspo_block_size_p95_min = stage_gates.get("lspo_block_size_p95_min")
+    lspo_pairs_min = stage_gates.get("lspo_pairs_min")
+    lspo_block_size_p95_severity = _normalize_severity(
+        stage_gates.get("lspo_block_size_p95_severity", "blocker"),
+        default="blocker",
+    )
+    lspo_pairs_min_severity = _normalize_severity(stage_gates.get("lspo_pairs_min_severity", "blocker"), default="blocker")
 
     split_defaults = dict(defaults.get("split_balance_policy", {}) or {})
     split_infeasible_severity = _normalize_severity(
@@ -93,6 +114,7 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         stage_gates.get("eps_boundary_severity", eps_defaults.get("boundary_hit_severity", "warning")),
         default="warning",
     )
+    split_feasibility_severity = _normalize_severity(stage_gates.get("split_feasibility_severity", "blocker"), default="blocker")
 
     checks: List[Dict] = []
 
@@ -196,6 +218,23 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     else:
         add_check("split_balance_status", True, f"status={split_status}")
 
+    max_possible_neg_total = stage_metrics.get("max_possible_neg_total")
+    required_neg_total = stage_metrics.get("required_neg_total")
+    if max_possible_neg_total is None or required_neg_total is None:
+        add_check("split_neg_feasible", True, "not available")
+    else:
+        max_possible_neg_total = int(max_possible_neg_total)
+        required_neg_total = int(required_neg_total)
+        add_check(
+            "split_neg_feasible",
+            max_possible_neg_total >= required_neg_total,
+            (
+                f"Observed max_possible_neg_total={max_possible_neg_total}, "
+                f"required_neg_total={required_neg_total}"
+            ),
+            severity=split_feasibility_severity,
+        )
+
     pair_score_range_ok = stage_metrics.get("pair_score_range_ok")
     if pair_score_range_ok is None:
         add_check("pair_score_range_ok", True, "not available")
@@ -233,6 +272,34 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
             ),
             severity=cluster_quality_severity,
         )
+
+    lspo_block_size_p95 = stage_metrics.get("lspo_block_size_p95")
+    if lspo_block_size_p95_min is not None:
+        if lspo_block_size_p95 is None:
+            add_check("lspo_block_size_p95", False, "not available", severity=lspo_block_size_p95_severity)
+        else:
+            lspo_block_size_p95 = float(lspo_block_size_p95)
+            lspo_block_size_p95_min = float(lspo_block_size_p95_min)
+            add_check(
+                "lspo_block_size_p95",
+                lspo_block_size_p95 >= lspo_block_size_p95_min,
+                f"Observed lspo_block_size_p95={lspo_block_size_p95:.4f}, required>={lspo_block_size_p95_min:.4f}",
+                severity=lspo_block_size_p95_severity,
+            )
+
+    lspo_pairs = stage_metrics.get("lspo_pairs")
+    if lspo_pairs_min is not None:
+        if lspo_pairs is None:
+            add_check("lspo_pairs", False, "not available", severity=lspo_pairs_min_severity)
+        else:
+            lspo_pairs = int(lspo_pairs)
+            lspo_pairs_min = int(lspo_pairs_min)
+            add_check(
+                "lspo_pairs",
+                lspo_pairs >= lspo_pairs_min,
+                f"Observed lspo_pairs={lspo_pairs}, required>={lspo_pairs_min}",
+                severity=lspo_pairs_min_severity,
+            )
 
     eps_boundary_hit = stage_metrics.get("eps_boundary_hit")
     if eps_boundary_hit is None:
