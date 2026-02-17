@@ -273,6 +273,17 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         )
 
     pair_score_range_ok = stage_metrics.get("pair_score_range_ok")
+    memory_feasible = stage_metrics.get("memory_feasible")
+    if memory_feasible is None:
+        add_check("memory_feasible", True, "not available")
+    else:
+        add_check(
+            "memory_feasible",
+            bool(memory_feasible),
+            f"Observed memory_feasible={bool(memory_feasible)}",
+            severity="blocker",
+        )
+
     if pair_score_range_ok is None:
         add_check("pair_score_range_ok", True, "not available")
     else:

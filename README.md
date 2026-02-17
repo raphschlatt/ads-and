@@ -56,6 +56,7 @@ Infer ADS with train run id:
 python3 -m src.cli run-infer-ads \
   --dataset-id my_ads_2026 \
   --model-run-id full_2026... \
+  --infer-stage full \
   --paths-config configs/paths.local.yaml \
   --device auto
 ```
@@ -66,6 +67,7 @@ Infer ADS with model bundle:
 python3 -m src.cli run-infer-ads \
   --dataset-id my_ads_2026 \
   --model-bundle artifacts/models/full_2026.../bundle_v1 \
+  --infer-stage mini \
   --paths-config configs/paths.local.yaml \
   --device auto
 ```
@@ -101,8 +103,10 @@ Infer run (`artifacts/metrics/<run_id>/`):
 
 - `00_context.json` (`pipeline_scope: infer`)
 - `01_input_summary.json`
+- `02_preflight_infer.json` (memory/pair complexity estimate + feasibility)
 - `03_pairs_qc.json`
 - `04_cluster_qc.json`
+- `04_source_export_qc.json` (source export mapping coverage)
 - `05_stage_metrics_infer_ads.json` (`metric_scope: infer`)
 - `05_go_no_go_infer_ads.json`
 - optional `99_compare_infer_to_baseline.json`
@@ -112,11 +116,17 @@ Infer cluster exports (`artifacts/clusters/<run_id>/`):
 - `ads_clusters_infer_ads.parquet`
 - `publication_authors_infer_ads.parquet`
 
+Source-mirrored infer exports (`artifacts/exports/<run_id>/`):
+
+- `publications.disambiguated.jsonl`
+- `references.disambiguated.jsonl` (if references input exists)
+
 Mapping rule:
 
 - `mention_id` is stable from normalized mentions.
 - `author_uid` is added by clustering.
 - Join key is always `mention_id`.
+- In source-mirrored JSON outputs, original rows are preserved and `AuthorUID` is appended parallel to `Author`.
 
 ## Caching and Resume
 

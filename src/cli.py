@@ -19,7 +19,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 
 from src.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
 from src.approaches.nand.cluster import cluster_blockwise_dbscan, resolve_dbscan_eps
-from src.approaches.nand.export import build_publication_author_mapping
+from src.approaches.nand.export import build_publication_author_mapping, export_source_mirrored_outputs
 from src.approaches.nand.infer_pairs import score_pairs_with_checkpoint
 from src.approaches.nand.train import train_nand_across_seeds
 from src.common.cli_ui import CliUI
@@ -66,6 +66,8 @@ from src.features.embed_specter import get_or_create_specter_embeddings
 
 SUBSET_CACHE_VERSION = "v3"
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
+INFER_MENTIONS_CACHE_SCHEMA_VERSION = "v1"
+INFER_SUBSET_CACHE_VERSION = "v1"
 _RUN_STAGE_DEPRECATION_SHOWN = False
 
 
@@ -358,6 +360,181 @@ def _resolve_ads_dataset_files(data_cfg: dict[str, Any], dataset_id: str) -> dic
         "references_path": references_path,
         "references_present": references_path is not None,
         "dataset_source_fp": dataset_source_fp,
+    }
+
+
+def _default_infer_stage_cfg(infer_stage: str) -> dict[str, Any]:
+    stage = str(infer_stage).strip().lower()
+    defaults = {
+        "smoke": {"subset_target_mentions": 5_000, "seed": 11, "subset_sampling": {"target_mean_block_size": 4.0}},
+        "mini": {"subset_target_mentions": 10_000, "seed": 11, "subset_sampling": {"target_mean_block_size": 4.0}},
+        "mid": {"subset_target_mentions": 100_000, "seed": 11, "subset_sampling": {"target_mean_block_size": 4.0}},
+        "full": {"subset_target_mentions": None, "seed": 11, "subset_sampling": {"target_mean_block_size": 2.0}},
+    }
+    if stage not in defaults:
+        raise ValueError(f"Unsupported infer_stage={infer_stage!r}.")
+    cfg = dict(defaults[stage])
+    cfg["stage"] = stage
+    return cfg
+
+
+def _resolve_infer_run_cfg(
+    *,
+    infer_stage: str,
+    infer_run_config: str | None,
+) -> tuple[dict[str, Any], str]:
+    stage = str(infer_stage).strip().lower()
+    default_path = f"configs/infer_runs/{stage}.yaml"
+    cfg_path = infer_run_config or default_path
+
+    cfg: dict[str, Any]
+    try:
+        cfg = _load_run_cfg(cfg_path)
+        cfg_source = str(cfg_path)
+    except FileNotFoundError:
+        if infer_run_config is not None:
+            raise
+        cfg = _default_infer_stage_cfg(stage)
+        cfg_source = f"{default_path} (built-in default)"
+
+    cfg = dict(cfg or {})
+    cfg["stage"] = stage
+    if "subset_target_mentions" not in cfg:
+        cfg["subset_target_mentions"] = _default_infer_stage_cfg(stage).get("subset_target_mentions")
+    cfg["seed"] = int(cfg.get("seed", _default_infer_stage_cfg(stage).get("seed", 11)))
+    sampling = dict(cfg.get("subset_sampling", {}) or {})
+    if "target_mean_block_size" not in sampling:
+        sampling["target_mean_block_size"] = float(
+            _default_infer_stage_cfg(stage).get("subset_sampling", {}).get("target_mean_block_size", 2.0)
+        )
+    else:
+        sampling["target_mean_block_size"] = float(sampling["target_mean_block_size"])
+    cfg["subset_sampling"] = sampling
+
+    overrides = dict(cfg.get("infer_overrides", {}) or {})
+    if "max_pairs_per_block" in overrides and overrides["max_pairs_per_block"] is not None:
+        overrides["max_pairs_per_block"] = int(overrides["max_pairs_per_block"])
+    if "score_batch_size" in overrides and overrides["score_batch_size"] is not None:
+        overrides["score_batch_size"] = int(overrides["score_batch_size"])
+    cfg["infer_overrides"] = overrides
+    return cfg, cfg_source
+
+
+def _infer_mentions_meta_path(interim_dir: Path, dataset_tag: str) -> Path:
+    return Path(interim_dir) / f"ads_mentions_{dataset_tag}.meta.json"
+
+
+def _compute_infer_subset_identity(
+    *,
+    dataset_source_fp: str,
+    infer_stage: str,
+    infer_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    stage = str(infer_stage).strip().lower()
+    target_mentions = infer_cfg.get("subset_target_mentions")
+    if target_mentions is not None:
+        target_mentions = int(target_mentions)
+    target_tag = "full" if target_mentions is None else str(target_mentions)
+    payload = {
+        "infer_stage": stage,
+        "target_mentions": target_mentions,
+        "seed": int(infer_cfg.get("seed", 11)),
+        "subset_sampling": dict(infer_cfg.get("subset_sampling", {}) or {}),
+        "sampler_version": INFER_SUBSET_CACHE_VERSION,
+    }
+    infer_cfg_hash = stable_hash(payload)
+    subset_tag = f"infer_{stage}_seed{payload['seed']}_target{target_tag}_cfg{infer_cfg_hash[:8]}_src{dataset_source_fp}"
+    return {
+        "infer_stage": stage,
+        "target_mentions": target_mentions,
+        "target_tag": target_tag,
+        "infer_cfg_hash": infer_cfg_hash,
+        "subset_tag": subset_tag,
+        "sampler_version": INFER_SUBSET_CACHE_VERSION,
+    }
+
+
+def _estimate_pair_upper_bound(mentions: pd.DataFrame, max_pairs_per_block: int | None) -> int:
+    if len(mentions) == 0 or "block_key" not in mentions.columns:
+        return 0
+    block_sizes = mentions.groupby("block_key").size().to_numpy(dtype=np.int64, copy=False)
+    pair_counts = (block_sizes * (block_sizes - 1)) // 2
+    if max_pairs_per_block is not None:
+        pair_counts = np.minimum(pair_counts, int(max_pairs_per_block))
+    return int(pair_counts.sum())
+
+
+def _estimate_ram_total_bytes() -> int | None:
+    try:
+        import psutil  # type: ignore
+
+        return int(psutil.virtual_memory().total)
+    except Exception:
+        pass
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return int(pages * page_size)
+    except Exception:
+        return None
+
+
+def _build_infer_preflight(
+    *,
+    mentions: pd.DataFrame,
+    max_pairs_per_block: int | None,
+    score_batch_size: int,
+    max_ram_fraction: float,
+) -> dict[str, Any]:
+    n_mentions = int(len(mentions))
+    if len(mentions) > 0 and "block_key" in mentions.columns:
+        block_sizes = mentions.groupby("block_key").size()
+        n_blocks = int(len(block_sizes))
+        block_p95 = float(block_sizes.quantile(0.95)) if len(block_sizes) else 0.0
+        block_max = int(block_sizes.max()) if len(block_sizes) else 0
+    else:
+        n_blocks = 0
+        block_p95 = 0.0
+        block_max = 0
+
+    pair_upper_bound = _estimate_pair_upper_bound(mentions, max_pairs_per_block=max_pairs_per_block)
+    n_features = 50 + 768
+    emb_chars_bytes = n_mentions * 50 * 4
+    emb_text_bytes = n_mentions * 768 * 4
+    # Conservative in-memory upper bound for pair rows + score rows + QC join buffers.
+    pairs_bytes = pair_upper_bound * 160
+    pair_scores_bytes = pair_upper_bound * 80
+    qc_bytes = pair_upper_bound * 48
+    score_batch_rows = max(1, min(pair_upper_bound, int(score_batch_size)))
+    score_batch_bytes = score_batch_rows * n_features * 4 * 2
+
+    estimate_total = int(
+        emb_chars_bytes + emb_text_bytes + pairs_bytes + pair_scores_bytes + qc_bytes + score_batch_bytes
+    )
+    ram_total = _estimate_ram_total_bytes()
+    ram_budget = int(ram_total * float(max_ram_fraction)) if ram_total is not None else None
+    memory_feasible = None if ram_budget is None else bool(estimate_total <= ram_budget)
+
+    return {
+        "n_mentions": n_mentions,
+        "n_blocks": n_blocks,
+        "block_p95": block_p95,
+        "block_max": block_max,
+        "max_pairs_per_block": None if max_pairs_per_block is None else int(max_pairs_per_block),
+        "pair_upper_bound": int(pair_upper_bound),
+        "estimate_bytes": {
+            "emb_chars": int(emb_chars_bytes),
+            "emb_text": int(emb_text_bytes),
+            "pairs": int(pairs_bytes),
+            "pair_scores": int(pair_scores_bytes),
+            "cluster_qc": int(qc_bytes),
+            "score_batch_peak": int(score_batch_bytes),
+            "total_upper_bound": int(estimate_total),
+        },
+        "ram_total_bytes": ram_total,
+        "ram_budget_bytes": ram_budget,
+        "max_ram_fraction": float(max_ram_fraction),
+        "memory_feasible": memory_feasible,
     }
 
 
@@ -2009,7 +2186,7 @@ def cmd_run_stage(args):
 
 
 def cmd_run_infer_ads(args):
-    ui = CliUI(total_steps=7, progress=args.progress)
+    ui = CliUI(total_steps=8, progress=args.progress)
 
     try:
         ui.start("Initialize run context")
@@ -2023,12 +2200,31 @@ def cmd_run_infer_ads(args):
         cluster_cfg = load_yaml(cluster_cfg_path)
         gate_cfg = load_gate_config(args.gates_config) if args.gates_config else None
 
+        infer_stage = str(getattr(args, "infer_stage", "full")).strip().lower()
+        infer_cfg, infer_cfg_source = _resolve_infer_run_cfg(
+            infer_stage=infer_stage,
+            infer_run_config=getattr(args, "infer_run_config", None),
+        )
+        infer_overrides = dict(infer_cfg.get("infer_overrides", {}) or {})
+
         dataset_info = _resolve_ads_dataset_files(data_cfg, args.dataset_id)
         model_info = _resolve_model_source_for_inference(
             paths_cfg=paths,
             model_run_id=getattr(args, "model_run_id", None),
             model_bundle=getattr(args, "model_bundle", None),
         )
+        run_cfg_from_model = dict(model_info.get("run_cfg", {}) or {})
+        pair_build_cfg = _resolve_pair_build_cfg(run_cfg_from_model)
+        max_pairs_per_block = infer_overrides.get("max_pairs_per_block", run_cfg_from_model.get("max_pairs_per_block"))
+        max_pairs_per_block = None if max_pairs_per_block is None else int(max_pairs_per_block)
+        score_batch_size = (
+            int(args.score_batch_size)
+            if args.score_batch_size is not None
+            else int(infer_overrides.get("score_batch_size", 8192))
+        )
+        memory_policy = str(getattr(args, "memory_policy", "fail")).strip().lower()
+        max_ram_fraction = float(getattr(args, "max_ram_fraction", 0.80))
+
         run_id = args.run_id or _default_run_id("infer_ads")
         stage = "infer_ads"
         run_dirs = build_run_dirs(data_cfg, art_cfg, run_id)
@@ -2042,11 +2238,16 @@ def cmd_run_infer_ads(args):
                 "subset_cache",
                 "interim",
                 "shared_cache_root",
+                "shared_subsets",
                 "shared_embeddings",
                 "shared_pairs",
                 "shared_pair_scores",
             ],
         )
+
+        exports_root = Path(str(art_cfg.get("exports_dir", Path(art_cfg["root"]) / "exports")))
+        exports_dir = exports_root / run_id
+        exports_dir.mkdir(parents=True, exist_ok=True)
 
         latest_context_path = Path(art_cfg["metrics_dir"]) / "latest_run.json"
         write_latest_run_context(
@@ -2064,25 +2265,41 @@ def cmd_run_infer_ads(args):
         cluster_dir = Path(run_dirs["clusters"])
         interim_dir = Path(run_dirs["interim"])
 
+        shared_subsets_dir = Path(run_dirs["shared_subsets"])
         shared_embeddings_dir = Path(run_dirs["shared_embeddings"])
         shared_pairs_dir = Path(run_dirs["shared_pairs"])
         shared_pair_scores_dir = Path(run_dirs["shared_pair_scores"])
-        for p in [shared_embeddings_dir, shared_pairs_dir, shared_pair_scores_dir]:
+        for p in [shared_subsets_dir, shared_embeddings_dir, shared_pairs_dir, shared_pair_scores_dir]:
             p.mkdir(parents=True, exist_ok=True)
 
         dataset_tag = str(dataset_info["dataset_tag"])
         dataset_source_fp = str(dataset_info["dataset_source_fp"])
-        ads_mentions_path = interim_dir / f"ads_mentions_{dataset_tag}.parquet"
+        subset_identity = _compute_infer_subset_identity(
+            dataset_source_fp=dataset_source_fp,
+            infer_stage=infer_stage,
+            infer_cfg=infer_cfg,
+        )
+        subset_tag = str(subset_identity["subset_tag"])
+
+        ads_mentions_full_path = interim_dir / f"ads_mentions_{dataset_tag}.parquet"
+        ads_mentions_full_meta_path = _infer_mentions_meta_path(interim_dir, dataset_tag)
+        ads_subset_shared_path = shared_subsets_dir / f"ads_mentions_{subset_tag}.parquet"
+        ads_subset_meta_path = shared_subsets_dir / f"ads_mentions_{subset_tag}.meta.json"
+        ads_mentions_path = subset_dir / f"ads_mentions_{infer_stage}.parquet"
         ads_pairs_path = subset_dir / "ads_pairs_infer_ads.parquet"
         ads_chars_path = emb_dir / "ads_chars2vec_infer_ads.npy"
         ads_text_path = emb_dir / "ads_specter_infer_ads.npy"
         pair_scores_path = pair_score_dir / "ads_pair_scores_infer_ads.parquet"
         clusters_path = cluster_dir / "ads_clusters_infer_ads.parquet"
         publication_export_path = cluster_dir / "publication_authors_infer_ads.parquet"
+        publications_disambig_path = exports_dir / "publications.disambiguated.jsonl"
+        references_disambig_path = exports_dir / "references.disambiguated.jsonl"
 
         input_summary_path = metrics_dir / "01_input_summary.json"
+        preflight_path = metrics_dir / "02_preflight_infer.json"
         pairs_qc_path = metrics_dir / "03_pairs_qc.json"
         cluster_qc_path = metrics_dir / "04_cluster_qc.json"
+        source_export_qc_path = metrics_dir / "04_source_export_qc.json"
         cluster_cfg_used_path = metrics_dir / "04_clustering_config_used.json"
         stage_metrics_path = metrics_dir / "05_stage_metrics_infer_ads.json"
         go_no_go_path = metrics_dir / "05_go_no_go_infer_ads.json"
@@ -2094,11 +2311,15 @@ def cmd_run_infer_ads(args):
                 "run_id": run_id,
                 "run_stage": stage,
                 "pipeline_scope": "infer",
+                "infer_stage": infer_stage,
+                "infer_run_config": str(infer_cfg_source),
                 "dataset_id": dataset_info["dataset_id"],
                 "dataset_dir": str(dataset_info["dataset_dir"]),
                 "publications_path": str(dataset_info["publications_path"]),
                 "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
                 "references_present": bool(dataset_info["references_present"]),
+                "dataset_source_fp": dataset_source_fp,
+                "subset_tag": subset_tag,
                 "model_run_id": model_info["model_run_id"],
                 "model_source_type": str(model_info.get("model_source_type", "run_id")),
                 "model_bundle_dir": model_info.get("model_bundle_dir"),
@@ -2108,7 +2329,10 @@ def cmd_run_infer_ads(args):
                 "best_threshold": float(model_info["best_threshold"]),
                 "model_config": model_info["model_cfg_path"],
                 "cluster_config": str(cluster_cfg_path),
-                "score_batch_size": int(args.score_batch_size),
+                "max_pairs_per_block": max_pairs_per_block,
+                "score_batch_size": int(score_batch_size),
+                "memory_policy": memory_policy,
+                "max_ram_fraction": max_ram_fraction,
                 "device": args.device,
                 "precision_mode": str(args.precision_mode),
                 "quiet_libs": bool(args.quiet_libs),
@@ -2125,16 +2349,132 @@ def cmd_run_infer_ads(args):
         ui.done(f"Run ID: {run_id}")
 
         ui.start("Prepare ADS mentions")
-        if ads_mentions_path.exists() and not args.force:
-            ads_mentions = read_parquet(ads_mentions_path)
-            ui.skip(f"Loaded {len(ads_mentions)} mentions from cache.")
+        mentions_cache_valid = None
+        mentions_cache_rebuilt = False
+        mentions_cache_invalid_reason = None
+        if ads_mentions_full_path.exists() and not args.force:
+            meta_ok = False
+            if ads_mentions_full_meta_path.exists():
+                full_meta = _load_json(ads_mentions_full_meta_path)
+                meta_ok = (
+                    str(full_meta.get("dataset_id")) == str(dataset_info["dataset_id"])
+                    and str(full_meta.get("dataset_source_fp")) == dataset_source_fp
+                    and str(full_meta.get("cache_schema_version")) == INFER_MENTIONS_CACHE_SCHEMA_VERSION
+                )
+            if meta_ok:
+                ads_mentions_full = read_parquet(ads_mentions_full_path)
+                mentions_cache_valid = True
+                ui.skip(f"Loaded {len(ads_mentions_full)} mentions from cache.")
+            else:
+                mentions_cache_valid = False
+                mentions_cache_rebuilt = True
+                mentions_cache_invalid_reason = "dataset_source_fp_mismatch_or_missing_meta"
+                ads_mentions_full = prepare_ads_mentions(
+                    publications_path=dataset_info["publications_path"],
+                    references_path=dataset_info["references_path"],
+                    output_path=ads_mentions_full_path,
+                )
+                ui.done(f"Rebuilt ADS mentions cache ({len(ads_mentions_full)} mentions).")
         else:
-            ads_mentions = prepare_ads_mentions(
+            ads_mentions_full = prepare_ads_mentions(
                 publications_path=dataset_info["publications_path"],
                 references_path=dataset_info["references_path"],
-                output_path=ads_mentions_path,
+                output_path=ads_mentions_full_path,
             )
-            ui.done(f"Prepared {len(ads_mentions)} ADS mentions.")
+            mentions_cache_valid = True
+            ui.done(f"Prepared {len(ads_mentions_full)} ADS mentions.")
+
+        write_json(
+            {
+                "dataset_id": dataset_info["dataset_id"],
+                "dataset_source_fp": dataset_source_fp,
+                "cache_schema_version": INFER_MENTIONS_CACHE_SCHEMA_VERSION,
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+            },
+            ads_mentions_full_meta_path,
+        )
+
+        subset_cache_hit = False
+        subset_cache_valid = None
+        subset_cache_rebuilt = False
+        subset_cache_invalid_reason = None
+        if infer_stage == "full":
+            ads_mentions = ads_mentions_full
+            subset_ratio = 1.0
+            subset_cache_valid = True
+            subset_link_mode = link_or_copy(ads_mentions_full_path, ads_mentions_path)
+            _record_cache_ref(
+                cache_refs,
+                artifact_type="ads_subset",
+                artifact_id=subset_tag,
+                shared_path=ads_mentions_full_path,
+                run_path=ads_mentions_path,
+                mode=subset_link_mode,
+                cache_schema_version=INFER_SUBSET_CACHE_VERSION,
+            )
+        else:
+            expected_target = subset_identity["target_mentions"]
+            if ads_subset_shared_path.exists() and ads_subset_meta_path.exists() and not args.force:
+                subset_meta = _load_json(ads_subset_meta_path)
+                subset_cache_valid = (
+                    str(subset_meta.get("dataset_source_fp")) == dataset_source_fp
+                    and str(subset_meta.get("cache_schema_version")) == INFER_SUBSET_CACHE_VERSION
+                    and str(subset_meta.get("infer_stage")) == infer_stage
+                    and int(subset_meta.get("seed", -1)) == int(infer_cfg.get("seed", 11))
+                    and int(subset_meta.get("target_mentions", -1)) == int(expected_target)
+                )
+                if subset_cache_valid:
+                    ads_mentions = read_parquet(ads_subset_shared_path)
+                    subset_cache_hit = True
+                else:
+                    subset_cache_invalid_reason = "subset_meta_mismatch"
+                    subset_cache_rebuilt = True
+
+            if not subset_cache_hit:
+                ads_mentions = build_stage_subset(
+                    ads_mentions_full,
+                    stage=infer_stage,
+                    seed=int(infer_cfg.get("seed", 11)),
+                    target_mentions=infer_cfg.get("subset_target_mentions"),
+                    subset_sampling=infer_cfg.get("subset_sampling", {}),
+                )
+                atomic_save_parquet(ads_mentions, ads_subset_shared_path, index=False)
+                write_json(
+                    {
+                        "cache_schema_version": INFER_SUBSET_CACHE_VERSION,
+                        "infer_stage": infer_stage,
+                        "subset_tag": subset_tag,
+                        "seed": int(infer_cfg.get("seed", 11)),
+                        "target_mentions": int(expected_target),
+                        "subset_sampling": dict(infer_cfg.get("subset_sampling", {}) or {}),
+                        "dataset_id": dataset_info["dataset_id"],
+                        "dataset_source_fp": dataset_source_fp,
+                        "created_utc": datetime.now(timezone.utc).isoformat(),
+                    },
+                    ads_subset_meta_path,
+                )
+                subset_cache_valid = True
+
+            subset_link_mode = link_or_copy(ads_subset_shared_path, ads_mentions_path)
+            _record_cache_ref(
+                cache_refs,
+                artifact_type="ads_subset",
+                artifact_id=subset_tag,
+                shared_path=ads_subset_shared_path,
+                run_path=ads_mentions_path,
+                mode=subset_link_mode,
+                cache_schema_version=INFER_SUBSET_CACHE_VERSION,
+            )
+            subset_ratio = float(len(ads_mentions) / max(1, len(ads_mentions_full)))
+            if subset_cache_hit:
+                ui.skip(f"Reused infer subset cache: {subset_tag} ({len(ads_mentions)} mentions).")
+            elif subset_cache_rebuilt:
+                ui.done(
+                    f"Rebuilt infer subset cache ({len(ads_mentions)} mentions, reason={subset_cache_invalid_reason})."
+                )
+            else:
+                ui.done(f"Built infer subset ({len(ads_mentions)} mentions).")
+
         if not bool(dataset_info["references_present"]):
             ui.warn("No references file found; continuing with publications-only input.")
 
@@ -2143,6 +2483,9 @@ def cmd_run_infer_ads(args):
                 "run_id": run_id,
                 "run_stage": stage,
                 "pipeline_scope": "infer",
+                "infer_stage": infer_stage,
+                "subset_tag": subset_tag,
+                "subset_ratio": float(subset_ratio),
                 "dataset_id": dataset_info["dataset_id"],
                 "dataset_dir": str(dataset_info["dataset_dir"]),
                 "publications_path": str(dataset_info["publications_path"]),
@@ -2150,9 +2493,18 @@ def cmd_run_infer_ads(args):
                 "references_present": bool(dataset_info["references_present"]),
                 "dataset_source_fp": dataset_source_fp,
                 "ads_mentions_path": str(ads_mentions_path),
+                "ads_mentions_full_path": str(ads_mentions_full_path),
+                "ads_mentions_full": int(len(ads_mentions_full)),
                 "ads_mentions": int(len(ads_mentions)),
                 "ads_blocks": int(ads_mentions["block_key"].nunique()) if "block_key" in ads_mentions.columns else 0,
                 "ads_block_size_p95": float(_block_size_p95(ads_mentions)),
+                "mentions_cache_valid": mentions_cache_valid,
+                "mentions_cache_invalid_reason": mentions_cache_invalid_reason,
+                "mentions_cache_rebuilt": bool(mentions_cache_rebuilt),
+                "subset_cache_hit": bool(subset_cache_hit),
+                "subset_cache_valid": subset_cache_valid,
+                "subset_cache_invalid_reason": subset_cache_invalid_reason,
+                "subset_cache_rebuilt": bool(subset_cache_rebuilt),
             },
             input_summary_path,
         )
@@ -2161,7 +2513,49 @@ def cmd_run_infer_ads(args):
             run_stage=stage,
             run_dirs=run_dirs,
             output_path=metrics_dir / "01_run_consistency.json",
-            extras={"dataset_id": dataset_info["dataset_id"], "references_present": bool(dataset_info["references_present"])},
+            extras={
+                "dataset_id": dataset_info["dataset_id"],
+                "references_present": bool(dataset_info["references_present"]),
+                "infer_stage": infer_stage,
+                "subset_tag": subset_tag,
+            },
+        )
+
+        ui.start("Preflight infer memory and pair complexity")
+        preflight = _build_infer_preflight(
+            mentions=ads_mentions,
+            max_pairs_per_block=max_pairs_per_block,
+            score_batch_size=score_batch_size,
+            max_ram_fraction=max_ram_fraction,
+        )
+        preflight["run_id"] = run_id
+        preflight["run_stage"] = stage
+        preflight["pipeline_scope"] = "infer"
+        preflight["infer_stage"] = infer_stage
+        preflight["subset_tag"] = subset_tag
+        write_json(preflight, preflight_path)
+        write_run_consistency(
+            run_id=run_id,
+            run_stage=stage,
+            run_dirs=run_dirs,
+            output_path=metrics_dir / "02_run_consistency.json",
+            extras={
+                "memory_feasible": preflight.get("memory_feasible"),
+                "pair_upper_bound": preflight.get("pair_upper_bound"),
+            },
+        )
+        if preflight.get("memory_feasible") is False:
+            msg = (
+                "Infer preflight memory_feasible=false: "
+                f"estimate={preflight['estimate_bytes']['total_upper_bound']} bytes, "
+                f"budget={preflight.get('ram_budget_bytes')} bytes."
+            )
+            if memory_policy == "fail":
+                raise RuntimeError(msg)
+            ui.warn(msg)
+        ui.done(
+            "Preflight complete "
+            f"(memory_feasible={preflight.get('memory_feasible')}, pair_upper_bound={preflight.get('pair_upper_bound')})."
         )
 
         ui.start("Build or load embeddings")
@@ -2169,7 +2563,13 @@ def cmd_run_infer_ads(args):
         rep_cfg = dict(model_cfg.get("representation", {}) or {})
         representation_cfg_hash = stable_hash(rep_cfg)
         model_version = str(model_cfg.get("name", "nand"))
-        ads_mentions_id = stable_hash({"dataset_id": dataset_info["dataset_id"], "dataset_source_fp": dataset_source_fp})
+        ads_mentions_id = stable_hash(
+            {
+                "subset_tag": subset_tag,
+                "dataset_source_fp": dataset_source_fp,
+                "infer_stage": infer_stage,
+            }
+        )
         embedding_id = stable_hash(
             {
                 "ads_mentions_id": ads_mentions_id,
@@ -2181,14 +2581,14 @@ def cmd_run_infer_ads(args):
         ads_text_shared_path = shared_embeddings_dir / f"ads_specter_{embedding_id}.npy"
         emb_cache_hit = ads_chars_shared_path.exists() and ads_text_shared_path.exists() and not args.force
 
-        ads_chars = get_or_create_chars2vec_embeddings(
+        _ = get_or_create_chars2vec_embeddings(
             mentions=ads_mentions,
             output_path=ads_chars_shared_path,
             force_recompute=args.force,
             use_stub_if_missing=False,
             quiet_libraries=args.quiet_libs,
         )
-        ads_text = get_or_create_specter_embeddings(
+        _ = get_or_create_specter_embeddings(
             mentions=ads_mentions,
             output_path=ads_text_shared_path,
             force_recompute=args.force,
@@ -2202,6 +2602,8 @@ def cmd_run_infer_ads(args):
             quiet_libraries=args.quiet_libs,
             reuse_model=True,
         )
+        ads_chars = np.load(ads_chars_shared_path, mmap_mode="r")
+        ads_text = np.load(ads_text_shared_path, mmap_mode="r")
         _record_cache_ref(
             cache_refs,
             artifact_type="embedding_ads_chars",
@@ -2224,54 +2626,66 @@ def cmd_run_infer_ads(args):
             ui.done(f"Embeddings ready (ADS {tuple(ads_chars.shape)}/{tuple(ads_text.shape)}).")
 
         ui.start("Build ADS pairs and pair QC")
-        run_cfg_from_model = dict(model_info.get("run_cfg", {}) or {})
-        pair_build_cfg = _resolve_pair_build_cfg(run_cfg_from_model)
-        max_pairs_per_block = run_cfg_from_model.get("max_pairs_per_block")
         pair_cfg_hash = stable_hash(
             {
                 "max_pairs_per_block": max_pairs_per_block,
                 "exclude_same_bibcode": bool(pair_build_cfg["exclude_same_bibcode"]),
+                "infer_stage": infer_stage,
             }
         )
-        ads_pairs_id = stable_hash({"ads_mentions_id": ads_mentions_id, "pair_cfg_hash": pair_cfg_hash})
+        ads_pairs_id = stable_hash({"subset_tag": subset_tag, "pair_cfg_hash": pair_cfg_hash})
         ads_pairs_shared_path = shared_pairs_dir / f"ads_pairs_{ads_pairs_id}.parquet"
         pairs_qc_shared_path = shared_pairs_dir / f"pairs_qc_infer_ads_{ads_pairs_id}.json"
 
+        ads_pairs_count = 0
         if ads_pairs_shared_path.exists() and pairs_qc_shared_path.exists() and not args.force:
-            ads_pairs = read_parquet(ads_pairs_shared_path)
             pairs_qc = _load_json(pairs_qc_shared_path)
-            ui.skip(f"Reused ADS pairs ({len(ads_pairs)} rows).")
+            ads_pairs_count = int(pairs_qc.get("ads_pairs", 0))
+            ui.skip(f"Reused ADS pairs ({ads_pairs_count} rows).")
         else:
-            ads_pairs, ads_pair_meta = build_pairs_within_blocks(
+            _ads_pairs, ads_pair_meta = build_pairs_within_blocks(
                 mentions=ads_mentions,
                 max_pairs_per_block=max_pairs_per_block,
-                seed=11,
+                seed=int(infer_cfg.get("seed", 11)),
                 require_same_split=False,
                 labeled_only=False,
                 balance_train=False,
                 exclude_same_bibcode=bool(pair_build_cfg["exclude_same_bibcode"]),
                 show_progress=args.progress,
+                output_path=ads_pairs_shared_path,
+                chunk_rows=int(infer_cfg.get("pair_chunk_rows", 200_000)),
+                return_pairs=False,
                 return_meta=True,
             )
-            ads_pairs = _ensure_columns(ads_pairs, PAIR_REQUIRED_COLUMNS + ["label"])
-            if len(ads_pairs) == 0:
-                save_parquet(ads_pairs, ads_pairs_shared_path, index=False)
-            else:
-                write_pairs(ads_pairs, ads_pairs_shared_path)
+            if _ads_pairs is not None:
+                _ads_pairs = _ensure_columns(_ads_pairs, PAIR_REQUIRED_COLUMNS + ["label"])
+                if not ads_pairs_shared_path.exists():
+                    if len(_ads_pairs) == 0:
+                        save_parquet(_ads_pairs, ads_pairs_shared_path, index=False)
+                    else:
+                        write_pairs(_ads_pairs, ads_pairs_shared_path)
+            ads_pairs_count = int((ads_pair_meta or {}).get("pairs_written", -1))
+            if ads_pairs_count < 0:
+                ads_pairs_count = int(len(_ads_pairs)) if _ads_pairs is not None else 0
+            if ads_pairs_count == 0 and not ads_pairs_shared_path.exists():
+                save_parquet(pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"]), ads_pairs_shared_path, index=False)
+
             empty_mentions = pd.DataFrame(columns=MENTION_REQUIRED_COLUMNS + ["orcid", "split"])
             empty_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
             pairs_qc = build_pairs_qc(
                 lspo_mentions=empty_mentions,
                 lspo_pairs=empty_pairs,
-                ads_pairs=ads_pairs,
+                ads_pairs=empty_pairs,
                 split_meta={"status": "not_applicable"},
                 lspo_pair_build_meta={},
                 ads_pair_build_meta=ads_pair_meta,
+                ads_pairs_count=ads_pairs_count,
             )
             pairs_qc["dataset_id"] = dataset_info["dataset_id"]
             pairs_qc["model_run_id"] = model_info["model_run_id"]
+            pairs_qc["infer_stage"] = infer_stage
             write_json(pairs_qc, pairs_qc_shared_path)
-            ui.done(f"Built ADS pairs ({len(ads_pairs)} rows).")
+            ui.done(f"Built ADS pairs ({ads_pairs_count} rows).")
 
         _record_cache_ref(
             cache_refs,
@@ -2310,7 +2724,7 @@ def cmd_run_infer_ads(args):
         checkpoint_hash = hash_file(model_info["best_checkpoint"])
         score_cfg_hash = stable_hash(
             {
-                "score_batch_size": int(args.score_batch_size),
+                "score_batch_size": int(score_batch_size),
                 "precision_mode": str(args.precision_mode),
             }
         )
@@ -2336,10 +2750,8 @@ def cmd_run_infer_ads(args):
         pair_scores_artifact_id = pair_scores_id_v2
 
         if pair_scores_shared_path_v2.exists() and not args.force:
-            pair_scores = read_parquet(pair_scores_shared_path_v2)
-            ui.skip(f"Reused pair scores ({len(pair_scores)} rows).")
+            ui.skip("Reused pair scores from v2 cache.")
         elif pair_scores_shared_path_legacy.exists() and not args.force:
-            pair_scores = read_parquet(pair_scores_shared_path_legacy)
             pair_scores_cache_schema_version = "v1"
             pair_scores_artifact_id = pair_scores_id_legacy
             pair_scores_shared_path_used = pair_scores_shared_path_legacy
@@ -2348,26 +2760,34 @@ def cmd_run_infer_ads(args):
                 pair_scores_shared_path_used = pair_scores_shared_path_v2
                 pair_scores_cache_schema_version = "v2"
                 pair_scores_artifact_id = pair_scores_id_v2
-            ui.skip(f"Reused legacy pair scores ({len(pair_scores)} rows, promote={promote_mode}).")
+            ui.skip(f"Reused legacy pair scores (promote={promote_mode}).")
         else:
-            if len(ads_pairs) == 0:
-                pair_scores = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
-                save_parquet(pair_scores, pair_scores_shared_path_v2, index=False)
+            if int(ads_pairs_count) == 0:
+                empty_scores = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+                save_parquet(empty_scores, pair_scores_shared_path_v2, index=False)
                 ui.done("No ADS pairs to score; wrote empty pair_scores artifact.")
             else:
-                pair_scores = score_pairs_with_checkpoint(
+                pairs_input: pd.DataFrame | str | Path
+                use_chunked_scoring = int(ads_pairs_count) > int(infer_cfg.get("score_chunked_threshold", 500_000))
+                if use_chunked_scoring:
+                    pairs_input = ads_pairs_shared_path
+                else:
+                    pairs_input = read_parquet(ads_pairs_shared_path)
+                _ = score_pairs_with_checkpoint(
                     mentions=ads_mentions,
-                    pairs=ads_pairs,
+                    pairs=pairs_input,
                     chars2vec=ads_chars,
                     text_emb=ads_text,
                     checkpoint_path=model_info["best_checkpoint"],
                     output_path=pair_scores_shared_path_v2,
-                    batch_size=int(args.score_batch_size),
+                    batch_size=int(score_batch_size),
                     device=args.device,
                     precision_mode=str(args.precision_mode),
                     show_progress=args.progress,
+                    chunk_rows=int(infer_cfg.get("score_chunk_rows", 200_000)),
+                    return_scores=not use_chunked_scoring,
                 )
-                ui.done(f"Scored {len(pair_scores)} ADS pairs.")
+                ui.done(f"Scored {ads_pairs_count} ADS pairs.")
             pair_scores_shared_path_used = pair_scores_shared_path_v2
             pair_scores_cache_schema_version = "v2"
             pair_scores_artifact_id = pair_scores_id_v2
@@ -2388,12 +2808,18 @@ def cmd_run_infer_ads(args):
             and publication_export_path.exists()
             and cluster_qc_path.exists()
             and cluster_cfg_used_path.exists()
+            and source_export_qc_path.exists()
+            and publications_disambig_path.exists()
             and not args.force
         )
+        if dataset_info["references_present"]:
+            cluster_cache_hit = cluster_cache_hit and references_disambig_path.exists()
+
         eps_meta: dict[str, Any] = {}
         if cluster_cache_hit:
             clusters = read_parquet(clusters_path)
             cluster_qc = _load_json(cluster_qc_path)
+            source_export_qc = _load_json(source_export_qc_path)
             cfg_payload = _load_json(cluster_cfg_used_path) or {}
             eps_meta = dict(cfg_payload.get("eps_resolution", {}) or {})
             ui.skip(f"Reused clustering outputs ({len(clusters)} mentions).")
@@ -2426,6 +2852,7 @@ def cmd_run_infer_ads(args):
                     "run_id": run_id,
                     "run_stage": stage,
                     "pipeline_scope": "infer",
+                    "infer_stage": infer_stage,
                     "model_run_id": model_info["model_run_id"],
                     "best_threshold": float(model_info["best_threshold"]),
                     "eps_resolution": eps_meta,
@@ -2433,6 +2860,8 @@ def cmd_run_infer_ads(args):
                 },
                 cluster_cfg_used_path,
             )
+
+            pair_scores = read_parquet(pair_scores_shared_path_used)
             clusters = cluster_blockwise_dbscan(
                 mentions=ads_mentions,
                 pair_scores=pair_scores,
@@ -2445,6 +2874,14 @@ def cmd_run_infer_ads(args):
                 clusters=clusters,
                 output_path=publication_export_path,
             )
+            source_export_qc = export_source_mirrored_outputs(
+                clusters=clusters,
+                publications_path=dataset_info["publications_path"],
+                references_path=dataset_info["references_path"],
+                publications_output_path=publications_disambig_path,
+                references_output_path=references_disambig_path if dataset_info["references_present"] else None,
+            )
+            write_json(source_export_qc, source_export_qc_path)
             cluster_qc = build_cluster_qc(
                 pair_scores=pair_scores,
                 clusters=clusters,
@@ -2478,6 +2915,7 @@ def cmd_run_infer_ads(args):
             consistency_files = [
                 metrics_dir / "00_run_consistency.json",
                 metrics_dir / "01_run_consistency.json",
+                metrics_dir / "02_run_consistency.json",
                 metrics_dir / "04_run_consistency.json",
                 metrics_dir / "05_run_consistency.json",
             ]
@@ -2496,6 +2934,12 @@ def cmd_run_infer_ads(args):
                 ),
                 threshold_source=str(model_info["train_manifest"].get("best_threshold_source", "model_run")),
                 precision_mode=str(args.precision_mode),
+                infer_stage=infer_stage,
+                subset_tag=subset_tag,
+                subset_ratio=float(subset_ratio),
+                memory_feasible=preflight.get("memory_feasible"),
+                pair_upper_bound=preflight.get("pair_upper_bound"),
+                source_export_qc=source_export_qc,
             )
             write_json(stage_metrics, stage_metrics_path)
 
@@ -2580,13 +3024,17 @@ def build_parser() -> argparse.ArgumentParser:
     model_source = sp.add_mutually_exclusive_group(required=True)
     model_source.add_argument("--model-run-id", default=None)
     model_source.add_argument("--model-bundle", default=None)
+    sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full"], default="full")
+    sp.add_argument("--infer-run-config", default=None)
     sp.add_argument("--paths-config", default="configs/paths.local.yaml")
     sp.add_argument("--cluster-config", default="configs/clustering/dbscan_paper.yaml")
     sp.add_argument("--gates-config", default="configs/gates.yaml")
     sp.add_argument("--run-id", default=None)
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
-    sp.add_argument("--score-batch-size", type=int, default=8192)
+    sp.add_argument("--score-batch-size", type=int, default=None)
+    sp.add_argument("--memory-policy", choices=["fail", "warn"], default="fail")
+    sp.add_argument("--max-ram-fraction", type=float, default=0.80)
     sp.add_argument("--baseline-run-id", default=None)
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--progress", dest="progress", action="store_true")

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import pandas as pd
 import yaml
 
 from src import cli
@@ -99,3 +100,57 @@ def test_resolve_model_run_for_inference_loads_run_and_model_cfg(tmp_path: Path)
     assert resolved["best_threshold"] == 0.31
     assert resolved["run_cfg"]["max_pairs_per_block"] == 123
     assert resolved["model_cfg"]["representation"]["text_model_name"] == "mock-model"
+
+
+def test_resolve_infer_run_cfg_normalizes_defaults(tmp_path: Path):
+    cfg_path = tmp_path / "infer-mini.yaml"
+    with cfg_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(
+            {
+                "subset_target_mentions": 1234,
+                "seed": "7",
+                "subset_sampling": {"target_mean_block_size": "3.5"},
+                "infer_overrides": {"max_pairs_per_block": "999", "score_batch_size": "4096"},
+            },
+            f,
+            sort_keys=False,
+        )
+
+    cfg, source = cli._resolve_infer_run_cfg(infer_stage="mini", infer_run_config=str(cfg_path))
+    assert source == str(cfg_path)
+    assert cfg["stage"] == "mini"
+    assert cfg["subset_target_mentions"] == 1234
+    assert cfg["seed"] == 7
+    assert cfg["subset_sampling"]["target_mean_block_size"] == 3.5
+    assert cfg["infer_overrides"]["max_pairs_per_block"] == 999
+    assert cfg["infer_overrides"]["score_batch_size"] == 4096
+
+
+def test_compute_infer_subset_identity_changes_with_cfg():
+    cfg_a = {"subset_target_mentions": 1000, "seed": 11, "subset_sampling": {"target_mean_block_size": 4.0}}
+    cfg_b = {"subset_target_mentions": 2000, "seed": 11, "subset_sampling": {"target_mean_block_size": 4.0}}
+    id_a = cli._compute_infer_subset_identity(dataset_source_fp="abc123", infer_stage="mini", infer_cfg=cfg_a)
+    id_b = cli._compute_infer_subset_identity(dataset_source_fp="abc123", infer_stage="mini", infer_cfg=cfg_b)
+    assert id_a["subset_tag"] != id_b["subset_tag"]
+    assert id_a["sampler_version"] == cli.INFER_SUBSET_CACHE_VERSION
+
+
+def test_build_infer_preflight_estimates_pair_upper_bound():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "a"},
+            {"mention_id": "m2", "block_key": "a"},
+            {"mention_id": "m3", "block_key": "a"},
+            {"mention_id": "m4", "block_key": "b"},
+        ]
+    )
+    preflight = cli._build_infer_preflight(
+        mentions=mentions,
+        max_pairs_per_block=2,
+        score_batch_size=128,
+        max_ram_fraction=0.5,
+    )
+    assert preflight["n_mentions"] == 4
+    assert preflight["n_blocks"] == 2
+    assert preflight["pair_upper_bound"] == 2
+    assert preflight["estimate_bytes"]["total_upper_bound"] > 0

@@ -244,6 +244,10 @@ def cluster_blockwise_dbscan(
     }
 
     grouped = mentions.groupby("block_key", sort=False)
+    if len(pair_scores) > 0 and "block_key" in pair_scores.columns:
+        score_indices = pair_scores.groupby("block_key", sort=False).indices
+    else:
+        score_indices = {}
     iterator = grouped
     if show_progress:
         try:
@@ -255,7 +259,11 @@ def cluster_blockwise_dbscan(
 
     for block_key, block_mentions in iterator:
         block_mentions = block_mentions.reset_index(drop=True)
-        block_scores = pair_scores[pair_scores["block_key"] == block_key]
+        block_idx = score_indices.get(block_key)
+        if block_idx is None:
+            block_scores = pair_scores.iloc[0:0]
+        else:
+            block_scores = pair_scores.iloc[np.asarray(block_idx, dtype=np.int64)]
 
         if len(block_mentions) == 1:
             m = str(block_mentions.iloc[0]["mention_id"])

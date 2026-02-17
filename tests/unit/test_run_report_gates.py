@@ -214,3 +214,20 @@ def test_go_no_go_infer_scope_ignores_train_only_checks():
     assert "not applicable" in checks["split_balance_status"]["detail"]
     assert checks["split_neg_feasible"]["passed"] is True
     assert "not applicable" in checks["split_neg_feasible"]["detail"]
+
+
+def test_go_no_go_blocks_when_memory_not_feasible():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["metric_scope"] = "infer"
+    metrics["memory_feasible"] = False
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    assert go["go"] is False
+    assert "memory_feasible" in go["blockers"]

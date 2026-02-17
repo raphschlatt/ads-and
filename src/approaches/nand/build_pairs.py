@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from itertools import combinations
 from pathlib import Path
 from typing import Dict, Optional, Any
 
@@ -233,6 +232,37 @@ def _pair_id(m1: str, m2: str) -> str:
     return f"{a}__{b}"
 
 
+def _pair_count(n: int) -> int:
+    return int(n * (n - 1) // 2)
+
+
+def _pair_from_rank(rank: int, n: int) -> tuple[int, int]:
+    i = int(n - 2 - np.floor((np.sqrt(-8.0 * rank + 4.0 * n * (n - 1) - 7.0) - 1.0) / 2.0))
+    prev = int(i * (2 * n - i - 1) // 2)
+    j = int(rank - prev + i + 1)
+    return i, j
+
+
+def _iter_pair_indices(
+    *,
+    n: int,
+    max_pairs_per_block: Optional[int],
+    rng: np.random.Generator,
+):
+    total_pairs = _pair_count(n)
+    if total_pairs <= 0:
+        return
+    if max_pairs_per_block is not None and total_pairs > int(max_pairs_per_block):
+        sampled_ranks = np.sort(rng.choice(total_pairs, size=int(max_pairs_per_block), replace=False))
+        for rank in sampled_ranks.tolist():
+            yield _pair_from_rank(int(rank), n)
+        return
+
+    for i in range(n - 1):
+        for j in range(i + 1, n):
+            yield i, j
+
+
 def build_pairs_within_blocks(
     mentions: pd.DataFrame,
     max_pairs_per_block: Optional[int] = None,
@@ -242,15 +272,20 @@ def build_pairs_within_blocks(
     balance_train: bool = True,
     exclude_same_bibcode: bool = True,
     show_progress: bool = False,
+    output_path: str | Path | None = None,
+    chunk_rows: int = 200_000,
+    return_pairs: bool = True,
     return_meta: bool = False,
-) -> pd.DataFrame | tuple[pd.DataFrame, Dict[str, Any]]:
+) -> pd.DataFrame | None | tuple[pd.DataFrame | None, Dict[str, Any]]:
     """Build mention pairs inside blocks, optionally with labels (LSPO)."""
     if "split" not in mentions.columns:
         mentions = mentions.copy()
         mentions["split"] = "inference"
 
-    rows = []
+    rows: list[dict[str, Any]] = []
+    buffer_rows: list[dict[str, Any]] = []
     same_publication_pairs_skipped = 0
+    pairs_written = 0
     rng = np.random.default_rng(seed)
 
     grouped = mentions.groupby("block_key", sort=False)
@@ -263,18 +298,57 @@ def build_pairs_within_blocks(
         except Exception:
             pass
 
+    output = Path(output_path) if output_path is not None else None
+    writer = None
+    writer_schema = None
+
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if output.exists():
+            output.unlink()
+
+    def _flush(force: bool = False) -> None:
+        nonlocal writer, writer_schema, pairs_written
+        if not buffer_rows:
+            return
+        if not force and len(buffer_rows) < max(1, int(chunk_rows)):
+            return
+
+        chunk_df = pd.DataFrame(buffer_rows)
+        pairs_written += int(len(chunk_df))
+        if return_pairs:
+            rows.extend(buffer_rows)
+
+        if output is not None:
+            try:
+                import pyarrow as pa  # type: ignore
+                import pyarrow.parquet as pq  # type: ignore
+            except Exception:
+                if output.exists():
+                    existing = pd.read_parquet(output)
+                    chunk_df = pd.concat([existing, chunk_df], ignore_index=True)
+                chunk_df.to_parquet(output, index=False)
+            else:
+                table = pa.Table.from_pandas(chunk_df, preserve_index=False)
+                if writer is None:
+                    writer_schema = table.schema
+                    writer = pq.ParquetWriter(output, writer_schema)
+                elif writer_schema is not None and table.schema != writer_schema:
+                    table = table.cast(writer_schema)
+                writer.write_table(table)
+        buffer_rows.clear()
+
     for block_key, block in iterator:
         block = block.reset_index(drop=True)
         n = len(block)
         if n < 2:
             continue
 
-        idx_pairs = list(combinations(range(n), 2))
-        if max_pairs_per_block is not None and len(idx_pairs) > max_pairs_per_block:
-            chosen = rng.choice(len(idx_pairs), size=max_pairs_per_block, replace=False)
-            idx_pairs = [idx_pairs[i] for i in np.sort(chosen)]
-
-        for i, j in idx_pairs:
+        for i, j in _iter_pair_indices(
+            n=n,
+            max_pairs_per_block=max_pairs_per_block,
+            rng=rng,
+        ):
             r1 = block.iloc[i]
             r2 = block.iloc[j]
 
@@ -303,7 +377,7 @@ def build_pairs_within_blocks(
 
             m1 = str(r1["mention_id"])
             m2 = str(r2["mention_id"])
-            rows.append(
+            buffer_rows.append(
                 {
                     "pair_id": _pair_id(m1, m2),
                     "mention_id_1": m1,
@@ -313,13 +387,34 @@ def build_pairs_within_blocks(
                     "label": label,
                 }
             )
+            _flush(force=False)
 
-    pairs = pd.DataFrame(rows)
+    _flush(force=True)
+    if writer is not None:
+        writer.close()
+
+    if output is not None and not return_pairs:
+        if pairs_written == 0:
+            empty = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+            save_parquet(empty, output, index=False)
+        pairs = None
+    elif output is not None and not rows and output.exists():
+        pairs = pd.read_parquet(output)
+    else:
+        pairs = pd.DataFrame(rows)
+
     meta: Dict[str, Any] = {
         "exclude_same_bibcode": bool(exclude_same_bibcode),
         "same_publication_pairs_skipped": int(same_publication_pairs_skipped),
         "balance_train": bool(balance_train),
+        "pairs_written": int(pairs_written if output is not None else len(rows)),
+        "chunk_rows": int(chunk_rows),
+        "output_path": str(output) if output is not None else None,
     }
+
+    if pairs is None:
+        return (None, meta) if return_meta else None
+
     if len(pairs) == 0:
         return (pairs, meta) if return_meta else pairs
 

@@ -1,0 +1,8 @@
+stage: "mini"
+subset_target_mentions: 10000
+seed: 11
+subset_sampling:
+  target_mean_block_size: 4
+infer_overrides:
+  max_pairs_per_block: 100000
+  score_batch_size: 8192

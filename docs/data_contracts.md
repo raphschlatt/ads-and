@@ -107,6 +107,15 @@ optional compare:
 
 - dataset paths/fingerprint
 - mention and block counts
+- infer subset metadata (`infer_stage`, `subset_tag`, `subset_ratio`)
+- cache validation fields (`mentions_cache_*`, `subset_cache_*`)
+
+`02_preflight_infer.json`:
+
+- `n_mentions`, `n_blocks`, `block_p95`, `block_max`
+- `pair_upper_bound`
+- conservative memory estimate by component
+- `memory_feasible` (gate-relevant)
 
 `03_pairs_qc.json`:
 
@@ -126,6 +135,9 @@ optional compare:
 - coverage/UID checks
 - cluster quality rates
 - eps diagnostics
+- infer context (`infer_stage`, `subset_tag`, `subset_ratio`)
+- preflight carry-over (`memory_feasible`, `pair_upper_bound`)
+- source-export coverage fields
 - infer counts (`ads_mentions`, unique `ads_clusters`, assignment count, `ads_blocks`)
 
 `05_go_no_go_infer_ads.json`:
@@ -140,6 +152,15 @@ cluster exports:
 
 - `artifacts/clusters/<run_id>/ads_clusters_infer_ads.parquet`
 - `artifacts/clusters/<run_id>/publication_authors_infer_ads.parquet`
+
+source-mirrored exports:
+
+- `artifacts/exports/<run_id>/publications.disambiguated.jsonl`
+- `artifacts/exports/<run_id>/references.disambiguated.jsonl` (optional)
+
+Each output record preserves original fields and appends:
+
+- `AuthorUID` (list, same length/order as `Author`, unmapped entries are `null`)
 
 ## Model Bundle Contract (v1)
 

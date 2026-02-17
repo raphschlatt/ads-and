@@ -58,3 +58,29 @@ def test_pair_builder_balances_train_pairs_symmetrically():
     )
     train_pairs = pairs[(pairs["split"] == "train") & pairs["label"].notna()]
     assert int((train_pairs["label"] == 1).sum()) == int((train_pairs["label"] == 0).sum())
+
+
+def test_pair_builder_can_stream_to_output_without_returning_pairs(tmp_path):
+    df = pd.DataFrame(
+        [
+            {"mention_id": "a1::0", "bibcode": "a1", "author_idx": 0, "author_raw": "A", "title": "t", "abstract": "a", "year": 2001, "source_type": "ads", "block_key": "blk.a", "split": "inference"},
+            {"mention_id": "a2::0", "bibcode": "a2", "author_idx": 0, "author_raw": "A", "title": "t", "abstract": "a", "year": 2002, "source_type": "ads", "block_key": "blk.a", "split": "inference"},
+            {"mention_id": "a3::0", "bibcode": "a3", "author_idx": 0, "author_raw": "A", "title": "t", "abstract": "a", "year": 2003, "source_type": "ads", "block_key": "blk.a", "split": "inference"},
+        ]
+    )
+    out_path = tmp_path / "pairs.parquet"
+    pairs, meta = build_pairs_within_blocks(
+        df,
+        require_same_split=False,
+        labeled_only=False,
+        balance_train=False,
+        return_pairs=False,
+        output_path=out_path,
+        chunk_rows=1,
+        return_meta=True,
+    )
+    assert pairs is None
+    assert out_path.exists()
+    written = pd.read_parquet(out_path)
+    assert len(written) == 3
+    assert meta["pairs_written"] == 3

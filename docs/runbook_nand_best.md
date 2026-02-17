@@ -42,6 +42,7 @@ Infer (run id source):
 python3 -m src.cli run-infer-ads \
   --dataset-id my_ads_2026 \
   --model-run-id smoke_2026... \
+  --infer-stage full \
   --paths-config configs/paths.local.yaml \
   --device auto
 ```
@@ -52,8 +53,14 @@ Infer (bundle source):
 python3 -m src.cli run-infer-ads \
   --dataset-id my_ads_2026 \
   --model-bundle artifacts/models/smoke_2026.../bundle_v1 \
+  --infer-stage mini \
   --paths-config configs/paths.local.yaml \
   --device auto
+
+Infer stage presets:
+
+- `full` (default): process full deduplicated ADS mentions.
+- `smoke|mini|mid`: deterministic subset profiles from `configs/infer_runs/*.yaml`.
 ```
 
 ## Gate Expectations

@@ -6,12 +6,7 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
-from src.common.io_schema import (
-    CLUSTER_REQUIRED_COLUMNS,
-    MENTION_REQUIRED_COLUMNS,
-    validate_columns,
-    validate_pair_score_ranges,
-)
+from src.common.io_schema import CLUSTER_REQUIRED_COLUMNS, MENTION_REQUIRED_COLUMNS, validate_columns
 
 
 def write_json(payload: Mapping[str, Any], output_path: str | Path) -> Path:
@@ -126,11 +121,13 @@ def build_pairs_qc(
     split_meta: Mapping[str, Any],
     lspo_pair_build_meta: Mapping[str, Any] | None = None,
     ads_pair_build_meta: Mapping[str, Any] | None = None,
+    ads_pairs_count: int | None = None,
 ) -> dict[str, Any]:
+    resolved_ads_pairs = int(ads_pairs_count) if ads_pairs_count is not None else int(len(ads_pairs))
     return {
         "orcid_leakage_groups": _orcid_leakage_groups(lspo_mentions),
         "lspo_pairs": int(len(lspo_pairs)),
-        "ads_pairs": int(len(ads_pairs)),
+        "ads_pairs": resolved_ads_pairs,
         "split_label_counts": summarize_split_labels(lspo_pairs),
         "split_balance": dict(split_meta),
         "lspo_pair_build": dict(lspo_pair_build_meta or {}),
@@ -140,55 +137,101 @@ def build_pairs_qc(
 
 def build_cluster_qc(
     *,
-    pair_scores: pd.DataFrame,
+    pair_scores: pd.DataFrame | str | Path,
     clusters: pd.DataFrame,
     threshold: float,
     probe_threshold: float = 0.35,
+    chunk_rows: int = 200_000,
 ) -> dict[str, Any]:
-    range_stats = validate_pair_score_ranges(pair_scores)
-    n_pairs_evaluated = int(len(pair_scores))
-
-    if len(clusters) == 0:
-        return {
-            "singleton_ratio": 0.0,
-            "merged_low_conf_count": 0,
-            "merged_low_conf_rate": 0.0,
-            "split_high_sim_count": 0,
-            "split_high_sim_rate": 0.0,
-            "probe_threshold": float(probe_threshold),
-            "merged_low_conf_count_probe": 0,
-            "merged_low_conf_rate_probe": 0.0,
-            "split_high_sim_count_probe": 0,
-            "split_high_sim_rate_probe": 0.0,
-            "n_pairs_evaluated": n_pairs_evaluated,
-            "cluster_count": 0,
-            **range_stats,
-        }
-
     cluster_size = clusters.groupby(["block_key", "author_uid"]).size().rename("size").reset_index()
     singleton_ratio = float((cluster_size["size"] == 1).mean()) if len(cluster_size) else 0.0
 
-    diag = pair_scores.merge(
-        clusters[["mention_id", "author_uid"]].rename(
-            columns={"mention_id": "mention_id_1", "author_uid": "author_uid_1"}
-        ),
-        on="mention_id_1",
-        how="left",
-    ).merge(
-        clusters[["mention_id", "author_uid"]].rename(
-            columns={"mention_id": "mention_id_2", "author_uid": "author_uid_2"}
-        ),
-        on="mention_id_2",
-        how="left",
-    )
-    diag["same_cluster"] = diag["author_uid_1"] == diag["author_uid_2"]
-    n_pairs_evaluated = int(len(diag))
-    denom = max(1, n_pairs_evaluated)
+    mention_to_uid = clusters.set_index("mention_id")["author_uid"].astype(str).to_dict()
 
-    merged_low_conf_count = int(((diag["same_cluster"]) & (diag["cosine_sim"] < float(threshold))).sum())
-    split_high_sim_count = int(((~diag["same_cluster"]) & (diag["cosine_sim"] >= float(threshold))).sum())
-    merged_low_conf_count_probe = int(((diag["same_cluster"]) & (diag["cosine_sim"] < float(probe_threshold))).sum())
-    split_high_sim_count_probe = int(((~diag["same_cluster"]) & (diag["cosine_sim"] >= float(probe_threshold))).sum())
+    cosine_min = None
+    cosine_max = None
+    distance_min = None
+    distance_max = None
+    cosine_non_finite_count = 0
+    distance_non_finite_count = 0
+    cosine_out_of_range_count = 0
+    negative_distance_count = 0
+    distance_above_max_count = 0
+    n_pairs_evaluated = 0
+    merged_low_conf_count = 0
+    split_high_sim_count = 0
+    merged_low_conf_count_probe = 0
+    split_high_sim_count_probe = 0
+
+    def _iter_chunks():
+        if isinstance(pair_scores, pd.DataFrame):
+            yield pair_scores
+            return
+        pair_path = Path(pair_scores)
+        if not pair_path.exists():
+            raise FileNotFoundError(pair_path)
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("build_cluster_qc chunked mode requires pyarrow for parquet inputs.") from exc
+        parquet = pq.ParquetFile(pair_path)
+        for batch in parquet.iter_batches(batch_size=int(chunk_rows)):
+            yield batch.to_pandas()
+
+    for chunk in _iter_chunks():
+        if len(chunk) == 0:
+            continue
+        n_pairs_evaluated += int(len(chunk))
+
+        cosine = pd.to_numeric(chunk["cosine_sim"], errors="coerce")
+        distance = pd.to_numeric(chunk["distance"], errors="coerce")
+        cosine_non_finite_count += int(cosine.isna().sum())
+        distance_non_finite_count += int(distance.isna().sum())
+
+        cosine_finite = cosine[cosine.notna()]
+        distance_finite = distance[distance.notna()]
+        if len(cosine_finite):
+            cmin = float(cosine_finite.min())
+            cmax = float(cosine_finite.max())
+            cosine_min = cmin if cosine_min is None else min(cosine_min, cmin)
+            cosine_max = cmax if cosine_max is None else max(cosine_max, cmax)
+            cosine_out_of_range_count += int(((cosine_finite < -1.0) | (cosine_finite > 1.0)).sum())
+        if len(distance_finite):
+            dmin = float(distance_finite.min())
+            dmax = float(distance_finite.max())
+            distance_min = dmin if distance_min is None else min(distance_min, dmin)
+            distance_max = dmax if distance_max is None else max(distance_max, dmax)
+            negative_distance_count += int((distance_finite < 0.0).sum())
+            distance_above_max_count += int((distance_finite > 2.0).sum())
+
+        uid1 = chunk["mention_id_1"].astype(str).map(mention_to_uid)
+        uid2 = chunk["mention_id_2"].astype(str).map(mention_to_uid)
+        same_cluster = uid1 == uid2
+        cos = pd.to_numeric(chunk["cosine_sim"], errors="coerce")
+        merged_low_conf_count += int((same_cluster & (cos < float(threshold))).sum())
+        split_high_sim_count += int(((~same_cluster) & (cos >= float(threshold))).sum())
+        merged_low_conf_count_probe += int((same_cluster & (cos < float(probe_threshold))).sum())
+        split_high_sim_count_probe += int(((~same_cluster) & (cos >= float(probe_threshold))).sum())
+
+    range_stats = {
+        "pair_score_range_ok": bool(
+            cosine_non_finite_count == 0
+            and distance_non_finite_count == 0
+            and cosine_out_of_range_count == 0
+            and negative_distance_count == 0
+            and distance_above_max_count == 0
+        ),
+        "cosine_min": cosine_min,
+        "cosine_max": cosine_max,
+        "distance_min": distance_min,
+        "distance_max": distance_max,
+        "cosine_non_finite_count": int(cosine_non_finite_count),
+        "distance_non_finite_count": int(distance_non_finite_count),
+        "cosine_out_of_range_count": int(cosine_out_of_range_count),
+        "negative_distance_count": int(negative_distance_count),
+        "distance_above_max_count": int(distance_above_max_count),
+    }
+    denom = max(1, n_pairs_evaluated)
 
     return {
         "singleton_ratio": singleton_ratio,
@@ -347,9 +390,18 @@ def build_infer_stage_metrics(
     threshold_selection_status: str = "model_run_threshold",
     threshold_source: str = "model_run",
     precision_mode: str = "fp32",
+    infer_stage: str = "full",
+    subset_tag: str | None = None,
+    subset_ratio: float | None = None,
+    memory_feasible: bool | None = None,
+    pair_upper_bound: int | None = None,
+    source_export_qc: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     cluster_qc = dict(cluster_qc or {})
     eps_meta = dict(eps_meta or {})
+    source_export_qc = dict(source_export_qc or {})
+    pubs_qc = dict(source_export_qc.get("publications", {}) or {})
+    refs_qc = dict(source_export_qc.get("references", {}) or {})
 
     uid_uniqueness_max = (
         int(clusters.groupby("mention_id")["author_uid"].nunique().max()) if len(clusters) and "mention_id" in clusters.columns else 0
@@ -381,6 +433,11 @@ def build_infer_stage_metrics(
         "threshold_selection_status": str(threshold_selection_status),
         "threshold_source": str(threshold_source),
         "precision_mode": str(precision_mode),
+        "infer_stage": str(infer_stage),
+        "subset_tag": subset_tag,
+        "subset_ratio": _optional_float(subset_ratio),
+        "memory_feasible": None if memory_feasible is None else bool(memory_feasible),
+        "pair_upper_bound": None if pair_upper_bound is None else int(pair_upper_bound),
         "val_class_counts": {},
         "test_class_counts": {},
         "subset_cache_key": None,
@@ -409,6 +466,15 @@ def build_infer_stage_metrics(
             "ads_clusters": ads_clusters_unique,
             "ads_cluster_assignments": int(len(clusters)),
             "ads_blocks": ads_blocks,
+        },
+        "source_export": {
+            "coverage_rate": _optional_float(source_export_qc.get("coverage_rate")),
+            "authors_total": source_export_qc.get("authors_total"),
+            "authors_mapped": source_export_qc.get("authors_mapped"),
+            "authors_unmapped": source_export_qc.get("authors_unmapped"),
+            "publications_coverage_rate": _optional_float(pubs_qc.get("coverage_rate")),
+            "references_coverage_rate": _optional_float(refs_qc.get("coverage_rate")),
+            "references_present": bool(source_export_qc.get("references_present")) if source_export_qc else None,
         },
     }
 
@@ -605,6 +671,8 @@ def write_compare_infer_to_baseline(
     split_high_sim_rate_probe_current = current_stage.get("split_high_sim_rate_probe")
     merged_low_conf_rate_probe_baseline = (baseline_stage or {}).get("merged_low_conf_rate_probe")
     merged_low_conf_rate_probe_current = current_stage.get("merged_low_conf_rate_probe")
+    baseline_source_export = (baseline_stage or {}).get("source_export") or {}
+    current_source_export = current_stage.get("source_export") or {}
 
     payload = {
         "compare_scope": "infer",
@@ -642,6 +710,23 @@ def write_compare_infer_to_baseline(
         "merged_low_conf_rate_probe_delta": _delta(
             merged_low_conf_rate_probe_current,
             merged_low_conf_rate_probe_baseline,
+        ),
+        "infer_stage_baseline": (baseline_stage or {}).get("infer_stage"),
+        "infer_stage_current": current_stage.get("infer_stage"),
+        "subset_ratio_baseline": (baseline_stage or {}).get("subset_ratio"),
+        "subset_ratio_current": current_stage.get("subset_ratio"),
+        "subset_ratio_delta": _delta(current_stage.get("subset_ratio"), (baseline_stage or {}).get("subset_ratio")),
+        "pair_upper_bound_baseline": (baseline_stage or {}).get("pair_upper_bound"),
+        "pair_upper_bound_current": current_stage.get("pair_upper_bound"),
+        "pair_upper_bound_delta": _delta(
+            current_stage.get("pair_upper_bound"),
+            (baseline_stage or {}).get("pair_upper_bound"),
+        ),
+        "source_coverage_rate_baseline": baseline_source_export.get("coverage_rate"),
+        "source_coverage_rate_current": current_source_export.get("coverage_rate"),
+        "source_coverage_rate_delta": _delta(
+            current_source_export.get("coverage_rate"),
+            baseline_source_export.get("coverage_rate"),
         ),
     }
     return write_json(payload, output_path)

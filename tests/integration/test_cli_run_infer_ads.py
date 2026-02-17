@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from src import cli
@@ -200,6 +201,7 @@ def _run_infer_ads(
     *,
     model_run_id: str | None = None,
     model_bundle: str | None = None,
+    infer_stage: str | None = None,
 ) -> None:
     argv = [
         "run-infer-ads",
@@ -213,6 +215,8 @@ def _run_infer_ads(
         run_id,
         "--no-progress",
     ]
+    if infer_stage is not None:
+        argv.extend(["--infer-stage", infer_stage])
     if model_run_id is not None:
         argv.extend(["--model-run-id", model_run_id])
     if model_bundle is not None:
@@ -239,8 +243,11 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     assert (metrics_dir / "00_run_consistency.json").exists()
     assert (metrics_dir / "01_input_summary.json").exists()
     assert (metrics_dir / "01_run_consistency.json").exists()
+    assert (metrics_dir / "02_preflight_infer.json").exists()
+    assert (metrics_dir / "02_run_consistency.json").exists()
     assert (metrics_dir / "03_pairs_qc.json").exists()
     assert (metrics_dir / "04_cluster_qc.json").exists()
+    assert (metrics_dir / "04_source_export_qc.json").exists()
     assert (metrics_dir / "04_clustering_config_used.json").exists()
     assert (metrics_dir / "04_run_consistency.json").exists()
     assert (metrics_dir / "05_stage_metrics_infer_ads.json").exists()
@@ -253,19 +260,27 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     assert context["selected_eps"] == 0.42
     assert context["pipeline_scope"] == "infer"
     assert context["model_source_type"] == "run_id"
+    assert context["infer_stage"] == "full"
+    assert context["score_batch_size"] == 8192
 
     summary = json.loads((metrics_dir / "01_input_summary.json").read_text(encoding="utf-8"))
     assert summary["references_present"] is False
+    assert summary["subset_ratio"] == 1.0
 
     stage_metrics = json.loads((metrics_dir / "05_stage_metrics_infer_ads.json").read_text(encoding="utf-8"))
     assert stage_metrics["stage"] == "infer_ads"
     assert stage_metrics["metric_scope"] == "infer"
     assert stage_metrics["counts"]["ads_mentions"] > 0
+    assert stage_metrics["infer_stage"] == "full"
+    assert stage_metrics["memory_feasible"] in {True, False, None}
+    assert stage_metrics["pair_upper_bound"] is not None
 
     cluster_path = tmp_path / "artifacts" / "clusters" / run_id / "ads_clusters_infer_ads.parquet"
     export_path = tmp_path / "artifacts" / "clusters" / run_id / "publication_authors_infer_ads.parquet"
+    pubs_out = tmp_path / "artifacts" / "exports" / run_id / "publications.disambiguated.jsonl"
     assert cluster_path.exists()
     assert export_path.exists()
+    assert pubs_out.exists()
 
     clusters = pd.read_parquet(cluster_path)
     export = pd.read_parquet(export_path)
@@ -294,6 +309,73 @@ def test_cli_run_infer_ads_resume_reuses_artifacts(monkeypatch, tmp_path: Path):
 
     _run_infer_ads(parser, cfg, dataset_id=dataset_id, model_run_id=model_run_id, run_id=run_id)
     assert (cfg["metrics_dir"] / run_id / "05_go_no_go_infer_ads.json").exists()
+
+
+def test_cli_run_infer_ads_with_mini_stage_builds_subset(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+    parser = cli.build_parser()
+    run_id = "infer_ads_mini"
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id,
+        infer_stage="mini",
+    )
+
+    metrics_dir = cfg["metrics_dir"] / run_id
+    context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
+    summary = json.loads((metrics_dir / "01_input_summary.json").read_text(encoding="utf-8"))
+    stage_metrics = json.loads((metrics_dir / "05_stage_metrics_infer_ads.json").read_text(encoding="utf-8"))
+
+    assert context["infer_stage"] == "mini"
+    assert summary["subset_tag"].startswith("infer_mini_")
+    assert 0.0 < float(summary["subset_ratio"]) <= 1.0
+    assert stage_metrics["infer_stage"] == "mini"
+
+
+def test_cli_run_infer_ads_memory_policy_fail_aborts_early(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+    parser = cli.build_parser()
+
+    run_id = "infer_ads_mem_fail"
+    args = parser.parse_args(
+        [
+            "run-infer-ads",
+            "--dataset-id",
+            dataset_id,
+            "--model-run-id",
+            model_run_id,
+            "--paths-config",
+            str(cfg["paths"]),
+            "--cluster-config",
+            str(cfg["cluster"]),
+            "--run-id",
+            run_id,
+            "--memory-policy",
+            "fail",
+            "--max-ram-fraction",
+            "0.0000001",
+            "--no-progress",
+        ]
+    )
+    with pytest.raises(RuntimeError, match="memory_feasible=false"):
+        args.func(args)
+
+    metrics_dir = cfg["metrics_dir"] / run_id
+    assert (metrics_dir / "02_preflight_infer.json").exists()
+    assert not (metrics_dir / "05_stage_metrics_infer_ads.json").exists()
 
 
 def test_cli_run_infer_ads_supports_model_bundle(monkeypatch, tmp_path: Path):

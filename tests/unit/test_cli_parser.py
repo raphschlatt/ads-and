@@ -126,9 +126,13 @@ def test_run_infer_ads_parser_defaults_with_model_run_id():
     assert args.paths_config == "configs/paths.local.yaml"
     assert args.cluster_config == "configs/clustering/dbscan_paper.yaml"
     assert args.gates_config == "configs/gates.yaml"
+    assert args.infer_stage == "full"
+    assert args.infer_run_config is None
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
-    assert args.score_batch_size == 8192
+    assert args.score_batch_size is None
+    assert args.memory_policy == "fail"
+    assert args.max_ram_fraction == 0.80
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_infer_ads
@@ -158,19 +162,31 @@ def test_run_infer_ads_parser_boolean_overrides():
             "my_ads_2026",
             "--model-run-id",
             "full_2026abc",
+            "--infer-stage",
+            "mini",
+            "--infer-run-config",
+            "cfg/infer-mini.yaml",
             "--no-progress",
             "--verbose-libs",
             "--precision-mode",
             "amp_bf16",
             "--score-batch-size",
             "4096",
+            "--memory-policy",
+            "warn",
+            "--max-ram-fraction",
+            "0.5",
         ]
     )
 
+    assert args.infer_stage == "mini"
+    assert args.infer_run_config == "cfg/infer-mini.yaml"
     assert args.progress is False
     assert args.quiet_libs is False
     assert args.precision_mode == "amp_bf16"
     assert args.score_batch_size == 4096
+    assert args.memory_policy == "warn"
+    assert args.max_ram_fraction == 0.5
 
 
 def test_run_infer_ads_parser_requires_exactly_one_model_source():
