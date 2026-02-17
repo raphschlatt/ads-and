@@ -90,22 +90,77 @@ def _configure_hf_noise(quiet_libraries: bool) -> None:
         pass
 
 
-def _load_specter_components(model_name: str, reuse_model: bool):
-    from transformers import AutoModel, AutoTokenizer
+def _normalize_text_backend(text_backend: str) -> str:
+    backend = str(text_backend or "transformers").strip().lower()
+    if backend not in {"transformers", "adapters"}:
+        warnings.warn(
+            f"Unknown text_backend={text_backend!r}; falling back to transformers.",
+            RuntimeWarning,
+        )
+        return "transformers"
+    return backend
 
-    if reuse_model and model_name in _SPECTER_MODEL_CACHE:
-        return _SPECTER_MODEL_CACHE[model_name]
+
+def _build_model_cache_key(
+    *,
+    model_name: str,
+    text_backend: str,
+    text_adapter_name: str | None,
+    text_adapter_alias: str,
+) -> str:
+    return f"{text_backend}::{model_name}::{text_adapter_name or ''}::{text_adapter_alias}"
+
+
+def _load_specter_components(
+    model_name: str,
+    reuse_model: bool,
+    text_backend: str = "transformers",
+    text_adapter_name: str | None = None,
+    text_adapter_alias: str = "specter2",
+):
+    from transformers import AutoTokenizer
+
+    backend = _normalize_text_backend(text_backend)
+    cache_key = _build_model_cache_key(
+        model_name=model_name,
+        text_backend=backend,
+        text_adapter_name=text_adapter_name,
+        text_adapter_alias=text_adapter_alias,
+    )
+    if reuse_model and cache_key in _SPECTER_MODEL_CACHE:
+        return _SPECTER_MODEL_CACHE[cache_key]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name)
+    if backend == "transformers":
+        from transformers import AutoModel
+
+        model = AutoModel.from_pretrained(model_name)
+    else:
+        if not text_adapter_name:
+            raise ValueError("text_adapter_name is required when text_backend='adapters'.")
+        try:
+            from adapters import AutoAdapterModel
+        except Exception as exc:
+            raise RuntimeError(
+                "Adapter backend requires the `adapters` package. Install with `pip install -U adapters`."
+            ) from exc
+        model = AutoAdapterModel.from_pretrained(model_name)
+        load_kwargs: dict[str, Any] = {"source": "hf", "set_active": True}
+        if text_adapter_alias:
+            load_kwargs["load_as"] = text_adapter_alias
+        model.load_adapter(text_adapter_name, **load_kwargs)
+
     if reuse_model:
-        _SPECTER_MODEL_CACHE[model_name] = (tokenizer, model)
+        _SPECTER_MODEL_CACHE[cache_key] = (tokenizer, model)
     return tokenizer, model
 
 
 def generate_specter_embeddings(
     mentions: pd.DataFrame,
     model_name: str = "allenai/specter",
+    text_backend: str = "transformers",
+    text_adapter_name: str | None = None,
+    text_adapter_alias: str = "specter2",
     batch_size: int = 16,
     max_length: int = 256,
     device: str = "auto",
@@ -138,7 +193,13 @@ def generate_specter_embeddings(
     requested_device = device
     device = _resolve_device(torch, device)
 
-    tokenizer, model = _load_specter_components(model_name=model_name, reuse_model=reuse_model)
+    tokenizer, model = _load_specter_components(
+        model_name=model_name,
+        reuse_model=reuse_model,
+        text_backend=text_backend,
+        text_adapter_name=text_adapter_name,
+        text_adapter_alias=text_adapter_alias,
+    )
     try:
         model.to(device)
     except Exception as exc:
@@ -186,6 +247,9 @@ def get_or_create_specter_embeddings(
     output_path: str | Path,
     force_recompute: bool = False,
     model_name: str = "allenai/specter",
+    text_backend: str = "transformers",
+    text_adapter_name: str | None = None,
+    text_adapter_alias: str = "specter2",
     batch_size: int = 16,
     max_length: int = 256,
     device: str = "auto",
@@ -202,6 +266,9 @@ def get_or_create_specter_embeddings(
     emb = generate_specter_embeddings(
         mentions=mentions,
         model_name=model_name,
+        text_backend=text_backend,
+        text_adapter_name=text_adapter_name,
+        text_adapter_alias=text_adapter_alias,
         batch_size=batch_size,
         max_length=max_length,
         device=device,

@@ -9,6 +9,7 @@ chars2vec==0.1.7
 keras==3.13.2
 tensorflow==2.20.0
 transformers>=4.38
+adapters>=0.2
 torch>=2.1
 jupyter>=1.0
 notebook>=7.0
