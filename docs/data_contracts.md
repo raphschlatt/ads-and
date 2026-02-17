@@ -106,6 +106,19 @@ Optional columns:
 - `blockers` (list[str]; failed blocker checks)
 - `warnings` (list[str]; failed warning checks)
 
+## infer_ads run artifacts
+
+For `python3 -m src.cli run-infer-ads`:
+
+- `01_input_summary.json` (dataset paths, dataset fingerprint, mention/block counts)
+- `03_pairs_qc.json` (pair build diagnostics for ADS-only inference)
+- `05_stage_metrics_infer_ads.json` / `05_go_no_go_infer_ads.json`
+
+Cluster outputs:
+
+- `artifacts/clusters/<run_id>/ads_clusters_infer_ads.parquet`
+- `artifacts/clusters/<run_id>/publication_authors_infer_ads.parquet`
+
 ## cache_refs.json (00)
 
 - `artifact_type` (str)

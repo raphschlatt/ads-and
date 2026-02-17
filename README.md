@@ -82,6 +82,45 @@ python3 -m src.cli run-stage \
   --baseline-run-id smoke_20260213T134837Z_f0fc32b8
 ```
 
+### One-Command ADS Inference (Trained NAND)
+
+Drop a new dataset into:
+
+- `data/raw/ads/<dataset-id>/publications.jsonl` (or `publications.json`)
+- optional `data/raw/ads/<dataset-id>/references.jsonl` (or `references.json`)
+
+Minimal expected ADS fields per record:
+
+- `Bibcode`
+- `Author` (list or string)
+- `Title_en` (or `Title`)
+- `Abstract_en` (or `Abstract`)
+- `Year`
+- `Affiliation` (also tolerates `Affilliation`)
+
+Run inference:
+
+```bash
+python3 -m src.cli run-infer-ads \
+  --dataset-id my_ads_2026 \
+  --model-run-id full_2026... \
+  --paths-config configs/paths.local.yaml \
+  --device auto
+```
+
+Outputs:
+
+- Normalized mentions: `data/interim/ads_mentions_<dataset-id>.parquet`
+- Cluster assignments: `artifacts/clusters/<run_id>/ads_clusters_infer_ads.parquet`
+- Publication-author export: `artifacts/clusters/<run_id>/publication_authors_infer_ads.parquet`
+- Run metrics/go-no-go: `artifacts/metrics/<run_id>/05_stage_metrics_infer_ads.json` and `05_go_no_go_infer_ads.json`
+
+Mapping contract:
+
+- `mention_id` stays stable from normalized input mentions.
+- `author_uid` is added during clustering.
+- Join key between mentions and clusters is always `mention_id`.
+
 ### CLI Behavior
 
 - Status and progress output is English and terminal-friendly.

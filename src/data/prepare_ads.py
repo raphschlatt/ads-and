@@ -100,7 +100,7 @@ def _normalize_ads_record(record: Dict, source_type: str) -> Dict | None:
         "title": _pick_text(record, ["Title_en", "Title", "title"]),
         "abstract": _pick_text(record, ["Abstract_en", "Abstract", "abstract"]),
         "year": parse_year(record.get("Year") or record.get("year")),
-        "aff": _pick_text(record, ["Affiliation", "aff"]),
+        "aff": _pick_text(record, ["Affiliation", "Affilliation", "aff"]),
         "authors": authors,
         "source_type": source_type,
         "precomputed_embedding": emb,
@@ -158,9 +158,15 @@ def deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame
     return out[keep_cols]
 
 
-def normalize_ads_mentions(publications_path: str | Path, references_path: str | Path) -> pd.DataFrame:
+def normalize_ads_mentions(
+    publications_path: str | Path,
+    references_path: str | Path | None = None,
+) -> pd.DataFrame:
     pubs = load_ads_records(publications_path, source_type="publication")
-    refs = load_ads_records(references_path, source_type="reference")
+    if references_path is None:
+        refs = pd.DataFrame(columns=pubs.columns.tolist())
+    else:
+        refs = load_ads_records(references_path, source_type="reference")
     dedup = deduplicate_ads_records(pubs, refs)
     mentions = explode_records_to_mentions(dedup, source_type_default="ads")
 
@@ -173,7 +179,7 @@ def normalize_ads_mentions(publications_path: str | Path, references_path: str |
 
 def prepare_ads_mentions(
     publications_path: str | Path,
-    references_path: str | Path,
+    references_path: str | Path | None,
     output_path: str | Path,
 ) -> pd.DataFrame:
     mentions = normalize_ads_mentions(publications_path=publications_path, references_path=references_path)

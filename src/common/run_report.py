@@ -54,6 +54,13 @@ def _default_gate_config() -> Dict:
                 "lspo_pairs_min": 300000,
                 "eps_range_limited_severity": "blocker",
             },
+            "infer_ads": {
+                "f1_min": 0.0,
+                "min_neg_val": 0,
+                "min_neg_test": 0,
+                "cluster_quality_severity": "blocker",
+                "eps_range_limited_severity": "warning",
+            },
         },
     }
 

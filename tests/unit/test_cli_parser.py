@@ -1,3 +1,5 @@
+import pytest
+
 from src import cli
 
 
@@ -90,3 +92,64 @@ def test_score_parser_precision_default():
         ]
     )
     assert args.precision_mode == "fp32"
+
+
+def test_run_infer_ads_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-ads",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-run-id",
+            "full_2026abc",
+        ]
+    )
+
+    assert args.command == "run-infer-ads"
+    assert args.dataset_id == "my_ads_2026"
+    assert args.model_run_id == "full_2026abc"
+    assert args.paths_config == "configs/paths.local.yaml"
+    assert args.cluster_config == "configs/clustering/dbscan_paper.yaml"
+    assert args.device == "auto"
+    assert args.precision_mode == "fp32"
+    assert args.score_batch_size == 8192
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_run_infer_ads
+
+
+def test_run_infer_ads_parser_boolean_overrides():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-ads",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-run-id",
+            "full_2026abc",
+            "--no-progress",
+            "--verbose-libs",
+            "--precision-mode",
+            "amp_bf16",
+            "--score-batch-size",
+            "4096",
+        ]
+    )
+
+    assert args.progress is False
+    assert args.quiet_libs is False
+    assert args.precision_mode == "amp_bf16"
+    assert args.score_batch_size == 4096
+
+
+def test_run_infer_ads_parser_requires_model_run_id():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run-infer-ads",
+                "--dataset-id",
+                "my_ads_2026",
+            ]
+        )

@@ -1,0 +1,283 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import yaml
+
+from src import cli
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+    return path
+
+
+def _make_configs(tmp_path: Path) -> dict[str, Path]:
+    paths_cfg = {
+        "project_root": str(tmp_path),
+        "data": {
+            "raw_lspo_parquet": str(tmp_path / "data/raw/lspo/mock.parquet"),
+            "raw_lspo_h5": str(tmp_path / "data/raw/lspo/mock.h5"),
+            "raw_ads_publications": str(tmp_path / "data/raw/ads/legacy_publications.jsonl"),
+            "raw_ads_references": str(tmp_path / "data/raw/ads/legacy_references.json"),
+            "interim_dir": str(tmp_path / "data/interim"),
+            "processed_dir": str(tmp_path / "data/processed"),
+            "subset_cache_dir": str(tmp_path / "data/subsets/cache"),
+            "subset_manifest_dir": str(tmp_path / "data/subsets/manifests"),
+        },
+        "artifacts": {
+            "root": str(tmp_path / "artifacts"),
+            "embeddings_dir": str(tmp_path / "artifacts/embeddings"),
+            "checkpoints_dir": str(tmp_path / "artifacts/checkpoints"),
+            "pair_scores_dir": str(tmp_path / "artifacts/pair_scores"),
+            "clusters_dir": str(tmp_path / "artifacts/clusters"),
+            "metrics_dir": str(tmp_path / "artifacts/metrics"),
+        },
+    }
+    cluster_cfg = {
+        "method": "dbscan",
+        "eps_mode": "val_sweep",
+        "eps": 0.35,
+        "eps_fallback": 0.35,
+        "eps_min": 0.15,
+        "eps_max": 0.85,
+        "min_samples": 1,
+        "metric": "precomputed",
+        "constraints": {"enabled": False},
+    }
+    model_cfg = {
+        "name": "mock-nand",
+        "representation": {"text_model_name": "mock-specter", "max_length": 64},
+        "training": {"precision_mode": "fp32"},
+    }
+    run_cfg = {"max_pairs_per_block": 100, "pair_building": {"exclude_same_bibcode": True}}
+
+    cfg_dir = tmp_path / "cfg"
+    return {
+        "paths": _write_yaml(cfg_dir / "paths.yaml", paths_cfg),
+        "cluster": _write_yaml(cfg_dir / "cluster.yaml", cluster_cfg),
+        "model": _write_yaml(cfg_dir / "model.yaml", model_cfg),
+        "run": _write_yaml(cfg_dir / "run.yaml", run_cfg),
+        "metrics_dir": Path(paths_cfg["artifacts"]["metrics_dir"]),
+    }
+
+
+def _write_dataset(tmp_path: Path, dataset_id: str, with_references: bool = True) -> Path:
+    ds_dir = tmp_path / "data" / "raw" / "ads" / dataset_id
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    pubs = [
+        {
+            "Bibcode": "bib1",
+            "Author": ["Doe J", "Doe J."],
+            "Title_en": "Paper 1",
+            "Abstract_en": "Abstract 1",
+            "Year": 2020,
+            "Affiliation": "Inst A",
+        },
+        {
+            "Bibcode": "bib2",
+            "Author": ["Doe J"],
+            "Title_en": "Paper 2",
+            "Abstract_en": "Abstract 2",
+            "Year": 2021,
+            "Affilliation": "Inst B",
+        },
+    ]
+    with (ds_dir / "publications.jsonl").open("w", encoding="utf-8") as f:
+        for row in pubs:
+            f.write(json.dumps(row) + "\n")
+
+    if with_references:
+        refs = [
+            {
+                "Bibcode": "bib3",
+                "Author": ["Doe J"],
+                "Title_en": "Paper 3",
+                "Abstract_en": "Abstract 3",
+                "Year": 2022,
+                "Affiliation": "Inst C",
+            }
+        ]
+        with (ds_dir / "references.jsonl").open("w", encoding="utf-8") as f:
+            for row in refs:
+                f.write(json.dumps(row) + "\n")
+    return ds_dir
+
+
+def _write_model_run_artifacts(tmp_path: Path, cfg: dict[str, Path], model_run_id: str) -> None:
+    metrics_dir = cfg["metrics_dir"] / model_run_id
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = tmp_path / "artifacts" / "checkpoints" / model_run_id / "best.pt"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text("checkpoint", encoding="utf-8")
+
+    with (metrics_dir / "03_train_manifest.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_id": model_run_id,
+                "best_checkpoint": str(checkpoint_path),
+                "best_threshold": 0.25,
+                "best_test_f1": 0.91,
+                "best_val_f1": 0.92,
+                "best_val_class_counts": {"pos": 100, "neg": 80},
+                "best_test_class_counts": {"pos": 95, "neg": 75},
+            },
+            f,
+            indent=2,
+        )
+    with (metrics_dir / "04_clustering_config_used.json").open("w", encoding="utf-8") as f:
+        json.dump({"eps_resolution": {"selected_eps": 0.42}}, f, indent=2)
+    with (metrics_dir / "00_context.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_config": str(cfg["run"]),
+                "model_config": str(cfg["model"]),
+            },
+            f,
+            indent=2,
+        )
+
+
+def _apply_fast_mocks(monkeypatch) -> None:
+    def _chars(mentions, output_path, force_recompute=False, **_kwargs):
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and not force_recompute:
+            return np.load(p)
+        arr = np.ones((len(mentions), 50), dtype=np.float32)
+        np.save(p, arr)
+        return arr
+
+    def _text(mentions, output_path, force_recompute=False, **_kwargs):
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and not force_recompute:
+            return np.load(p)
+        arr = np.ones((len(mentions), 768), dtype=np.float32)
+        np.save(p, arr)
+        return arr
+
+    def _score(mentions, pairs, output_path=None, **_kwargs):
+        out = pairs[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
+        if len(out):
+            out["cosine_sim"] = np.linspace(0.6, 0.9, num=len(out), dtype=np.float32)
+            out["distance"] = (1.0 - out["cosine_sim"]).astype(np.float32)
+        else:
+            out["cosine_sim"] = pd.Series(dtype=np.float32)
+            out["distance"] = pd.Series(dtype=np.float32)
+        if output_path is not None:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(output_path, index=False)
+        return out
+
+    def _cluster(mentions, pair_scores, output_path=None, **_kwargs):
+        out = mentions[["mention_id", "block_key"]].copy()
+        out["author_uid"] = out["block_key"].astype(str) + "::0"
+        if output_path is not None:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(output_path, index=False)
+        return out
+
+    monkeypatch.setattr(cli, "get_or_create_chars2vec_embeddings", _chars)
+    monkeypatch.setattr(cli, "get_or_create_specter_embeddings", _text)
+    monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _score)
+    monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
+
+
+def _run_infer_ads(parser: argparse.ArgumentParser, cfg: dict[str, Path], dataset_id: str, model_run_id: str, run_id: str) -> None:
+    args = parser.parse_args(
+        [
+            "run-infer-ads",
+            "--dataset-id",
+            dataset_id,
+            "--model-run-id",
+            model_run_id,
+            "--paths-config",
+            str(cfg["paths"]),
+            "--cluster-config",
+            str(cfg["cluster"]),
+            "--run-id",
+            run_id,
+            "--no-progress",
+        ]
+    )
+    args.func(args)
+
+
+def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=False)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id = "infer_ads_test"
+    _run_infer_ads(parser, cfg, dataset_id=dataset_id, model_run_id=model_run_id, run_id=run_id)
+
+    metrics_dir = cfg["metrics_dir"] / run_id
+    assert (metrics_dir / "00_context.json").exists()
+    assert (metrics_dir / "00_cache_refs.json").exists()
+    assert (metrics_dir / "00_run_consistency.json").exists()
+    assert (metrics_dir / "01_input_summary.json").exists()
+    assert (metrics_dir / "01_run_consistency.json").exists()
+    assert (metrics_dir / "03_pairs_qc.json").exists()
+    assert (metrics_dir / "04_cluster_qc.json").exists()
+    assert (metrics_dir / "04_clustering_config_used.json").exists()
+    assert (metrics_dir / "04_run_consistency.json").exists()
+    assert (metrics_dir / "05_stage_metrics_infer_ads.json").exists()
+    assert (metrics_dir / "05_go_no_go_infer_ads.json").exists()
+    assert (metrics_dir / "05_run_consistency.json").exists()
+
+    context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
+    assert context["dataset_id"] == dataset_id
+    assert context["model_run_id"] == model_run_id
+    assert context["selected_eps"] == 0.42
+
+    summary = json.loads((metrics_dir / "01_input_summary.json").read_text(encoding="utf-8"))
+    assert summary["references_present"] is False
+
+    stage_metrics = json.loads((metrics_dir / "05_stage_metrics_infer_ads.json").read_text(encoding="utf-8"))
+    assert stage_metrics["stage"] == "infer_ads"
+    assert stage_metrics["counts"]["ads_mentions"] > 0
+
+    cluster_path = tmp_path / "artifacts" / "clusters" / run_id / "ads_clusters_infer_ads.parquet"
+    export_path = tmp_path / "artifacts" / "clusters" / run_id / "publication_authors_infer_ads.parquet"
+    assert cluster_path.exists()
+    assert export_path.exists()
+
+    clusters = pd.read_parquet(cluster_path)
+    export = pd.read_parquet(export_path)
+    assert {"mention_id", "block_key", "author_uid"}.issubset(clusters.columns)
+    assert {"bibcode", "author_idx", "mention_id", "source_type", "author_uid"}.issubset(export.columns)
+
+
+def test_cli_run_infer_ads_resume_reuses_artifacts(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+    parser = cli.build_parser()
+    run_id = "infer_ads_resume"
+    _run_infer_ads(parser, cfg, dataset_id=dataset_id, model_run_id=model_run_id, run_id=run_id)
+
+    def _should_not_run(*_args, **_kwargs):
+        raise AssertionError("This function should not run during resume.")
+
+    monkeypatch.setattr(cli, "prepare_ads_mentions", _should_not_run)
+    monkeypatch.setattr(cli, "build_pairs_within_blocks", _should_not_run)
+    monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _should_not_run)
+    monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _should_not_run)
+
+    _run_infer_ads(parser, cfg, dataset_id=dataset_id, model_run_id=model_run_id, run_id=run_id)
+    assert (cfg["metrics_dir"] / run_id / "05_go_no_go_infer_ads.json").exists()

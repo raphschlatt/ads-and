@@ -159,3 +159,20 @@ def test_go_no_go_blocks_when_split_feasibility_fails():
     go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
     assert go["go"] is False
     assert "split_neg_feasible" in go["blockers"]
+
+
+def test_go_no_go_infer_ads_does_not_require_lspo_f1():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["lspo_pairwise_f1"] = None
+
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    assert go["go"] is True
+    assert "lspo_pairwise_f1_sanity" not in [c["name"] for c in go["checks"]]

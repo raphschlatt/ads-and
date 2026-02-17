@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from src.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
@@ -36,7 +37,7 @@ from src.common.config import (
     write_latest_run_context,
     write_run_consistency,
 )
-from src.common.io_schema import read_parquet, save_parquet
+from src.common.io_schema import MENTION_REQUIRED_COLUMNS, PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
 from src.common.pipeline_reports import (
     build_cluster_qc,
     build_pairs_qc,
@@ -261,6 +262,173 @@ def _record_cache_ref(
     if cache_schema_version is not None:
         row["cache_schema_version"] = str(cache_schema_version)
     refs.append(row)
+
+
+def _normalize_dataset_id(dataset_id: str) -> str:
+    cleaned = str(dataset_id or "").strip()
+    if not cleaned:
+        raise ValueError("dataset_id must be a non-empty string.")
+    if cleaned.startswith("/") or cleaned.startswith("~"):
+        raise ValueError("dataset_id must be a folder name under data/raw/ads, not an absolute path.")
+    parts = Path(cleaned).parts
+    if any(p in {"..", "."} for p in parts):
+        raise ValueError("dataset_id must not contain path traversal components ('..' or '.').")
+    return cleaned
+
+
+def _dataset_tag(dataset_id: str) -> str:
+    text = _normalize_dataset_id(dataset_id)
+    safe = "".join(ch if (ch.isalnum() or ch in {"-", "_"}) else "_" for ch in text)
+    safe = safe.strip("_")
+    return safe or "dataset"
+
+
+def _file_stamp(path: Path) -> str:
+    st = Path(path).stat()
+    return f"{st.st_size}-{st.st_mtime_ns}"
+
+
+def _resolve_ads_dataset_files(data_cfg: dict[str, Any], dataset_id: str) -> dict[str, Any]:
+    dataset_id = _normalize_dataset_id(dataset_id)
+    raw_ads_base = data_cfg.get("raw_ads_dir")
+    if raw_ads_base:
+        base_dir = Path(str(raw_ads_base)).resolve()
+    else:
+        base_dir = Path(str(data_cfg["raw_ads_publications"])).parent.resolve()
+
+    dataset_dir = (base_dir / dataset_id).resolve()
+    if not dataset_dir.exists() or not dataset_dir.is_dir():
+        raise FileNotFoundError(
+            f"Dataset folder not found: {dataset_dir}. "
+            f"Expected data/raw/ads/<dataset-id>/ with publications.jsonl or publications.json."
+        )
+
+    try:
+        dataset_dir.relative_to(base_dir)
+    except Exception as exc:
+        raise ValueError(f"Dataset path escapes ADS raw base directory: {dataset_dir}") from exc
+
+    pub_candidates = [dataset_dir / "publications.jsonl", dataset_dir / "publications.json"]
+    ref_candidates = [dataset_dir / "references.jsonl", dataset_dir / "references.json"]
+    publications_path = next((p for p in pub_candidates if p.exists()), None)
+    references_path = next((p for p in ref_candidates if p.exists()), None)
+
+    if publications_path is None:
+        raise FileNotFoundError(
+            "Missing publications file. Expected one of: "
+            f"{pub_candidates[0]} or {pub_candidates[1]}"
+        )
+
+    dataset_source_fp = stable_hash(
+        {
+            "publications": _file_stamp(publications_path),
+            "references": _file_stamp(references_path) if references_path is not None else "none",
+        }
+    )
+    return {
+        "dataset_id": dataset_id,
+        "dataset_tag": _dataset_tag(dataset_id),
+        "dataset_dir": dataset_dir,
+        "publications_path": publications_path,
+        "references_path": references_path,
+        "references_present": references_path is not None,
+        "dataset_source_fp": dataset_source_fp,
+    }
+
+
+def _ensure_columns(df: pd.DataFrame, required_columns: list[str]) -> pd.DataFrame:
+    out = df.copy()
+    for col in required_columns:
+        if col not in out.columns:
+            out[col] = pd.Series(dtype="object")
+    return out
+
+
+def _resolve_model_run_for_inference(
+    *,
+    paths_cfg: dict[str, Any],
+    model_run_id: str,
+) -> dict[str, Any]:
+    metrics_dir = Path(paths_cfg["artifacts"]["metrics_dir"]) / str(model_run_id)
+    manifest_path = metrics_dir / "03_train_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Missing train manifest for model_run_id={model_run_id}: {manifest_path}"
+        )
+    train_manifest = _load_json(manifest_path)
+    best_checkpoint = Path(str(train_manifest.get("best_checkpoint", ""))).expanduser()
+    if not best_checkpoint.exists():
+        raise FileNotFoundError(
+            "Model run manifest does not reference an existing best checkpoint: "
+            f"{best_checkpoint}"
+        )
+
+    best_threshold = train_manifest.get("best_threshold")
+    if best_threshold is None:
+        raise ValueError(
+            f"best_threshold missing in {manifest_path}. "
+            "A valid model run must contain threshold metadata."
+        )
+    best_threshold = float(best_threshold)
+
+    cluster_used_path = metrics_dir / "04_clustering_config_used.json"
+    if not cluster_used_path.exists():
+        raise FileNotFoundError(
+            f"Missing clustering metadata for model_run_id={model_run_id}: {cluster_used_path}"
+        )
+    cluster_used_payload = _load_json(cluster_used_path)
+    eps_resolution = dict(cluster_used_payload.get("eps_resolution", {}) or {})
+    selected_eps = eps_resolution.get("selected_eps")
+    if selected_eps is None:
+        raise ValueError(
+            "selected_eps missing in model run clustering metadata. "
+            f"Expected eps_resolution.selected_eps in {cluster_used_path}."
+        )
+    selected_eps = float(selected_eps)
+
+    context_path = metrics_dir / "00_context.json"
+    context_payload = _load_json(context_path) if context_path.exists() else {}
+
+    run_cfg_path = context_payload.get("run_config")
+    run_cfg: dict[str, Any] = {}
+    if run_cfg_path:
+        try:
+            run_cfg = _load_run_cfg(run_cfg_path)
+        except Exception:
+            run_cfg = {}
+
+    model_cfg_path = context_payload.get("model_config")
+    model_cfg: dict[str, Any]
+    model_cfg_resolved_path: str | None = None
+    if model_cfg_path:
+        try:
+            model_cfg = _load_model_cfg(model_cfg_path)
+            project_root = find_project_root(Path.cwd())
+            resolved = resolve_existing_path(model_cfg_path, project_root=project_root) or Path(model_cfg_path)
+            model_cfg_resolved_path = str(resolved)
+        except Exception:
+            model_cfg = _load_model_cfg("configs/model/nand_best.yaml")
+            model_cfg_resolved_path = "configs/model/nand_best.yaml"
+    else:
+        model_cfg = _load_model_cfg("configs/model/nand_best.yaml")
+        model_cfg_resolved_path = "configs/model/nand_best.yaml"
+
+    return {
+        "model_run_id": str(model_run_id),
+        "metrics_dir": metrics_dir,
+        "train_manifest_path": manifest_path,
+        "train_manifest": train_manifest,
+        "best_checkpoint": best_checkpoint,
+        "best_threshold": best_threshold,
+        "cluster_used_path": cluster_used_path,
+        "eps_resolution": eps_resolution,
+        "selected_eps": selected_eps,
+        "context_path": context_path if context_path.exists() else None,
+        "context_payload": context_payload,
+        "run_cfg": run_cfg,
+        "model_cfg": model_cfg,
+        "model_cfg_path": model_cfg_resolved_path,
+    }
 
 
 def _build_eps_values(eps_min: float, eps_max: float, eps_step: float) -> list[float]:
@@ -1827,6 +1995,491 @@ def cmd_run_stage(args):
         ui.close()
 
 
+def cmd_run_infer_ads(args):
+    ui = CliUI(total_steps=7, progress=args.progress)
+
+    try:
+        ui.start("Initialize run context")
+        _configure_library_noise(args.quiet_libs)
+        paths = _load_paths_cfg(args.paths_config)
+        data_cfg = paths["data"]
+        art_cfg = paths["artifacts"]
+
+        project_root = find_project_root(Path.cwd())
+        cluster_cfg_path = resolve_existing_path(args.cluster_config, project_root=project_root) or Path(args.cluster_config)
+        cluster_cfg = load_yaml(cluster_cfg_path)
+        gate_cfg = load_gate_config("configs/gates.yaml")
+
+        dataset_info = _resolve_ads_dataset_files(data_cfg, args.dataset_id)
+        model_info = _resolve_model_run_for_inference(paths_cfg=paths, model_run_id=args.model_run_id)
+        run_id = args.run_id or _default_run_id("infer_ads")
+        stage = "infer_ads"
+        run_dirs = build_run_dirs(data_cfg, art_cfg, run_id)
+        for p in run_dirs.values():
+            p.mkdir(parents=True, exist_ok=True)
+
+        latest_context_path = Path(art_cfg["metrics_dir"]) / "latest_run.json"
+        write_latest_run_context(
+            run_id=run_id,
+            run_dirs=run_dirs,
+            output_path=latest_context_path,
+            stage=stage,
+            extras={"created_utc": datetime.now(timezone.utc).isoformat(), "source": "cli.run-infer-ads"},
+        )
+
+        metrics_dir = Path(run_dirs["metrics"])
+        emb_dir = Path(run_dirs["embeddings"])
+        subset_dir = Path(run_dirs["subset_cache"])
+        pair_score_dir = Path(run_dirs["pair_scores"])
+        cluster_dir = Path(run_dirs["clusters"])
+        interim_dir = Path(run_dirs["interim"])
+
+        shared_embeddings_dir = Path(run_dirs["shared_embeddings"])
+        shared_pairs_dir = Path(run_dirs["shared_pairs"])
+        shared_pair_scores_dir = Path(run_dirs["shared_pair_scores"])
+        for p in [shared_embeddings_dir, shared_pairs_dir, shared_pair_scores_dir]:
+            p.mkdir(parents=True, exist_ok=True)
+
+        dataset_tag = str(dataset_info["dataset_tag"])
+        dataset_source_fp = str(dataset_info["dataset_source_fp"])
+        ads_mentions_path = interim_dir / f"ads_mentions_{dataset_tag}.parquet"
+        ads_pairs_path = subset_dir / "ads_pairs_infer_ads.parquet"
+        ads_chars_path = emb_dir / "ads_chars2vec_infer_ads.npy"
+        ads_text_path = emb_dir / "ads_specter_infer_ads.npy"
+        pair_scores_path = pair_score_dir / "ads_pair_scores_infer_ads.parquet"
+        clusters_path = cluster_dir / "ads_clusters_infer_ads.parquet"
+        publication_export_path = cluster_dir / "publication_authors_infer_ads.parquet"
+
+        input_summary_path = metrics_dir / "01_input_summary.json"
+        pairs_qc_path = metrics_dir / "03_pairs_qc.json"
+        cluster_qc_path = metrics_dir / "04_cluster_qc.json"
+        cluster_cfg_used_path = metrics_dir / "04_clustering_config_used.json"
+        stage_metrics_path = metrics_dir / "05_stage_metrics_infer_ads.json"
+        go_no_go_path = metrics_dir / "05_go_no_go_infer_ads.json"
+        cache_refs_path = metrics_dir / "00_cache_refs.json"
+        cache_refs: list[dict[str, Any]] = []
+
+        write_json(
+            {
+                "run_id": run_id,
+                "run_stage": stage,
+                "dataset_id": dataset_info["dataset_id"],
+                "dataset_dir": str(dataset_info["dataset_dir"]),
+                "publications_path": str(dataset_info["publications_path"]),
+                "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
+                "references_present": bool(dataset_info["references_present"]),
+                "model_run_id": model_info["model_run_id"],
+                "model_train_manifest": str(model_info["train_manifest_path"]),
+                "checkpoint": str(model_info["best_checkpoint"]),
+                "selected_eps": float(model_info["selected_eps"]),
+                "best_threshold": float(model_info["best_threshold"]),
+                "model_config": model_info["model_cfg_path"],
+                "cluster_config": str(cluster_cfg_path),
+                "score_batch_size": int(args.score_batch_size),
+                "device": args.device,
+                "precision_mode": str(args.precision_mode),
+                "quiet_libs": bool(args.quiet_libs),
+            },
+            metrics_dir / "00_context.json",
+        )
+        write_run_consistency(
+            run_id=run_id,
+            run_stage=stage,
+            run_dirs=run_dirs,
+            output_path=metrics_dir / "00_run_consistency.json",
+            extras={"command": "run-infer-ads", "latest_context_path": str(latest_context_path)},
+        )
+        ui.done(f"Run ID: {run_id}")
+
+        ui.start("Prepare ADS mentions")
+        if ads_mentions_path.exists() and not args.force:
+            ads_mentions = read_parquet(ads_mentions_path)
+            ui.skip(f"Loaded {len(ads_mentions)} mentions from cache.")
+        else:
+            ads_mentions = prepare_ads_mentions(
+                publications_path=dataset_info["publications_path"],
+                references_path=dataset_info["references_path"],
+                output_path=ads_mentions_path,
+            )
+            ui.done(f"Prepared {len(ads_mentions)} ADS mentions.")
+        if not bool(dataset_info["references_present"]):
+            ui.warn("No references file found; continuing with publications-only input.")
+
+        write_json(
+            {
+                "run_id": run_id,
+                "run_stage": stage,
+                "dataset_id": dataset_info["dataset_id"],
+                "dataset_dir": str(dataset_info["dataset_dir"]),
+                "publications_path": str(dataset_info["publications_path"]),
+                "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
+                "references_present": bool(dataset_info["references_present"]),
+                "dataset_source_fp": dataset_source_fp,
+                "ads_mentions_path": str(ads_mentions_path),
+                "ads_mentions": int(len(ads_mentions)),
+                "ads_blocks": int(ads_mentions["block_key"].nunique()) if "block_key" in ads_mentions.columns else 0,
+                "ads_block_size_p95": float(_block_size_p95(ads_mentions)),
+            },
+            input_summary_path,
+        )
+        write_run_consistency(
+            run_id=run_id,
+            run_stage=stage,
+            run_dirs=run_dirs,
+            output_path=metrics_dir / "01_run_consistency.json",
+            extras={"dataset_id": dataset_info["dataset_id"], "references_present": bool(dataset_info["references_present"])},
+        )
+
+        ui.start("Build or load embeddings")
+        model_cfg = dict(model_info["model_cfg"] or {})
+        rep_cfg = dict(model_cfg.get("representation", {}) or {})
+        representation_cfg_hash = stable_hash(rep_cfg)
+        model_version = str(model_cfg.get("name", "nand"))
+        ads_mentions_id = stable_hash({"dataset_id": dataset_info["dataset_id"], "dataset_source_fp": dataset_source_fp})
+        embedding_id = stable_hash(
+            {
+                "ads_mentions_id": ads_mentions_id,
+                "representation_cfg_hash": representation_cfg_hash,
+                "model_version": model_version,
+            }
+        )
+        ads_chars_shared_path = shared_embeddings_dir / f"ads_chars2vec_{embedding_id}.npy"
+        ads_text_shared_path = shared_embeddings_dir / f"ads_specter_{embedding_id}.npy"
+        emb_cache_hit = ads_chars_shared_path.exists() and ads_text_shared_path.exists() and not args.force
+
+        ads_chars = get_or_create_chars2vec_embeddings(
+            mentions=ads_mentions,
+            output_path=ads_chars_shared_path,
+            force_recompute=args.force,
+            use_stub_if_missing=False,
+            quiet_libraries=args.quiet_libs,
+        )
+        ads_text = get_or_create_specter_embeddings(
+            mentions=ads_mentions,
+            output_path=ads_text_shared_path,
+            force_recompute=args.force,
+            model_name=rep_cfg.get("text_model_name", "allenai/specter"),
+            max_length=int(rep_cfg.get("max_length", 256)),
+            batch_size=32,
+            device=args.device,
+            prefer_precomputed=True,
+            use_stub_if_missing=False,
+            show_progress=args.progress,
+            quiet_libraries=args.quiet_libs,
+            reuse_model=True,
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="embedding_ads_chars",
+            artifact_id=embedding_id,
+            shared_path=ads_chars_shared_path,
+            run_path=ads_chars_path,
+            mode=link_or_copy(ads_chars_shared_path, ads_chars_path),
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="embedding_ads_text",
+            artifact_id=embedding_id,
+            shared_path=ads_text_shared_path,
+            run_path=ads_text_path,
+            mode=link_or_copy(ads_text_shared_path, ads_text_path),
+        )
+        if emb_cache_hit:
+            ui.skip("Reused cached embeddings.")
+        else:
+            ui.done(f"Embeddings ready (ADS {tuple(ads_chars.shape)}/{tuple(ads_text.shape)}).")
+
+        ui.start("Build ADS pairs and pair QC")
+        run_cfg_from_model = dict(model_info.get("run_cfg", {}) or {})
+        pair_build_cfg = _resolve_pair_build_cfg(run_cfg_from_model)
+        max_pairs_per_block = run_cfg_from_model.get("max_pairs_per_block")
+        pair_cfg_hash = stable_hash(
+            {
+                "max_pairs_per_block": max_pairs_per_block,
+                "exclude_same_bibcode": bool(pair_build_cfg["exclude_same_bibcode"]),
+            }
+        )
+        ads_pairs_id = stable_hash({"ads_mentions_id": ads_mentions_id, "pair_cfg_hash": pair_cfg_hash})
+        ads_pairs_shared_path = shared_pairs_dir / f"ads_pairs_{ads_pairs_id}.parquet"
+        pairs_qc_shared_path = shared_pairs_dir / f"pairs_qc_infer_ads_{ads_pairs_id}.json"
+
+        if ads_pairs_shared_path.exists() and pairs_qc_shared_path.exists() and not args.force:
+            ads_pairs = read_parquet(ads_pairs_shared_path)
+            pairs_qc = _load_json(pairs_qc_shared_path)
+            ui.skip(f"Reused ADS pairs ({len(ads_pairs)} rows).")
+        else:
+            ads_pairs, ads_pair_meta = build_pairs_within_blocks(
+                mentions=ads_mentions,
+                max_pairs_per_block=max_pairs_per_block,
+                seed=11,
+                require_same_split=False,
+                labeled_only=False,
+                balance_train=False,
+                exclude_same_bibcode=bool(pair_build_cfg["exclude_same_bibcode"]),
+                show_progress=args.progress,
+                return_meta=True,
+            )
+            ads_pairs = _ensure_columns(ads_pairs, PAIR_REQUIRED_COLUMNS + ["label"])
+            if len(ads_pairs) == 0:
+                save_parquet(ads_pairs, ads_pairs_shared_path, index=False)
+            else:
+                write_pairs(ads_pairs, ads_pairs_shared_path)
+            empty_mentions = pd.DataFrame(columns=MENTION_REQUIRED_COLUMNS + ["orcid", "split"])
+            empty_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+            pairs_qc = build_pairs_qc(
+                lspo_mentions=empty_mentions,
+                lspo_pairs=empty_pairs,
+                ads_pairs=ads_pairs,
+                split_meta={"status": "not_applicable"},
+                lspo_pair_build_meta={},
+                ads_pair_build_meta=ads_pair_meta,
+            )
+            pairs_qc["dataset_id"] = dataset_info["dataset_id"]
+            pairs_qc["model_run_id"] = model_info["model_run_id"]
+            write_json(pairs_qc, pairs_qc_shared_path)
+            ui.done(f"Built ADS pairs ({len(ads_pairs)} rows).")
+
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="ads_pairs",
+            artifact_id=ads_pairs_id,
+            shared_path=ads_pairs_shared_path,
+            run_path=ads_pairs_path,
+            mode=link_or_copy(ads_pairs_shared_path, ads_pairs_path),
+        )
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="pairs_qc",
+            artifact_id=f"infer_ads_{ads_pairs_id}",
+            shared_path=pairs_qc_shared_path,
+            run_path=pairs_qc_path,
+            mode=link_or_copy(pairs_qc_shared_path, pairs_qc_path),
+        )
+
+        ui.start("Score ADS pairs")
+        score_pipeline_version = "v2"
+        try:
+            model_state_hash = hash_checkpoint_model_state(
+                model_info["best_checkpoint"],
+                score_pipeline_version=score_pipeline_version,
+            )
+        except Exception as exc:
+            warnings.warn(
+                (
+                    "Model-state hash failed "
+                    f"({exc.__class__.__name__}); falling back to file hash for pair-score cache key."
+                ),
+                RuntimeWarning,
+            )
+            model_state_hash = hash_file(model_info["best_checkpoint"])
+
+        checkpoint_hash = hash_file(model_info["best_checkpoint"])
+        score_cfg_hash = stable_hash(
+            {
+                "score_batch_size": int(args.score_batch_size),
+                "precision_mode": str(args.precision_mode),
+            }
+        )
+        pair_scores_id_v2 = stable_hash(
+            {
+                "ads_pairs_id": ads_pairs_id,
+                "model_state_hash": model_state_hash,
+                "score_cfg_hash": score_cfg_hash,
+                "score_pipeline_version": score_pipeline_version,
+            }
+        )
+        pair_scores_id_legacy = stable_hash(
+            {
+                "ads_pairs_id": ads_pairs_id,
+                "checkpoint_hash": checkpoint_hash,
+                "score_cfg_hash": score_cfg_hash,
+            }
+        )
+        pair_scores_shared_path_v2 = shared_pair_scores_dir / f"ads_pair_scores_v2_{pair_scores_id_v2}.parquet"
+        pair_scores_shared_path_legacy = shared_pair_scores_dir / f"ads_pair_scores_{pair_scores_id_legacy}.parquet"
+        pair_scores_shared_path_used = pair_scores_shared_path_v2
+        pair_scores_cache_schema_version = "v2"
+        pair_scores_artifact_id = pair_scores_id_v2
+
+        if pair_scores_shared_path_v2.exists() and not args.force:
+            pair_scores = read_parquet(pair_scores_shared_path_v2)
+            ui.skip(f"Reused pair scores ({len(pair_scores)} rows).")
+        elif pair_scores_shared_path_legacy.exists() and not args.force:
+            pair_scores = read_parquet(pair_scores_shared_path_legacy)
+            pair_scores_cache_schema_version = "v1"
+            pair_scores_artifact_id = pair_scores_id_legacy
+            pair_scores_shared_path_used = pair_scores_shared_path_legacy
+            promote_mode = link_or_copy(pair_scores_shared_path_legacy, pair_scores_shared_path_v2)
+            if pair_scores_shared_path_v2.exists():
+                pair_scores_shared_path_used = pair_scores_shared_path_v2
+                pair_scores_cache_schema_version = "v2"
+                pair_scores_artifact_id = pair_scores_id_v2
+            ui.skip(f"Reused legacy pair scores ({len(pair_scores)} rows, promote={promote_mode}).")
+        else:
+            if len(ads_pairs) == 0:
+                pair_scores = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+                save_parquet(pair_scores, pair_scores_shared_path_v2, index=False)
+                ui.done("No ADS pairs to score; wrote empty pair_scores artifact.")
+            else:
+                pair_scores = score_pairs_with_checkpoint(
+                    mentions=ads_mentions,
+                    pairs=ads_pairs,
+                    chars2vec=ads_chars,
+                    text_emb=ads_text,
+                    checkpoint_path=model_info["best_checkpoint"],
+                    output_path=pair_scores_shared_path_v2,
+                    batch_size=int(args.score_batch_size),
+                    device=args.device,
+                    precision_mode=str(args.precision_mode),
+                    show_progress=args.progress,
+                )
+                ui.done(f"Scored {len(pair_scores)} ADS pairs.")
+            pair_scores_shared_path_used = pair_scores_shared_path_v2
+            pair_scores_cache_schema_version = "v2"
+            pair_scores_artifact_id = pair_scores_id_v2
+
+        _record_cache_ref(
+            cache_refs,
+            artifact_type="pair_scores",
+            artifact_id=pair_scores_artifact_id,
+            shared_path=pair_scores_shared_path_used,
+            run_path=pair_scores_path,
+            mode=link_or_copy(pair_scores_shared_path_used, pair_scores_path),
+            cache_schema_version=pair_scores_cache_schema_version,
+        )
+        write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
+
+        ui.start("Cluster ADS mentions and export mappings")
+        cluster_cache_hit = (
+            clusters_path.exists()
+            and publication_export_path.exists()
+            and cluster_qc_path.exists()
+            and cluster_cfg_used_path.exists()
+            and not args.force
+        )
+        eps_meta: dict[str, Any] = {}
+        if cluster_cache_hit:
+            clusters = read_parquet(clusters_path)
+            cluster_qc = _load_json(cluster_qc_path)
+            cfg_payload = _load_json(cluster_cfg_used_path) or {}
+            eps_meta = dict(cfg_payload.get("eps_resolution", {}) or {})
+            ui.skip(f"Reused clustering outputs ({len(clusters)} mentions).")
+        else:
+            selected_eps = float(model_info["selected_eps"])
+            eps_min = float(cluster_cfg.get("eps_min", 0.0))
+            eps_max = float(cluster_cfg.get("eps_max", 1.0))
+            resolved_eps = float(np.clip(selected_eps, eps_min, eps_max))
+            if abs(resolved_eps - selected_eps) > 1e-9:
+                ui.warn(
+                    f"Model selected_eps={selected_eps:.4f} clipped to [{eps_min:.4f}, {eps_max:.4f}] -> {resolved_eps:.4f}"
+                )
+            cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
+            cluster_cfg_used["eps_mode"] = "fixed"
+            cluster_cfg_used["selected_eps"] = selected_eps
+            cluster_cfg_used["eps"] = resolved_eps
+
+            eps_meta = {
+                "eps_mode": "model_run_selected",
+                "source": "model_run_selected_eps",
+                "model_run_id": model_info["model_run_id"],
+                "raw_eps": selected_eps,
+                "selected_eps": selected_eps,
+                "resolved_eps": resolved_eps,
+                "eps_min": eps_min,
+                "eps_max": eps_max,
+            }
+            write_json(
+                {
+                    "run_id": run_id,
+                    "run_stage": stage,
+                    "model_run_id": model_info["model_run_id"],
+                    "best_threshold": float(model_info["best_threshold"]),
+                    "eps_resolution": eps_meta,
+                    "cluster_config_used": cluster_cfg_used,
+                },
+                cluster_cfg_used_path,
+            )
+            clusters = cluster_blockwise_dbscan(
+                mentions=ads_mentions,
+                pair_scores=pair_scores,
+                cluster_config=cluster_cfg_used,
+                output_path=clusters_path,
+                show_progress=args.progress,
+            )
+            _ = build_publication_author_mapping(
+                mentions=ads_mentions,
+                clusters=clusters,
+                output_path=publication_export_path,
+            )
+            cluster_qc = build_cluster_qc(
+                pair_scores=pair_scores,
+                clusters=clusters,
+                threshold=float(model_info["best_threshold"]),
+            )
+            write_json(cluster_qc, cluster_qc_path)
+            ui.done(f"Clustered {len(clusters)} ADS mentions.")
+
+        write_run_consistency(
+            run_id=run_id,
+            run_stage=stage,
+            run_dirs=run_dirs,
+            output_path=metrics_dir / "04_run_consistency.json",
+            extras={"cluster_count": int(cluster_qc.get("cluster_count", 0))},
+        )
+
+        ui.start("Build stage metrics and go/no-go")
+        write_run_consistency(
+            run_id=run_id,
+            run_stage=stage,
+            run_dirs=run_dirs,
+            output_path=metrics_dir / "05_run_consistency.json",
+            extras={"command": "run-infer-ads"},
+        )
+
+        if stage_metrics_path.exists() and go_no_go_path.exists() and not args.force:
+            stage_metrics = _load_json(stage_metrics_path)
+            go = _load_json(go_no_go_path)
+            ui.skip(f"Reused stage reports (GO={go.get('go')}).")
+        else:
+            empty_lspo = pd.DataFrame(columns=MENTION_REQUIRED_COLUMNS)
+            consistency_files = [
+                metrics_dir / "00_run_consistency.json",
+                metrics_dir / "01_run_consistency.json",
+                metrics_dir / "04_run_consistency.json",
+                metrics_dir / "05_run_consistency.json",
+            ]
+            stage_metrics = build_stage_metrics(
+                run_id=run_id,
+                run_stage=stage,
+                lspo_mentions=empty_lspo,
+                lspo_pairs_count=None,
+                ads_mentions=ads_mentions,
+                clusters=clusters,
+                train_manifest=model_info["train_manifest"],
+                consistency_files=consistency_files,
+                determinism_paths=[ads_mentions_path],
+                cluster_qc=cluster_qc,
+                split_meta={"status": "not_applicable"},
+                eps_meta=eps_meta,
+                subset_cache_key=dataset_source_fp,
+            )
+            write_json(stage_metrics, stage_metrics_path)
+
+            go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
+            write_go_no_go_report(go, go_no_go_path)
+            ui.done(f"GO={go['go']} with blockers={len(go.get('blockers', []))}.")
+
+        ui.info(f"Stage metrics: {stage_metrics_path}")
+        ui.info(f"Go/No-Go report: {go_no_go_path}")
+        ui.info(f"Run complete: {run_id}")
+
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="NAND research CLI")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1860,6 +2513,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(quiet_libs=True)
 
     sp.set_defaults(func=cmd_run_stage)
+
+    sp = sub.add_parser("run-infer-ads")
+    sp.add_argument("--dataset-id", required=True)
+    sp.add_argument("--model-run-id", required=True)
+    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
+    sp.add_argument("--cluster-config", default="configs/clustering/dbscan_paper.yaml")
+    sp.add_argument("--run-id", default=None)
+    sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
+    sp.add_argument("--score-batch-size", type=int, default=8192)
+    sp.add_argument("--force", action="store_true")
+
+    sp.add_argument("--progress", dest="progress", action="store_true")
+    sp.add_argument("--no-progress", dest="progress", action="store_false")
+    sp.set_defaults(progress=True)
+
+    sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
+    sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
+    sp.set_defaults(quiet_libs=True)
+
+    sp.set_defaults(func=cmd_run_infer_ads)
 
     sp = sub.add_parser("prepare-lspo")
     sp.add_argument("--paths-config", default="configs/paths.local.yaml")

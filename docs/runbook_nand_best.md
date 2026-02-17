@@ -27,6 +27,23 @@ Reproduce NAND best path on LSPO, then run zero-shot disambiguation on ADS menti
 5. ADS inference + clustering
 6. Stage report + gate check
 
+## One-command Inference on New ADS Data
+
+After a model run is trained and validated, disambiguate a new ADS dataset with:
+
+```bash
+python3 -m src.cli run-infer-ads \
+  --dataset-id my_ads_2026 \
+  --model-run-id <trained_run_id> \
+  --paths-config configs/paths.local.yaml \
+  --device auto
+```
+
+Dataset contract:
+
+- `data/raw/ads/my_ads_2026/publications.jsonl` (required)
+- `data/raw/ads/my_ads_2026/references.jsonl` (optional)
+
 ## Full Run Gate
 
 Proceed to `full` only if:
