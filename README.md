@@ -1,69 +1,39 @@
-# Author Name Disambiguation (NAND-First, Notebook Interface)
+# Author Name Disambiguation (NAND, CLI-First)
 
-Research-first setup to:
+This repo now separates the product paths strictly:
 
-1. Reproduce NAND best path on LSPO (`Chars2Vec + SPECTER + InfoNCE`, `818 -> 1024 -> 256`).
-2. Apply the trained model to ADS mentions.
-3. Execute the workflow from notebook cells with visible intermediate QC.
+1. `run-train-stage`: train and benchmark NAND on LSPO only.
+2. `run-infer-ads`: apply a trained model to ADS data only.
 
-Default methodology is paper-fair:
+`run-stage` remains as a deprecated alias to train-only behavior.
 
-- ORCID split defaults to `60/20/20` (train/val/test).
-- Pair building excludes same-`bibcode` mention pairs.
-- Train loss uses positives and explicit negatives (`InfoNCE + negative margin`).
-- DBSCAN `eps` defaults to validation sweep (`0.20..0.50`), not threshold coupling.
-- If sweep hits a boundary, an audit-only diagnostic sweep (`0.55..0.70`) is logged as `range_limited` evidence.
-- Stage metric `lspo_pairwise_f1` is canonical test-F1 (val-F1 still reported separately).
+## Paper-Fair Defaults
 
-## Notebook Calling Layer
+- ORCID split: `60/20/20` (`split_assignment` in `configs/runs/*.yaml`)
+- Pair protocol: exclude same publication pairs (`exclude_same_bibcode: true`)
+- Training: positives + explicit negatives (`InfoNCE + negative margin`)
+- Clustering: DBSCAN `eps_mode: val_sweep` in `0.20..0.50`
+- Boundary audit: additional diagnostic sweep `0.55..0.70` (does not change canonical selection)
+- Canonical train metric: `lspo_pairwise_f1 = best_test_f1`
 
-Run these notebooks in order:
+## Quickstart
 
-1. `notebooks/interface/00_setup_and_config.ipynb`
-2. `notebooks/interface/01_data_and_subsets.ipynb`
-3. `notebooks/interface/02_embeddings_and_pairs.ipynb`
-4. `notebooks/interface/03_train_nand_best.ipynb`
-5. `notebooks/interface/04_infer_cluster_ads.ipynb`
-6. `notebooks/interface/05_run_report_and_go_no_go.ipynb`
-
-## Stable IDs And Contracts
-
-- `bibcode`: unique publication key
-- `mention_id`: unique author mention key (`bibcode::author_idx`)
-- `author_uid`: final disambiguated author ID for each mention
-
-Contracts are documented in `docs/data_contracts.md`.
-
-## Project Layout
-
-- `src/`: backend modules (idempotent, notebook-callable)
-- `configs/`: model, clustering, stage and path configs
-- `data/raw|interim|processed|subsets/`: data flow and subset manifests
-- `artifacts/`: embeddings, checkpoints, pair scores, clusters, metrics
-- `notebooks/interface/`: execution interface
-- `notebooks/reports/`: analysis/report notebooks
-- `tests/`: unit/integration/e2e tests
-
-## Stage Ladder (Gate Before Full)
-
-- `smoke`: 5k mentions
-- `mini`: 10k mentions
-- `mid`: 100k mentions
-- `full`: complete dataset
-
-Each stage produces manifests and metrics under `artifacts/metrics/<run_id>/`.
-
-## Optional CLI
-
-The notebook layer is primary. A matching CLI exists for automation:
+Show commands:
 
 ```bash
 python3 -m src.cli -h
 ```
 
-### End-to-End Stage Run
+Train (canonical):
 
-Run the full 00->05 pipeline in one command:
+```bash
+python3 -m src.cli run-train-stage \
+  --run-stage smoke \
+  --paths-config configs/paths.local.yaml \
+  --device auto
+```
+
+Deprecated alias (same behavior, warning emitted):
 
 ```bash
 python3 -m src.cli run-stage \
@@ -72,33 +42,15 @@ python3 -m src.cli run-stage \
   --device auto
 ```
 
-With baseline comparison:
+Export deployable model bundle:
 
 ```bash
-python3 -m src.cli run-stage \
-  --run-stage smoke \
-  --paths-config configs/paths.local.yaml \
-  --device auto \
-  --baseline-run-id smoke_20260213T134837Z_f0fc32b8
+python3 -m src.cli export-model-bundle \
+  --model-run-id smoke_2026... \
+  --paths-config configs/paths.local.yaml
 ```
 
-### One-Command ADS Inference (Trained NAND)
-
-Drop a new dataset into:
-
-- `data/raw/ads/<dataset-id>/publications.jsonl` (or `publications.json`)
-- optional `data/raw/ads/<dataset-id>/references.jsonl` (or `references.json`)
-
-Minimal expected ADS fields per record:
-
-- `Bibcode`
-- `Author` (list or string)
-- `Title_en` (or `Title`)
-- `Abstract_en` (or `Abstract`)
-- `Year`
-- `Affiliation` (also tolerates `Affilliation`)
-
-Run inference:
+Infer ADS with train run id:
 
 ```bash
 python3 -m src.cli run-infer-ads \
@@ -108,46 +60,74 @@ python3 -m src.cli run-infer-ads \
   --device auto
 ```
 
-Outputs:
+Infer ADS with model bundle:
 
-- Normalized mentions: `data/interim/ads_mentions_<dataset-id>.parquet`
-- Cluster assignments: `artifacts/clusters/<run_id>/ads_clusters_infer_ads.parquet`
-- Publication-author export: `artifacts/clusters/<run_id>/publication_authors_infer_ads.parquet`
-- Run metrics/go-no-go: `artifacts/metrics/<run_id>/05_stage_metrics_infer_ads.json` and `05_go_no_go_infer_ads.json`
+```bash
+python3 -m src.cli run-infer-ads \
+  --dataset-id my_ads_2026 \
+  --model-bundle artifacts/models/full_2026.../bundle_v1 \
+  --paths-config configs/paths.local.yaml \
+  --device auto
+```
 
-Mapping contract:
+## ADS Input Contract
 
-- `mention_id` stays stable from normalized input mentions.
-- `author_uid` is added during clustering.
-- Join key between mentions and clusters is always `mention_id`.
+Place data in:
 
-### CLI Behavior
+- `data/raw/ads/<dataset-id>/publications.jsonl` or `publications.json` (required)
+- `data/raw/ads/<dataset-id>/references.jsonl` or `references.json` (optional)
 
-- Status and progress output is English and terminal-friendly.
-- Default mode is resume/reuse: existing artifacts are reused when possible.
-- Use `--force` to recompute all stages for the same `run_id`.
-- `--device auto` prefers CUDA and falls back to CPU if CUDA init fails.
-- `--device cuda` is strict and fails if GPU is not usable.
-- `--quiet-libs` is the default and suppresses noisy third-party logs; use `--verbose-libs` for deep debugging.
-- Training seeds are stage-specific via `configs/runs/*.yaml` (`train_seeds`) and can be overridden with `--seeds`.
-- Split assignment defaults are explicit via `split_assignment` in `configs/runs/*.yaml`.
-- Pair-building defaults are explicit via `pair_building` in `configs/runs/*.yaml`.
-- DBSCAN defaults use `eps_mode: val_sweep` with sweep range in `configs/clustering/dbscan_paper.yaml`.
-- `precision_mode` can be set to `fp32` (default) or `amp_bf16` for non-canonical speed profiles.
-- Metrics and reports are written to `artifacts/metrics/<run_id>/` (`05_*` and optional `99_compare_to_baseline.json`).
-- `05_go_no_go_<stage>.json` now separates hard `blockers` from non-blocking `warnings`.
-- Cache tooling: `python3 -m src.cli cache doctor` and targeted purge via `cache purge --target ...`.
+Expected fields per record:
 
-## Environment
+- `Bibcode`
+- `Author` (list or string)
+- `Title_en` (or `Title`)
+- `Abstract_en` (or `Abstract`)
+- `Year`
+- `Affiliation` (also tolerates `Affilliation`)
 
-Install with your preferred environment manager; a minimal pip list is in:
+## Outputs
 
-- `requirements-research.txt`
-- Path profile defaults to `configs/paths.local.yaml` (switch to `configs/paths.colab.yaml` if needed).
+Train run (`artifacts/metrics/<run_id>/`):
 
-## Notes
+- `00_context.json` (`pipeline_scope: train`)
+- `03_train_manifest.json`
+- `04_clustering_config_used.json` (LSPO val eps resolution)
+- `05_stage_metrics_<stage>.json` (`metric_scope: train`)
+- `05_go_no_go_<stage>.json`
+- optional `99_compare_train_to_baseline.json`
 
-- Research setup, not production hardening.
-- `smoke/mini` are intended for fast validation before expensive full runs.
-- For real reproduction/training you need `torch`, `transformers`, and GPU runtime.
-- Legacy manifests that only contain `best_val_f1` remain readable; reporting marks them via `lspo_pairwise_f1_source=best_val_f1_legacy`.
+Infer run (`artifacts/metrics/<run_id>/`):
+
+- `00_context.json` (`pipeline_scope: infer`)
+- `01_input_summary.json`
+- `03_pairs_qc.json`
+- `04_cluster_qc.json`
+- `05_stage_metrics_infer_ads.json` (`metric_scope: infer`)
+- `05_go_no_go_infer_ads.json`
+- optional `99_compare_infer_to_baseline.json`
+
+Infer cluster exports (`artifacts/clusters/<run_id>/`):
+
+- `ads_clusters_infer_ads.parquet`
+- `publication_authors_infer_ads.parquet`
+
+Mapping rule:
+
+- `mention_id` is stable from normalized mentions.
+- `author_uid` is added by clustering.
+- Join key is always `mention_id`.
+
+## Caching and Resume
+
+- Default behavior is resume/reuse.
+- Use `--force` to recompute for the same `run_id`.
+- Cache tools:
+  - `python3 -m src.cli cache doctor`
+  - `python3 -m src.cli cache purge --target <...>` (dry-run by default, add `--yes` to apply)
+
+## Legacy Policy
+
+- Legacy artifacts/runs remain readable.
+- New writes use the new split train/infer contracts only.
+- Notebooks are legacy research tooling; CLI is the canonical product interface.

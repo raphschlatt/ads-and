@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import uuid
 import warnings
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import yaml
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from src.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
@@ -40,16 +42,18 @@ from src.common.config import (
 from src.common.io_schema import MENTION_REQUIRED_COLUMNS, PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
 from src.common.pipeline_reports import (
     build_cluster_qc,
+    build_infer_stage_metrics,
     build_pairs_qc,
-    build_stage_metrics,
+    build_train_stage_metrics,
     build_subset_summary,
-    write_compare_to_baseline,
+    write_compare_infer_to_baseline,
+    write_compare_train_to_baseline,
     write_json,
 )
 from src.common.run_report import evaluate_go_no_go, load_gate_config, write_go_no_go_report
 from src.common.subset_artifacts import (
     atomic_save_parquet,
-    compute_source_fp,
+    compute_lspo_source_fp,
     compute_subset_identity,
     resolve_manifest_paths,
     resolve_shared_subset_paths,
@@ -61,6 +65,8 @@ from src.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from src.features.embed_specter import get_or_create_specter_embeddings
 
 SUBSET_CACHE_VERSION = "v3"
+MODEL_BUNDLE_SCHEMA_VERSION = "v1"
+_RUN_STAGE_DEPRECATION_SHOWN = False
 
 
 def _load_run_cfg(path: str | Path) -> dict:
@@ -264,6 +270,25 @@ def _record_cache_ref(
     refs.append(row)
 
 
+def _ensure_run_dirs(run_dirs: dict[str, Path], keys: list[str]) -> None:
+    for key in keys:
+        Path(run_dirs[key]).mkdir(parents=True, exist_ok=True)
+
+
+def _emit_run_stage_deprecation(ui: CliUI | None = None) -> None:
+    global _RUN_STAGE_DEPRECATION_SHOWN
+    if _RUN_STAGE_DEPRECATION_SHOWN:
+        return
+    msg = (
+        "Command 'run-stage' is deprecated and now runs train-only. "
+        "Use 'run-train-stage' for training and 'run-infer-ads' for ADS disambiguation."
+    )
+    warnings.warn(msg, DeprecationWarning, stacklevel=2)
+    if ui is not None:
+        ui.warn(msg)
+    _RUN_STAGE_DEPRECATION_SHOWN = True
+
+
 def _normalize_dataset_id(dataset_id: str) -> str:
     cleaned = str(dataset_id or "").strip()
     if not cleaned:
@@ -380,9 +405,13 @@ def _resolve_model_run_for_inference(
     eps_resolution = dict(cluster_used_payload.get("eps_resolution", {}) or {})
     selected_eps = eps_resolution.get("selected_eps")
     if selected_eps is None:
+        selected_eps = eps_resolution.get("resolved_eps")
+    if selected_eps is None:
+        selected_eps = (cluster_used_payload.get("cluster_config_used", {}) or {}).get("eps")
+    if selected_eps is None:
         raise ValueError(
             "selected_eps missing in model run clustering metadata. "
-            f"Expected eps_resolution.selected_eps in {cluster_used_path}."
+            f"Expected eps_resolution.selected_eps or resolved_eps/cluster_config_used.eps in {cluster_used_path}."
         )
     selected_eps = float(selected_eps)
 
@@ -428,6 +457,168 @@ def _resolve_model_run_for_inference(
         "run_cfg": run_cfg,
         "model_cfg": model_cfg,
         "model_cfg_path": model_cfg_resolved_path,
+    }
+
+
+def _resolve_model_bundle_for_inference(model_bundle: str | Path) -> dict[str, Any]:
+    raw = Path(model_bundle).expanduser()
+    if raw.is_file():
+        if raw.name != "bundle_manifest.json":
+            raise ValueError(
+                f"model_bundle must be a bundle directory or bundle_manifest.json, got file: {raw}"
+            )
+        bundle_dir = raw.parent.resolve()
+    else:
+        bundle_dir = raw.resolve()
+
+    if not bundle_dir.exists() or not bundle_dir.is_dir():
+        raise FileNotFoundError(f"Model bundle directory not found: {bundle_dir}")
+
+    manifest_path = bundle_dir / "bundle_manifest.json"
+    checkpoint_path = bundle_dir / "checkpoint.pt"
+    model_cfg_path = bundle_dir / "model_config.yaml"
+    clustering_path = bundle_dir / "clustering_resolved.json"
+    for p in [manifest_path, checkpoint_path, model_cfg_path, clustering_path]:
+        if not p.exists():
+            raise FileNotFoundError(f"Model bundle is missing required file: {p}")
+
+    manifest = _load_json(manifest_path)
+    schema_version = str(manifest.get("bundle_schema_version", "")).strip()
+    if schema_version != MODEL_BUNDLE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported model bundle schema version: {schema_version!r}. "
+            f"Expected {MODEL_BUNDLE_SCHEMA_VERSION!r}."
+        )
+
+    selected_eps = manifest.get("selected_eps")
+    best_threshold = manifest.get("best_threshold")
+    if selected_eps is None:
+        raise ValueError(f"selected_eps missing in {manifest_path}")
+    if best_threshold is None:
+        raise ValueError(f"best_threshold missing in {manifest_path}")
+
+    model_cfg = load_yaml(model_cfg_path)
+    clustering_payload = _load_json(clustering_path)
+    eps_resolution = dict(clustering_payload.get("eps_resolution", {}) or {})
+    if eps_resolution.get("selected_eps") is None:
+        eps_resolution["selected_eps"] = float(selected_eps)
+
+    run_cfg = {
+        "max_pairs_per_block": manifest.get("max_pairs_per_block"),
+        "pair_building": dict(manifest.get("pair_building", {}) or {}),
+    }
+
+    return {
+        "model_run_id": str(manifest.get("source_model_run_id", "bundle")),
+        "metrics_dir": None,
+        "train_manifest_path": manifest_path,
+        "train_manifest": {
+            "best_threshold": float(best_threshold),
+            "precision_mode": str(manifest.get("precision_mode", "fp32")),
+            "best_test_f1": manifest.get("best_test_f1"),
+            "best_val_f1": manifest.get("best_val_f1"),
+            "best_val_class_counts": manifest.get("best_val_class_counts", {}),
+            "best_test_class_counts": manifest.get("best_test_class_counts", {}),
+            "best_checkpoint": str(checkpoint_path),
+            "best_threshold_selection_status": "bundle_manifest",
+            "best_threshold_source": "bundle_manifest",
+        },
+        "best_checkpoint": checkpoint_path,
+        "best_threshold": float(best_threshold),
+        "cluster_used_path": clustering_path,
+        "eps_resolution": eps_resolution,
+        "selected_eps": float(selected_eps),
+        "context_path": None,
+        "context_payload": {"pipeline_scope": "bundle"},
+        "run_cfg": run_cfg,
+        "model_cfg": model_cfg,
+        "model_cfg_path": str(model_cfg_path),
+        "model_source_type": "bundle",
+        "model_bundle_dir": str(bundle_dir),
+    }
+
+
+def _resolve_model_source_for_inference(
+    *,
+    paths_cfg: dict[str, Any],
+    model_run_id: str | None,
+    model_bundle: str | Path | None,
+) -> dict[str, Any]:
+    if bool(model_run_id) == bool(model_bundle):
+        raise ValueError("Provide exactly one of --model-run-id or --model-bundle.")
+    if model_run_id:
+        payload = _resolve_model_run_for_inference(paths_cfg=paths_cfg, model_run_id=str(model_run_id))
+        payload["model_source_type"] = "run_id"
+        payload["model_bundle_dir"] = None
+        return payload
+    return _resolve_model_bundle_for_inference(model_bundle=model_bundle)
+
+
+def _write_model_bundle(
+    *,
+    paths_cfg: dict[str, Any],
+    model_run_id: str,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    model_info = _resolve_model_run_for_inference(paths_cfg=paths_cfg, model_run_id=model_run_id)
+    if output_dir is None:
+        models_root = Path(str(paths_cfg["artifacts"].get("models_dir", Path(paths_cfg["artifacts"]["root"]) / "models")))
+        bundle_dir = models_root / str(model_run_id) / "bundle_v1"
+    else:
+        bundle_dir = Path(output_dir).expanduser().resolve()
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_dst = bundle_dir / "checkpoint.pt"
+    model_cfg_dst = bundle_dir / "model_config.yaml"
+    clustering_dst = bundle_dir / "clustering_resolved.json"
+    manifest_dst = bundle_dir / "bundle_manifest.json"
+
+    shutil.copy2(model_info["best_checkpoint"], checkpoint_dst)
+    with model_cfg_dst.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(dict(model_info["model_cfg"]), f, sort_keys=False)
+
+    cluster_used_payload = _load_json(model_info["cluster_used_path"])
+    eps_resolution = dict(cluster_used_payload.get("eps_resolution", {}) or {})
+    if eps_resolution.get("selected_eps") is None:
+        eps_resolution["selected_eps"] = float(model_info["selected_eps"])
+    cluster_config_used = dict(cluster_used_payload.get("cluster_config_used", {}) or {})
+    clustering_payload = {
+        "source_model_run_id": str(model_run_id),
+        "eps_resolution": eps_resolution,
+        "cluster_config_used": cluster_config_used,
+    }
+    write_json(clustering_payload, clustering_dst)
+
+    run_cfg = dict(model_info.get("run_cfg", {}) or {})
+    pair_building = dict(run_cfg.get("pair_building", {}) or {})
+    manifest_payload = {
+        "bundle_schema_version": MODEL_BUNDLE_SCHEMA_VERSION,
+        "source_model_run_id": str(model_run_id),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "checkpoint_hash": hash_file(checkpoint_dst),
+        "selected_eps": float(model_info["selected_eps"]),
+        "best_threshold": float(model_info["best_threshold"]),
+        "precision_mode": str(model_info["train_manifest"].get("precision_mode", "fp32")),
+        "best_test_f1": model_info["train_manifest"].get("best_test_f1"),
+        "best_val_f1": model_info["train_manifest"].get("best_val_f1"),
+        "best_val_class_counts": model_info["train_manifest"].get("best_val_class_counts", {}),
+        "best_test_class_counts": model_info["train_manifest"].get("best_test_class_counts", {}),
+        "max_pairs_per_block": run_cfg.get("max_pairs_per_block"),
+        "pair_building": pair_building,
+        "paths": {
+            "checkpoint": str(checkpoint_dst.name),
+            "model_config": str(model_cfg_dst.name),
+            "clustering_resolved": str(clustering_dst.name),
+        },
+    }
+    write_json(manifest_payload, manifest_dst)
+
+    return {
+        "bundle_dir": bundle_dir,
+        "bundle_manifest_path": manifest_dst,
+        "checkpoint_path": checkpoint_dst,
+        "model_config_path": model_cfg_dst,
+        "clustering_resolved_path": clustering_dst,
     }
 
 
@@ -1119,8 +1310,56 @@ def cmd_cache_purge(args):
     print(json.dumps(payload, indent=2))
 
 
-def cmd_run_stage(args):
-    ui = CliUI(total_steps=11, progress=args.progress)
+def _validate_cached_lspo_subset(
+    *,
+    lspo_subset,
+    run_cfg: dict[str, Any],
+    stage: str,
+    split_assignment_cfg: dict[str, float],
+    split_balance_cfg: dict[str, Any],
+) -> tuple[bool, list[str], dict[str, Any]]:
+    reasons: list[str] = []
+    checks: dict[str, Any] = {}
+
+    target_mentions = run_cfg.get("subset_target_mentions")
+    if stage != "full" and target_mentions is not None:
+        target_n = int(target_mentions)
+        if int(len(lspo_subset)) != target_n:
+            reasons.append(f"lspo_rows={len(lspo_subset)} expected={target_n}")
+    checks["rows_lspo"] = int(len(lspo_subset))
+
+    block_p95 = _block_size_p95(lspo_subset)
+    singleton_ratio = _singleton_ratio_blocks(lspo_subset)
+    checks["lspo_block_p95"] = float(block_p95)
+    checks["lspo_singleton_ratio_blocks"] = float(singleton_ratio)
+    if stage in {"mid", "full"}:
+        if block_p95 < 2.0:
+            reasons.append(f"lspo_block_p95={block_p95:.3f} < 2.0")
+        if singleton_ratio > 0.90:
+            reasons.append(f"lspo_singleton_ratio_blocks={singleton_ratio:.3f} > 0.90")
+
+    _, feasibility_meta = assign_lspo_splits(
+        lspo_subset,
+        seed=int(run_cfg.get("seed", 11)),
+        train_ratio=float(split_assignment_cfg["train_ratio"]),
+        val_ratio=float(split_assignment_cfg["val_ratio"]),
+        min_neg_val=int(split_balance_cfg.get("min_neg_val", 0)),
+        min_neg_test=int(split_balance_cfg.get("min_neg_test", 0)),
+        max_attempts=1,
+        return_meta=True,
+    )
+    max_possible = feasibility_meta.get("max_possible_neg_total")
+    required = feasibility_meta.get("required_neg_total")
+    checks["max_possible_neg_total"] = max_possible
+    checks["required_neg_total"] = required
+    if max_possible is not None and required is not None and int(max_possible) < int(required):
+        reasons.append(f"max_possible_neg_total={int(max_possible)} < required_neg_total={int(required)}")
+
+    return (len(reasons) == 0), reasons, checks
+
+
+def cmd_run_train_stage(args):
+    ui = CliUI(total_steps=9, progress=args.progress)
 
     try:
         ui.start("Initialize run context")
@@ -1134,6 +1373,7 @@ def cmd_run_stage(args):
         run_cfg["stage"] = args.run_stage
         split_assignment_cfg = _resolve_split_assignment_cfg(run_cfg)
         pair_build_cfg = _resolve_pair_build_cfg(run_cfg)
+        split_balance_cfg = run_cfg.get("split_balance", {})
 
         model_cfg = _load_model_cfg(args.model_config)
         rep_cfg = model_cfg.get("representation", {})
@@ -1148,27 +1388,44 @@ def cmd_run_stage(args):
         cluster_cfg = load_yaml(cluster_cfg_path)
         gate_cfg = load_gate_config(args.gates_config) if args.gates_config else None
 
-        run_id = args.run_id or _default_run_id(args.run_stage)
+        stage = args.run_stage
+        run_id = args.run_id or _default_run_id(stage)
         run_dirs = build_run_dirs(data_cfg, art_cfg, run_id)
-        for p in run_dirs.values():
-            p.mkdir(parents=True, exist_ok=True)
+        _ensure_run_dirs(
+            run_dirs,
+            [
+                "metrics",
+                "checkpoints",
+                "embeddings",
+                "subset_cache",
+                "subset_manifests",
+                "interim",
+                "shared_cache_root",
+                "shared_subsets",
+                "shared_embeddings",
+                "shared_pairs",
+                "shared_eps_sweeps",
+                "models",
+            ],
+        )
 
+        command_name = "run-train-stage"
         latest_context_path = Path(art_cfg["metrics_dir"]) / "latest_run.json"
         write_latest_run_context(
             run_id=run_id,
             run_dirs=run_dirs,
             output_path=latest_context_path,
-            stage=args.run_stage,
-            extras={"created_utc": datetime.now(timezone.utc).isoformat(), "source": "cli.run-stage"},
+            stage=stage,
+            extras={"created_utc": datetime.now(timezone.utc).isoformat(), "source": f"cli.{command_name}"},
         )
         train_seeds = _resolve_train_seeds(args, run_cfg=run_cfg, training_cfg=training_cfg)
+        metrics_dir = Path(run_dirs["metrics"])
         write_json(
             {
                 "run_id": run_id,
-                "run_stage": args.run_stage,
+                "run_stage": stage,
+                "pipeline_scope": "train",
                 "device": args.device,
-                "use_stub_embeddings": bool(args.use_stub_embeddings),
-                "prefer_precomputed_ads": bool(args.prefer_precomputed_ads),
                 "quiet_libs": bool(args.quiet_libs),
                 "train_seeds": train_seeds,
                 "precision_mode": precision_mode,
@@ -1176,64 +1433,41 @@ def cmd_run_stage(args):
                 "model_config": str(args.model_config),
                 "cluster_config": str(cluster_cfg_path),
             },
-            Path(run_dirs["metrics"]) / "00_context.json",
+            metrics_dir / "00_context.json",
         )
         write_run_consistency(
             run_id=run_id,
-            run_stage=args.run_stage,
+            run_stage=stage,
             run_dirs=run_dirs,
-            output_path=Path(run_dirs["metrics"]) / "00_run_consistency.json",
-            extras={"command": "run-stage", "latest_context_path": str(latest_context_path)},
+            output_path=metrics_dir / "00_run_consistency.json",
+            extras={"command": command_name, "latest_context_path": str(latest_context_path)},
         )
+        ui.done(f"Run ID: {run_id}")
 
-        stage = args.run_stage
         subset_dir = Path(run_dirs["subset_cache"])
         emb_dir = Path(run_dirs["embeddings"])
-        metrics_dir = Path(run_dirs["metrics"])
         checkpoint_dir = Path(run_dirs["checkpoints"])
-        pair_score_dir = Path(run_dirs["pair_scores"])
-        cluster_dir = Path(run_dirs["clusters"])
-        shared_cache_root = resolve_shared_cache_root(data_cfg)
         shared_subsets_dir = Path(run_dirs["shared_subsets"])
         shared_embeddings_dir = Path(run_dirs["shared_embeddings"])
         shared_pairs_dir = Path(run_dirs["shared_pairs"])
-        shared_pair_scores_dir = Path(run_dirs["shared_pair_scores"])
         shared_eps_sweeps_dir = Path(run_dirs["shared_eps_sweeps"])
 
-        for p in [shared_cache_root, shared_subsets_dir, shared_embeddings_dir, shared_pairs_dir, shared_pair_scores_dir, shared_eps_sweeps_dir]:
-            p.mkdir(parents=True, exist_ok=True)
-
         lspo_mentions_path = Path(run_dirs["interim"]) / "lspo_mentions.parquet"
-        ads_mentions_path = Path(run_dirs["interim"]) / "ads_mentions.parquet"
-
         lspo_subset_run_path = subset_dir / f"lspo_mentions_{stage}.parquet"
-        ads_subset_run_path = subset_dir / f"ads_mentions_{stage}.parquet"
+        lspo_split_run_path = subset_dir / f"lspo_mentions_split_{stage}.parquet"
         lspo_pairs_path = subset_dir / f"lspo_pairs_{stage}.parquet"
-        ads_pairs_path = subset_dir / f"ads_pairs_{stage}.parquet"
-
         lspo_chars_path = emb_dir / f"lspo_chars2vec_{stage}.npy"
         lspo_text_path = emb_dir / f"lspo_specter_{stage}.npy"
-        ads_chars_path = emb_dir / f"ads_chars2vec_{stage}.npy"
-        ads_text_path = emb_dir / f"ads_specter_{stage}.npy"
 
         train_manifest_path = metrics_dir / "03_train_manifest.json"
         split_meta_path = metrics_dir / "02_split_balance.json"
         pairs_qc_path = metrics_dir / "02_pairs_qc.json"
-        pair_scores_path = pair_score_dir / f"ads_pair_scores_{stage}.parquet"
-
-        clusters_path = cluster_dir / f"ads_clusters_{stage}.parquet"
-        mention_export_path = cluster_dir / f"mention_author_uid_{stage}.parquet"
-        publication_export_path = cluster_dir / f"publication_authors_{stage}.parquet"
-        cluster_qc_path = metrics_dir / "04_cluster_qc.json"
         cluster_cfg_used_path = metrics_dir / "04_clustering_config_used.json"
-
         stage_metrics_path = metrics_dir / f"05_stage_metrics_{stage}.json"
         go_no_go_path = metrics_dir / f"05_go_no_go_{stage}.json"
-        compare_path = metrics_dir / "99_compare_to_baseline.json"
+        compare_path = metrics_dir / "99_compare_train_to_baseline.json"
         cache_refs_path = metrics_dir / "00_cache_refs.json"
         cache_refs: list[dict[str, Any]] = []
-
-        ui.done(f"Run ID: {run_id}")
 
         ui.start("Prepare LSPO mentions")
         if lspo_mentions_path.exists() and not args.force:
@@ -1247,23 +1481,10 @@ def cmd_run_stage(args):
             )
             ui.done(f"Prepared {len(lspo_mentions)} mentions.")
 
-        ui.start("Prepare ADS mentions")
-        if ads_mentions_path.exists() and not args.force:
-            ads_mentions = read_parquet(ads_mentions_path)
-            ui.skip(f"Loaded {len(ads_mentions)} mentions from cache.")
-        else:
-            ads_mentions = prepare_ads_mentions(
-                publications_path=data_cfg["raw_ads_publications"],
-                references_path=data_cfg["raw_ads_references"],
-                output_path=ads_mentions_path,
-            )
-            ui.done(f"Prepared {len(ads_mentions)} mentions.")
-
-        ui.start("Build or load stage subsets")
+        ui.start("Build or load LSPO subset")
         t_all = perf_counter()
         timings: dict[str, float] = {}
-
-        source_fp = compute_source_fp(lspo_mentions_path, ads_mentions_path)
+        source_fp = compute_lspo_source_fp(lspo_mentions_path)
         subset_identity = compute_subset_identity(run_cfg=run_cfg, source_fp=source_fp, sampler_version=SUBSET_CACHE_VERSION)
         subset_paths = resolve_shared_subset_paths(data_cfg=data_cfg, identity=subset_identity)
         manifest_paths = resolve_manifest_paths(
@@ -1272,8 +1493,7 @@ def cmd_run_stage(args):
             identity=subset_identity,
             run_stage=stage,
         )
-        subset_paths.shared_dir.mkdir(parents=True, exist_ok=True)
-        split_balance_cfg = run_cfg.get("split_balance", {})
+        shared_subsets_dir.mkdir(parents=True, exist_ok=True)
         subset_meta_path = _subset_meta_path(subset_paths.shared_dir, subset_identity.subset_tag)
 
         cache_hit = False
@@ -1283,33 +1503,21 @@ def cmd_run_stage(args):
         cache_source = "none"
         cache_health: dict[str, Any] = {}
 
-        if not args.force and subset_paths.lspo_shared.exists() and subset_paths.ads_shared.exists():
+        if not args.force and subset_paths.lspo_shared.exists():
             cache_source = "shared"
-        elif (
-            not args.force
-            and subset_paths.lspo_shared_legacy is not None
-            and subset_paths.ads_shared_legacy is not None
-            and subset_paths.lspo_shared_legacy.exists()
-            and subset_paths.ads_shared_legacy.exists()
-        ):
+        elif not args.force and subset_paths.lspo_shared_legacy is not None and subset_paths.lspo_shared_legacy.exists():
             cache_source = "legacy_shared"
 
         if cache_source != "none":
             cache_hit = True
             t0 = perf_counter()
             lspo_cache_path = subset_paths.lspo_shared if cache_source == "shared" else subset_paths.lspo_shared_legacy
-            ads_cache_path = subset_paths.ads_shared if cache_source == "shared" else subset_paths.ads_shared_legacy
             assert lspo_cache_path is not None
-            assert ads_cache_path is not None
             lspo_subset = read_parquet(lspo_cache_path)
             t1 = perf_counter()
-            ads_subset = read_parquet(ads_cache_path)
-            t2 = perf_counter()
             timings["read_lspo_s"] = t1 - t0
-            timings["read_ads_s"] = t2 - t1
-            cache_valid, reasons, cache_health = _validate_cached_subset(
+            cache_valid, reasons, cache_health = _validate_cached_lspo_subset(
                 lspo_subset=lspo_subset,
-                ads_subset=ads_subset,
                 run_cfg=run_cfg,
                 stage=stage,
                 split_assignment_cfg=split_assignment_cfg,
@@ -1321,7 +1529,6 @@ def cmd_run_stage(args):
                 cache_hit = False
             elif cache_source == "legacy_shared":
                 atomic_save_parquet(lspo_subset, subset_paths.lspo_shared, index=False)
-                atomic_save_parquet(ads_subset, subset_paths.ads_shared, index=False)
                 cache_source = "shared_migrated"
 
         if cache_source == "none" or cache_rebuilt:
@@ -1334,26 +1541,13 @@ def cmd_run_stage(args):
                 subset_sampling=run_cfg.get("subset_sampling", {}),
             )
             t1 = perf_counter()
-            ads_subset = build_stage_subset(
-                ads_mentions,
-                stage=stage,
-                seed=int(run_cfg.get("seed", 11)),
-                target_mentions=run_cfg.get("subset_target_mentions"),
-                subset_sampling=run_cfg.get("subset_sampling", {}),
-            )
-            t2 = perf_counter()
             atomic_save_parquet(lspo_subset, subset_paths.lspo_shared, index=False)
-            t3 = perf_counter()
-            atomic_save_parquet(ads_subset, subset_paths.ads_shared, index=False)
-            t4 = perf_counter()
+            t2 = perf_counter()
             timings["build_lspo_s"] = t1 - t0
-            timings["build_ads_s"] = t2 - t1
-            timings["save_lspo_shared_s"] = t3 - t2
-            timings["save_ads_shared_s"] = t4 - t3
+            timings["save_lspo_shared_s"] = t2 - t1
             cache_valid = True
-            _, _, cache_health = _validate_cached_subset(
+            _, _, cache_health = _validate_cached_lspo_subset(
                 lspo_subset=lspo_subset,
-                ads_subset=ads_subset,
                 run_cfg=run_cfg,
                 stage=stage,
                 split_assignment_cfg=split_assignment_cfg,
@@ -1366,6 +1560,7 @@ def cmd_run_stage(args):
                 "cache_key": subset_identity.subset_tag,
                 "sampler_version": subset_identity.sampler_version,
                 "run_stage": stage,
+                "pipeline_scope": "train",
                 "source_fp": subset_identity.source_fp,
                 "subset_target_mentions": run_cfg.get("subset_target_mentions"),
                 "health": cache_health,
@@ -1374,13 +1569,11 @@ def cmd_run_stage(args):
             subset_meta_path,
         )
 
-        t5 = perf_counter()
+        t3 = perf_counter()
         lspo_subset_link_mode = link_or_copy(subset_paths.lspo_shared, lspo_subset_run_path)
-        t6 = perf_counter()
-        ads_subset_link_mode = link_or_copy(subset_paths.ads_shared, ads_subset_run_path)
-        t7 = perf_counter()
-        timings["save_lspo_run_s"] = t6 - t5
-        timings["save_ads_run_s"] = t7 - t6
+        t4 = perf_counter()
+        timings["save_lspo_run_s"] = t4 - t3
+        timings["total_s"] = perf_counter() - t_all
         _record_cache_ref(
             cache_refs,
             artifact_type="subset_lspo",
@@ -1389,22 +1582,11 @@ def cmd_run_stage(args):
             run_path=lspo_subset_run_path,
             mode=lspo_subset_link_mode,
         )
-        _record_cache_ref(
-            cache_refs,
-            artifact_type="subset_ads",
-            artifact_id=subset_identity.subset_tag,
-            shared_path=subset_paths.ads_shared,
-            run_path=ads_subset_run_path,
-            mode=ads_subset_link_mode,
-        )
 
         if args.force or not manifest_paths.lspo_primary.exists():
             write_subset_manifest(lspo_subset, manifest_paths.lspo_primary)
-        if args.force or not manifest_paths.ads_primary.exists():
-            write_subset_manifest(ads_subset, manifest_paths.ads_primary)
 
-        timings["total_s"] = perf_counter() - t_all
-
+        empty_ads = pd.DataFrame(columns=lspo_subset.columns)
         subset_summary = build_subset_summary(
             run_id=run_id,
             stage=stage,
@@ -1417,9 +1599,10 @@ def cmd_run_stage(args):
             cache_rebuilt=cache_rebuilt,
             cache_version=SUBSET_CACHE_VERSION,
             lspo_subset=lspo_subset,
-            ads_subset=ads_subset,
+            ads_subset=empty_ads,
             timings=timings,
         )
+        subset_summary["pipeline_scope"] = "train"
         write_json(subset_summary, metrics_dir / "01_subset_summary.json")
         write_run_consistency(
             run_id=run_id,
@@ -1433,9 +1616,9 @@ def cmd_run_stage(args):
         elif cache_rebuilt:
             ui.done(f"Invalid cache rebuilt: {cache_invalid_reason}")
         else:
-            ui.done(f"Built subsets ({len(lspo_subset)} LSPO / {len(ads_subset)} ADS).")
+            ui.done(f"Built LSPO subset ({len(lspo_subset)} mentions).")
 
-        ui.start("Build or load embeddings")
+        ui.start("Build or load LSPO embeddings")
         representation_cfg_hash = stable_hash(rep_cfg)
         model_version = str(model_cfg.get("name", "nand"))
         embedding_id = stable_hash(
@@ -1443,20 +1626,12 @@ def cmd_run_stage(args):
                 "subset_id": subset_identity.subset_tag,
                 "representation_cfg_hash": representation_cfg_hash,
                 "model_version": model_version,
+                "pipeline_scope": "train",
             }
         )
         lspo_chars_shared_path = shared_embeddings_dir / f"lspo_chars2vec_{embedding_id}.npy"
         lspo_text_shared_path = shared_embeddings_dir / f"lspo_specter_{embedding_id}.npy"
-        ads_chars_shared_path = shared_embeddings_dir / f"ads_chars2vec_{embedding_id}.npy"
-        ads_text_shared_path = shared_embeddings_dir / f"ads_specter_{embedding_id}.npy"
-
-        emb_cache_hit = (
-            lspo_chars_shared_path.exists()
-            and lspo_text_shared_path.exists()
-            and ads_chars_shared_path.exists()
-            and ads_text_shared_path.exists()
-            and not args.force
-        )
+        emb_cache_hit = lspo_chars_shared_path.exists() and lspo_text_shared_path.exists() and not args.force
 
         lspo_chars = get_or_create_chars2vec_embeddings(
             mentions=lspo_subset,
@@ -1479,27 +1654,6 @@ def cmd_run_stage(args):
             quiet_libraries=args.quiet_libs,
             reuse_model=True,
         )
-        ads_chars = get_or_create_chars2vec_embeddings(
-            mentions=ads_subset,
-            output_path=ads_chars_shared_path,
-            force_recompute=args.force,
-            use_stub_if_missing=args.use_stub_embeddings,
-            quiet_libraries=args.quiet_libs,
-        )
-        ads_text = get_or_create_specter_embeddings(
-            mentions=ads_subset,
-            output_path=ads_text_shared_path,
-            force_recompute=args.force,
-            model_name=rep_cfg.get("text_model_name", "allenai/specter"),
-            max_length=int(rep_cfg.get("max_length", 256)),
-            batch_size=32,
-            device=args.device,
-            prefer_precomputed=args.prefer_precomputed_ads,
-            use_stub_if_missing=args.use_stub_embeddings,
-            show_progress=args.progress,
-            quiet_libraries=args.quiet_libs,
-            reuse_model=True,
-        )
         _record_cache_ref(
             cache_refs,
             artifact_type="embedding_lspo_chars",
@@ -1516,32 +1670,12 @@ def cmd_run_stage(args):
             run_path=lspo_text_path,
             mode=link_or_copy(lspo_text_shared_path, lspo_text_path),
         )
-        _record_cache_ref(
-            cache_refs,
-            artifact_type="embedding_ads_chars",
-            artifact_id=embedding_id,
-            shared_path=ads_chars_shared_path,
-            run_path=ads_chars_path,
-            mode=link_or_copy(ads_chars_shared_path, ads_chars_path),
-        )
-        _record_cache_ref(
-            cache_refs,
-            artifact_type="embedding_ads_text",
-            artifact_id=embedding_id,
-            shared_path=ads_text_shared_path,
-            run_path=ads_text_path,
-            mode=link_or_copy(ads_text_shared_path, ads_text_path),
-        )
-
         if emb_cache_hit:
-            ui.skip("Reused cached embeddings.")
+            ui.skip("Reused cached LSPO embeddings.")
         else:
-            ui.done(
-                f"Embeddings ready (LSPO {tuple(lspo_chars.shape)}/{tuple(lspo_text.shape)}, "
-                f"ADS {tuple(ads_chars.shape)}/{tuple(ads_text.shape)})."
-            )
+            ui.done(f"Embeddings ready (LSPO {tuple(lspo_chars.shape)}/{tuple(lspo_text.shape)}).")
 
-        ui.start("Assign LSPO splits and build LSPO pairs")
+        ui.start("Assign splits and build LSPO pairs")
         pair_cfg_hash = stable_hash(
             {
                 "max_pairs_per_block": run_cfg.get("max_pairs_per_block"),
@@ -1560,26 +1694,26 @@ def cmd_run_stage(args):
                 "subset_id": subset_identity.subset_tag,
                 "split_cfg_hash": split_cfg_hash,
                 "pair_cfg_hash": pair_cfg_hash,
+                "pipeline_scope": "train",
             }
         )
-        ads_pairs_id = stable_hash({"subset_id": subset_identity.subset_tag, "pair_cfg_hash": pair_cfg_hash})
         lspo_split_shared_path = shared_pairs_dir / f"lspo_mentions_split_{lspo_pairs_id}.parquet"
         lspo_pairs_shared_path = shared_pairs_dir / f"lspo_pairs_{lspo_pairs_id}.parquet"
         split_meta_shared_path = shared_pairs_dir / f"split_balance_{lspo_pairs_id}.json"
-        ads_pairs_shared_path = shared_pairs_dir / f"ads_pairs_{ads_pairs_id}.parquet"
-        pairs_qc_shared_path = shared_pairs_dir / f"pairs_qc_{lspo_pairs_id}_{ads_pairs_id}.json"
+        pairs_qc_shared_path = shared_pairs_dir / f"pairs_qc_train_{lspo_pairs_id}.json"
 
         if (
             lspo_pairs_shared_path.exists()
             and split_meta_shared_path.exists()
             and lspo_split_shared_path.exists()
+            and pairs_qc_shared_path.exists()
             and not args.force
         ):
             lspo_mentions_split = read_parquet(lspo_split_shared_path)
             lspo_pairs = read_parquet(lspo_pairs_shared_path)
             split_meta = _load_json(split_meta_shared_path)
-            lspo_pair_meta: dict[str, Any] = {}
-            ui.skip(f"Reused LSPO split+pairs ({len(lspo_pairs)} pairs).")
+            pairs_qc = _load_json(pairs_qc_shared_path)
+            ui.skip(f"Reused LSPO split+pairs ({len(lspo_pairs)} rows).")
         else:
             lspo_mentions_split, split_meta = assign_lspo_splits(
                 lspo_subset,
@@ -1594,7 +1728,7 @@ def cmd_run_stage(args):
             atomic_save_parquet(lspo_mentions_split, lspo_split_shared_path, index=False)
             write_json(split_meta, split_meta_shared_path)
             if str(split_meta.get("status", "")).strip().lower() == "split_balance_infeasible":
-                link_or_copy(lspo_split_shared_path, lspo_subset_run_path)
+                link_or_copy(lspo_split_shared_path, lspo_split_run_path)
                 link_or_copy(split_meta_shared_path, split_meta_path)
                 raise RuntimeError(
                     "split_balance_infeasible: "
@@ -1613,16 +1747,29 @@ def cmd_run_stage(args):
                 return_meta=True,
             )
             write_pairs(lspo_pairs, lspo_pairs_shared_path)
+            empty_ads_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+            pairs_qc = build_pairs_qc(
+                lspo_mentions=lspo_mentions_split,
+                lspo_pairs=lspo_pairs,
+                ads_pairs=empty_ads_pairs,
+                split_meta=split_meta,
+                lspo_pair_build_meta=lspo_pair_meta,
+                ads_pair_build_meta={},
+            )
+            pairs_qc["pipeline_scope"] = "train"
+            write_json(pairs_qc, pairs_qc_shared_path)
             ui.done(f"Built LSPO pairs ({len(lspo_pairs)} rows).")
-        lspo_split_link_mode = link_or_copy(lspo_split_shared_path, lspo_subset_run_path)
+
+        lspo_split_link_mode = link_or_copy(lspo_split_shared_path, lspo_split_run_path)
         lspo_pairs_link_mode = link_or_copy(lspo_pairs_shared_path, lspo_pairs_path)
         split_meta_link_mode = link_or_copy(split_meta_shared_path, split_meta_path)
+        pairs_qc_link_mode = link_or_copy(pairs_qc_shared_path, pairs_qc_path)
         _record_cache_ref(
             cache_refs,
             artifact_type="lspo_split",
             artifact_id=lspo_pairs_id,
             shared_path=lspo_split_shared_path,
-            run_path=lspo_subset_run_path,
+            run_path=lspo_split_run_path,
             mode=lspo_split_link_mode,
         )
         _record_cache_ref(
@@ -1641,63 +1788,14 @@ def cmd_run_stage(args):
             run_path=split_meta_path,
             mode=split_meta_link_mode,
         )
-
-        if str(split_meta.get("status", "")).strip().lower() == "split_balance_infeasible":
-            raise RuntimeError(
-                "split_balance_infeasible: "
-                f"max_possible_neg_total={split_meta.get('max_possible_neg_total')} "
-                f"< required_neg_total={split_meta.get('required_neg_total')}"
-            )
-
-        ui.start("Build ADS pairs and pair QC")
-        if ads_pairs_shared_path.exists() and pairs_qc_shared_path.exists() and not args.force:
-            ads_pairs = read_parquet(ads_pairs_shared_path)
-            pairs_qc = _load_json(pairs_qc_shared_path)
-            lspo_pair_meta = dict(pairs_qc.get("lspo_pair_build", lspo_pair_meta))
-            ads_pair_meta = dict(pairs_qc.get("ads_pair_build", {}))
-            ui.skip(f"Reused ADS pairs ({len(ads_pairs)} rows).")
-        else:
-            ads_pairs, ads_pair_meta = build_pairs_within_blocks(
-                mentions=ads_subset,
-                max_pairs_per_block=run_cfg.get("max_pairs_per_block"),
-                seed=int(run_cfg.get("seed", 11)),
-                require_same_split=False,
-                labeled_only=False,
-                balance_train=False,
-                exclude_same_bibcode=bool(pair_build_cfg["exclude_same_bibcode"]),
-                show_progress=args.progress,
-                return_meta=True,
-            )
-            write_pairs(ads_pairs, ads_pairs_shared_path)
-            pairs_qc = build_pairs_qc(
-                lspo_mentions=lspo_mentions_split,
-                lspo_pairs=lspo_pairs,
-                ads_pairs=ads_pairs,
-                split_meta=split_meta,
-                lspo_pair_build_meta=lspo_pair_meta,
-                ads_pair_build_meta=ads_pair_meta,
-            )
-            write_json(pairs_qc, pairs_qc_shared_path)
-            ui.done(f"Built ADS pairs ({len(ads_pairs)} rows).")
-        ads_pairs_link_mode = link_or_copy(ads_pairs_shared_path, ads_pairs_path)
-        pairs_qc_link_mode = link_or_copy(pairs_qc_shared_path, pairs_qc_path)
-        _record_cache_ref(
-            cache_refs,
-            artifact_type="ads_pairs",
-            artifact_id=ads_pairs_id,
-            shared_path=ads_pairs_shared_path,
-            run_path=ads_pairs_path,
-            mode=ads_pairs_link_mode,
-        )
         _record_cache_ref(
             cache_refs,
             artifact_type="pairs_qc",
-            artifact_id=f"{lspo_pairs_id}_{ads_pairs_id}",
+            artifact_id=f"train_{lspo_pairs_id}",
             shared_path=pairs_qc_shared_path,
             run_path=pairs_qc_path,
             mode=pairs_qc_link_mode,
         )
-
         write_run_consistency(
             run_id=run_id,
             run_stage=stage,
@@ -1705,6 +1803,12 @@ def cmd_run_stage(args):
             output_path=metrics_dir / "02_run_consistency.json",
             extras={"split_status": split_meta.get("status")},
         )
+        if str(split_meta.get("status", "")).strip().lower() == "split_balance_infeasible":
+            raise RuntimeError(
+                "split_balance_infeasible: "
+                f"max_possible_neg_total={split_meta.get('max_possible_neg_total')} "
+                f"< required_neg_total={split_meta.get('required_neg_total')}"
+            )
 
         ui.start("Train NAND model")
         train_cache_hit = False
@@ -1731,7 +1835,6 @@ def cmd_run_stage(args):
                 show_progress=args.progress,
             )
             ui.done(f"Best checkpoint: {train_manifest['best_checkpoint']}")
-
         write_run_consistency(
             run_id=run_id,
             run_stage=stage,
@@ -1740,194 +1843,93 @@ def cmd_run_stage(args):
             extras={"best_checkpoint": str(train_manifest.get("best_checkpoint"))},
         )
 
-        ui.start("Score ADS pairs")
-        score_pipeline_version = "v2"
+        ui.start("Resolve clustering eps from LSPO val sweep")
+        best_threshold = float(train_manifest["best_threshold"])
         try:
             model_state_hash = hash_checkpoint_model_state(
                 train_manifest["best_checkpoint"],
-                score_pipeline_version=score_pipeline_version,
+                score_pipeline_version="v2",
             )
-        except Exception as exc:
-            warnings.warn(
-                (
-                    "Model-state hash failed "
-                    f"({exc.__class__.__name__}); falling back to file hash for pair-score cache key."
-                ),
-                RuntimeWarning,
-            )
+        except Exception:
             model_state_hash = hash_file(train_manifest["best_checkpoint"])
-
-        checkpoint_hash = hash_file(train_manifest["best_checkpoint"])
-        score_cfg_hash = stable_hash({"score_batch_size": int(args.score_batch_size)})
-        pair_scores_id_v2 = stable_hash(
+        cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
+        sweep_cfg_hash = stable_hash(
             {
-                "ads_pairs_id": ads_pairs_id,
+                "eps_mode": cluster_cfg_used.get("eps_mode"),
+                "eps_sweep_min": cluster_cfg_used.get("eps_sweep_min"),
+                "eps_sweep_max": cluster_cfg_used.get("eps_sweep_max"),
+                "eps_sweep_step": cluster_cfg_used.get("eps_sweep_step"),
+                "boundary_diagnostics": cluster_cfg_used.get("boundary_diagnostics"),
+                "min_samples": cluster_cfg_used.get("min_samples"),
+                "constraint_mode": cluster_cfg_used.get("constraint_mode"),
+                "constraints": cluster_cfg_used.get("constraints"),
+            }
+        )
+        eps_sweep_id = stable_hash(
+            {
+                "lspo_pairs_id": lspo_pairs_id,
                 "model_state_hash": model_state_hash,
-                "score_cfg_hash": score_cfg_hash,
-                "score_pipeline_version": score_pipeline_version,
+                "sweep_cfg_hash": sweep_cfg_hash,
             }
         )
-        pair_scores_id_legacy = stable_hash(
+        resolved_eps, eps_meta = _resolve_stage_eps(
+            cluster_cfg=cluster_cfg_used,
+            best_threshold=best_threshold,
+            lspo_mentions_split=lspo_mentions_split,
+            lspo_pairs=lspo_pairs,
+            lspo_chars=lspo_chars,
+            lspo_text=lspo_text,
+            checkpoint_path=str(train_manifest["best_checkpoint"]),
+            score_batch_size=int(args.score_batch_size),
+            device=args.device,
+            precision_mode=precision_mode,
+            show_progress=args.progress,
+        )
+        if eps_meta.get("selected_eps") is None:
+            eps_meta["selected_eps"] = float(resolved_eps)
+        eps_meta["eps_sweep_id"] = eps_sweep_id
+        eps_sweep_shared_path = shared_eps_sweeps_dir / f"eps_sweep_{eps_sweep_id}.json"
+        write_json(
             {
-                "ads_pairs_id": ads_pairs_id,
-                "checkpoint_hash": checkpoint_hash,
-                "score_cfg_hash": score_cfg_hash,
-            }
+                "eps_sweep_id": eps_sweep_id,
+                "run_stage": stage,
+                "run_id": run_id,
+                "pipeline_scope": "train",
+                "model_state_hash": model_state_hash,
+                "sweep_cfg_hash": sweep_cfg_hash,
+                "eps_resolution": eps_meta,
+            },
+            eps_sweep_shared_path,
         )
-        pair_scores_shared_path_v2 = shared_pair_scores_dir / f"ads_pair_scores_v2_{pair_scores_id_v2}.parquet"
-        pair_scores_shared_path_legacy = shared_pair_scores_dir / f"ads_pair_scores_{pair_scores_id_legacy}.parquet"
-        pair_scores_shared_path_used = pair_scores_shared_path_v2
-        pair_scores_cache_schema_version = "v2"
-        pair_scores_artifact_id = pair_scores_id_v2
-
-        if pair_scores_shared_path_v2.exists() and not args.force:
-            pair_scores = read_parquet(pair_scores_shared_path_v2)
-            ui.skip(f"Reused pair scores ({len(pair_scores)} rows).")
-        elif pair_scores_shared_path_legacy.exists() and not args.force:
-            pair_scores = read_parquet(pair_scores_shared_path_legacy)
-            pair_scores_cache_schema_version = "v1"
-            pair_scores_artifact_id = pair_scores_id_legacy
-            pair_scores_shared_path_used = pair_scores_shared_path_legacy
-            promote_mode = link_or_copy(pair_scores_shared_path_legacy, pair_scores_shared_path_v2)
-            if pair_scores_shared_path_v2.exists():
-                pair_scores_shared_path_used = pair_scores_shared_path_v2
-                pair_scores_cache_schema_version = "v2"
-                pair_scores_artifact_id = pair_scores_id_v2
-            ui.skip(f"Reused legacy pair scores ({len(pair_scores)} rows, promote={promote_mode}).")
-        else:
-            pair_scores = score_pairs_with_checkpoint(
-                mentions=ads_subset,
-                pairs=ads_pairs,
-                chars2vec=ads_chars,
-                text_emb=ads_text,
-                checkpoint_path=train_manifest["best_checkpoint"],
-                output_path=pair_scores_shared_path_v2,
-                batch_size=int(args.score_batch_size),
-                device=args.device,
-                precision_mode=precision_mode,
-                show_progress=args.progress,
-            )
-            pair_scores_shared_path_used = pair_scores_shared_path_v2
-            pair_scores_cache_schema_version = "v2"
-            pair_scores_artifact_id = pair_scores_id_v2
-            ui.done(f"Scored {len(pair_scores)} ADS pairs.")
+        cluster_cfg_used["eps"] = resolved_eps
+        if eps_meta.get("selected_eps") is not None:
+            cluster_cfg_used["selected_eps"] = float(eps_meta["selected_eps"])
+        write_json(
+            {
+                "run_id": run_id,
+                "run_stage": stage,
+                "pipeline_scope": "train",
+                "best_threshold": best_threshold,
+                "eps_resolution": eps_meta,
+                "cluster_config_used": cluster_cfg_used,
+            },
+            cluster_cfg_used_path,
+        )
         _record_cache_ref(
             cache_refs,
-            artifact_type="pair_scores",
-            artifact_id=pair_scores_artifact_id,
-            shared_path=pair_scores_shared_path_used,
-            run_path=pair_scores_path,
-            mode=link_or_copy(pair_scores_shared_path_used, pair_scores_path),
-            cache_schema_version=pair_scores_cache_schema_version,
+            artifact_type="eps_sweep",
+            artifact_id=eps_sweep_id,
+            shared_path=eps_sweep_shared_path,
+            run_path=cluster_cfg_used_path,
+            mode=link_or_copy(eps_sweep_shared_path, metrics_dir / "04_eps_sweep.json"),
         )
-        write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
-
-        ui.start("Cluster ADS mentions and export mappings")
-        cluster_cache_hit = (
-            clusters_path.exists()
-            and mention_export_path.exists()
-            and publication_export_path.exists()
-            and cluster_qc_path.exists()
-            and cluster_cfg_used_path.exists()
-            and not args.force
-        )
-
-        eps_meta: dict[str, Any] = {}
-        if cluster_cache_hit:
-            clusters = read_parquet(clusters_path)
-            cluster_qc = _load_json(cluster_qc_path)
-            cfg_payload = _load_json(cluster_cfg_used_path) or {}
-            eps_meta = dict(cfg_payload.get("eps_resolution", {}) or {})
-            ui.skip(f"Reused clustering outputs ({len(clusters)} mentions).")
-        else:
-            best_threshold = float(train_manifest["best_threshold"])
-            cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
-            sweep_cfg_hash = stable_hash(
-                {
-                    "eps_mode": cluster_cfg_used.get("eps_mode"),
-                    "eps_sweep_min": cluster_cfg_used.get("eps_sweep_min"),
-                    "eps_sweep_max": cluster_cfg_used.get("eps_sweep_max"),
-                    "eps_sweep_step": cluster_cfg_used.get("eps_sweep_step"),
-                    "boundary_diagnostics": cluster_cfg_used.get("boundary_diagnostics"),
-                    "min_samples": cluster_cfg_used.get("min_samples"),
-                    "constraint_mode": cluster_cfg_used.get("constraint_mode"),
-                    "constraints": cluster_cfg_used.get("constraints"),
-                }
-            )
-            eps_sweep_id = stable_hash(
-                {
-                    "lspo_pairs_id": lspo_pairs_id,
-                    "model_state_hash": model_state_hash,
-                    "sweep_cfg_hash": sweep_cfg_hash,
-                }
-            )
-            resolved_eps, eps_meta = _resolve_stage_eps(
-                cluster_cfg=cluster_cfg_used,
-                best_threshold=best_threshold,
-                lspo_mentions_split=lspo_mentions_split,
-                lspo_pairs=lspo_pairs,
-                lspo_chars=lspo_chars,
-                lspo_text=lspo_text,
-                checkpoint_path=str(train_manifest["best_checkpoint"]),
-                score_batch_size=int(args.score_batch_size),
-                device=args.device,
-                precision_mode=precision_mode,
-                show_progress=args.progress,
-            )
-            eps_meta["eps_sweep_id"] = eps_sweep_id
-            eps_sweep_shared_path = shared_eps_sweeps_dir / f"eps_sweep_{eps_sweep_id}.json"
-            write_json(
-                {
-                    "eps_sweep_id": eps_sweep_id,
-                    "run_stage": stage,
-                    "run_id": run_id,
-                    "model_state_hash": model_state_hash,
-                    "sweep_cfg_hash": sweep_cfg_hash,
-                    "eps_resolution": eps_meta,
-                },
-                eps_sweep_shared_path,
-            )
-            cluster_cfg_used["eps"] = resolved_eps
-            if eps_meta.get("selected_eps") is not None:
-                cluster_cfg_used["selected_eps"] = float(eps_meta["selected_eps"])
-            write_json(
-                {
-                    "run_id": run_id,
-                    "run_stage": stage,
-                    "best_threshold": best_threshold,
-                    "eps_resolution": eps_meta,
-                    "cluster_config_used": cluster_cfg_used,
-                },
-                cluster_cfg_used_path,
-            )
-
-            clusters = cluster_blockwise_dbscan(
-                mentions=ads_subset,
-                pair_scores=pair_scores,
-                cluster_config=cluster_cfg_used,
-                output_path=clusters_path,
-                show_progress=args.progress,
-            )
-            clusters.to_parquet(mention_export_path, index=False)
-            _ = build_publication_author_mapping(
-                mentions=ads_subset,
-                clusters=clusters,
-                output_path=publication_export_path,
-            )
-            cluster_qc = build_cluster_qc(
-                pair_scores=pair_scores,
-                clusters=clusters,
-                threshold=best_threshold,
-            )
-            write_json(cluster_qc, cluster_qc_path)
-            ui.done(f"Clustered {len(clusters)} ADS mentions.")
-
+        ui.done(f"Resolved eps={resolved_eps:.4f}")
         write_run_consistency(
             run_id=run_id,
             run_stage=stage,
             run_dirs=run_dirs,
             output_path=metrics_dir / "04_run_consistency.json",
-            extras={"cluster_count": int(cluster_qc.get("cluster_count", 0))},
+            extras={"selected_eps": resolved_eps},
         )
 
         ui.start("Build stage metrics and go/no-go")
@@ -1936,46 +1938,38 @@ def cmd_run_stage(args):
             run_stage=stage,
             run_dirs=run_dirs,
             output_path=metrics_dir / "05_run_consistency.json",
-            extras={"command": "run-stage"},
+            extras={"command": command_name},
         )
-
         if stage_metrics_path.exists() and go_no_go_path.exists() and not args.force:
             stage_metrics = _load_json(stage_metrics_path)
             go = _load_json(go_no_go_path)
             ui.skip(f"Reused stage reports (GO={go.get('go')}).")
         else:
-            if manifest_paths.lspo_primary.exists() and manifest_paths.ads_primary.exists():
-                determinism_paths = [manifest_paths.lspo_primary, manifest_paths.ads_primary]
-            else:
-                determinism_paths = [manifest_paths.lspo_legacy, manifest_paths.ads_legacy]
+            determinism_paths = [manifest_paths.lspo_primary] if manifest_paths.lspo_primary.exists() else [manifest_paths.lspo_legacy]
             consistency_files = [metrics_dir / f"{i:02d}_run_consistency.json" for i in range(0, 6)]
-
-            stage_metrics = build_stage_metrics(
+            stage_metrics = build_train_stage_metrics(
                 run_id=run_id,
                 run_stage=stage,
                 lspo_mentions=lspo_subset,
-                lspo_pairs_count=int(len(lspo_pairs)),
-                ads_mentions=ads_subset,
-                clusters=clusters,
                 train_manifest=train_manifest,
                 consistency_files=consistency_files,
                 determinism_paths=determinism_paths,
-                cluster_qc=cluster_qc,
                 split_meta=split_meta,
                 eps_meta=eps_meta,
                 subset_cache_key=subset_identity.subset_tag,
+                lspo_pairs_count=int(len(lspo_pairs)),
             )
             write_json(stage_metrics, stage_metrics_path)
-
             go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
             write_go_no_go_report(go, go_no_go_path)
             ui.done(f"GO={go['go']} with blockers={len(go.get('blockers', []))}.")
+        write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
 
         if args.baseline_run_id:
             if compare_path.exists() and not args.force:
                 ui.info(f"Reused baseline comparison: {compare_path}")
             else:
-                write_compare_to_baseline(
+                write_compare_train_to_baseline(
                     baseline_run_id=args.baseline_run_id,
                     current_run_id=run_id,
                     run_stage=stage,
@@ -1983,9 +1977,22 @@ def cmd_run_stage(args):
                     output_path=compare_path,
                 )
                 ui.info(f"Wrote baseline comparison: {compare_path}")
-
         ui.info(f"Stage metrics: {stage_metrics_path}")
         ui.info(f"Go/No-Go report: {go_no_go_path}")
+
+        ui.start("Export model bundle")
+        export_bundle_enabled = bool(getattr(args, "export_model_bundle", True))
+        if not export_bundle_enabled:
+            ui.skip("Model bundle export disabled.")
+        else:
+            bundle_dir_default = Path(str(art_cfg.get("models_dir", Path(art_cfg["root"]) / "models"))) / run_id / "bundle_v1"
+            bundle_manifest_default = bundle_dir_default / "bundle_manifest.json"
+            if bundle_manifest_default.exists() and not args.force:
+                ui.skip(f"Reused model bundle: {bundle_manifest_default}")
+            else:
+                bundle_meta = _write_model_bundle(paths_cfg=paths, model_run_id=run_id, output_dir=None)
+                ui.done(f"Wrote model bundle: {bundle_meta['bundle_manifest_path']}")
+
         ui.info(f"Run complete: {run_id}")
 
     except Exception as exc:
@@ -1993,6 +2000,12 @@ def cmd_run_stage(args):
         raise
     finally:
         ui.close()
+
+
+def cmd_run_stage(args):
+    _emit_run_stage_deprecation()
+    setattr(args, "prefer_precomputed_ads", False)
+    return cmd_run_train_stage(args)
 
 
 def cmd_run_infer_ads(args):
@@ -2008,15 +2021,32 @@ def cmd_run_infer_ads(args):
         project_root = find_project_root(Path.cwd())
         cluster_cfg_path = resolve_existing_path(args.cluster_config, project_root=project_root) or Path(args.cluster_config)
         cluster_cfg = load_yaml(cluster_cfg_path)
-        gate_cfg = load_gate_config("configs/gates.yaml")
+        gate_cfg = load_gate_config(args.gates_config) if args.gates_config else None
 
         dataset_info = _resolve_ads_dataset_files(data_cfg, args.dataset_id)
-        model_info = _resolve_model_run_for_inference(paths_cfg=paths, model_run_id=args.model_run_id)
+        model_info = _resolve_model_source_for_inference(
+            paths_cfg=paths,
+            model_run_id=getattr(args, "model_run_id", None),
+            model_bundle=getattr(args, "model_bundle", None),
+        )
         run_id = args.run_id or _default_run_id("infer_ads")
         stage = "infer_ads"
         run_dirs = build_run_dirs(data_cfg, art_cfg, run_id)
-        for p in run_dirs.values():
-            p.mkdir(parents=True, exist_ok=True)
+        _ensure_run_dirs(
+            run_dirs,
+            [
+                "metrics",
+                "embeddings",
+                "pair_scores",
+                "clusters",
+                "subset_cache",
+                "interim",
+                "shared_cache_root",
+                "shared_embeddings",
+                "shared_pairs",
+                "shared_pair_scores",
+            ],
+        )
 
         latest_context_path = Path(art_cfg["metrics_dir"]) / "latest_run.json"
         write_latest_run_context(
@@ -2063,12 +2093,15 @@ def cmd_run_infer_ads(args):
             {
                 "run_id": run_id,
                 "run_stage": stage,
+                "pipeline_scope": "infer",
                 "dataset_id": dataset_info["dataset_id"],
                 "dataset_dir": str(dataset_info["dataset_dir"]),
                 "publications_path": str(dataset_info["publications_path"]),
                 "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
                 "references_present": bool(dataset_info["references_present"]),
                 "model_run_id": model_info["model_run_id"],
+                "model_source_type": str(model_info.get("model_source_type", "run_id")),
+                "model_bundle_dir": model_info.get("model_bundle_dir"),
                 "model_train_manifest": str(model_info["train_manifest_path"]),
                 "checkpoint": str(model_info["best_checkpoint"]),
                 "selected_eps": float(model_info["selected_eps"]),
@@ -2109,6 +2142,7 @@ def cmd_run_infer_ads(args):
             {
                 "run_id": run_id,
                 "run_stage": stage,
+                "pipeline_scope": "infer",
                 "dataset_id": dataset_info["dataset_id"],
                 "dataset_dir": str(dataset_info["dataset_dir"]),
                 "publications_path": str(dataset_info["publications_path"]),
@@ -2347,7 +2381,6 @@ def cmd_run_infer_ads(args):
             mode=link_or_copy(pair_scores_shared_path_used, pair_scores_path),
             cache_schema_version=pair_scores_cache_schema_version,
         )
-        write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
 
         ui.start("Cluster ADS mentions and export mappings")
         cluster_cache_hit = (
@@ -2392,6 +2425,7 @@ def cmd_run_infer_ads(args):
                 {
                     "run_id": run_id,
                     "run_stage": stage,
+                    "pipeline_scope": "infer",
                     "model_run_id": model_info["model_run_id"],
                     "best_threshold": float(model_info["best_threshold"]),
                     "eps_resolution": eps_meta,
@@ -2441,27 +2475,27 @@ def cmd_run_infer_ads(args):
             go = _load_json(go_no_go_path)
             ui.skip(f"Reused stage reports (GO={go.get('go')}).")
         else:
-            empty_lspo = pd.DataFrame(columns=MENTION_REQUIRED_COLUMNS)
             consistency_files = [
                 metrics_dir / "00_run_consistency.json",
                 metrics_dir / "01_run_consistency.json",
                 metrics_dir / "04_run_consistency.json",
                 metrics_dir / "05_run_consistency.json",
             ]
-            stage_metrics = build_stage_metrics(
+            stage_metrics = build_infer_stage_metrics(
                 run_id=run_id,
                 run_stage=stage,
-                lspo_mentions=empty_lspo,
-                lspo_pairs_count=None,
                 ads_mentions=ads_mentions,
                 clusters=clusters,
-                train_manifest=model_info["train_manifest"],
                 consistency_files=consistency_files,
-                determinism_paths=[ads_mentions_path],
+                determinism_paths=[ads_mentions_path, pair_scores_path, clusters_path],
                 cluster_qc=cluster_qc,
-                split_meta={"status": "not_applicable"},
                 eps_meta=eps_meta,
-                subset_cache_key=dataset_source_fp,
+                threshold=float(model_info["best_threshold"]),
+                threshold_selection_status=str(
+                    model_info["train_manifest"].get("best_threshold_selection_status", "model_run_threshold")
+                ),
+                threshold_source=str(model_info["train_manifest"].get("best_threshold_source", "model_run")),
+                precision_mode=str(args.precision_mode),
             )
             write_json(stage_metrics, stage_metrics_path)
 
@@ -2469,6 +2503,20 @@ def cmd_run_infer_ads(args):
             write_go_no_go_report(go, go_no_go_path)
             ui.done(f"GO={go['go']} with blockers={len(go.get('blockers', []))}.")
 
+        write_json({"run_id": run_id, "cache_refs": cache_refs}, cache_refs_path)
+        compare_path = metrics_dir / "99_compare_infer_to_baseline.json"
+        if args.baseline_run_id:
+            if compare_path.exists() and not args.force:
+                ui.info(f"Reused baseline comparison: {compare_path}")
+            else:
+                write_compare_infer_to_baseline(
+                    baseline_run_id=args.baseline_run_id,
+                    current_run_id=run_id,
+                    run_stage=stage,
+                    metrics_root=art_cfg["metrics_dir"],
+                    output_path=compare_path,
+                )
+                ui.info(f"Wrote baseline comparison: {compare_path}")
         ui.info(f"Stage metrics: {stage_metrics_path}")
         ui.info(f"Go/No-Go report: {go_no_go_path}")
         ui.info(f"Run complete: {run_id}")
@@ -2480,60 +2528,80 @@ def cmd_run_infer_ads(args):
         ui.close()
 
 
+def cmd_export_model_bundle(args):
+    paths = _load_paths_cfg(args.paths_config)
+    meta = _write_model_bundle(paths_cfg=paths, model_run_id=args.model_run_id, output_dir=args.output_dir)
+    print(json.dumps({"model_run_id": args.model_run_id, **{k: str(v) for k, v in meta.items()}}, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="NAND research CLI")
     sub = p.add_subparsers(dest="command", required=True)
 
+    def _add_train_stage_args(sp: argparse.ArgumentParser, *, include_deprecated_ads_flag: bool) -> None:
+        sp.add_argument("--run-stage", required=True, choices=["smoke", "mini", "mid", "full"])
+        sp.add_argument("--paths-config", default="configs/paths.local.yaml")
+        sp.add_argument("--run-config", default=None)
+        sp.add_argument("--model-config", default="configs/model/nand_best.yaml")
+        sp.add_argument("--cluster-config", default="configs/clustering/dbscan_paper.yaml")
+        sp.add_argument("--gates-config", default="configs/gates.yaml")
+        sp.add_argument("--run-id", default=None)
+        sp.add_argument("--device", default="auto")
+        sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
+        sp.add_argument("--seeds", nargs="+", type=int, default=None)
+        sp.add_argument("--use-stub-embeddings", action="store_true")
+        sp.add_argument("--force", action="store_true")
+        sp.add_argument("--baseline-run-id", default=None)
+        sp.add_argument("--score-batch-size", type=int, default=8192)
+        sp.add_argument("--export-model-bundle", dest="export_model_bundle", action="store_true")
+        sp.add_argument("--no-export-model-bundle", dest="export_model_bundle", action="store_false")
+        sp.set_defaults(export_model_bundle=True)
+        if include_deprecated_ads_flag:
+            sp.add_argument("--prefer-precomputed-ads", dest="prefer_precomputed_ads", action="store_true")
+            sp.add_argument("--no-prefer-precomputed-ads", dest="prefer_precomputed_ads", action="store_false")
+            sp.set_defaults(prefer_precomputed_ads=True)
+        sp.add_argument("--progress", dest="progress", action="store_true")
+        sp.add_argument("--no-progress", dest="progress", action="store_false")
+        sp.set_defaults(progress=True)
+        sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
+        sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
+        sp.set_defaults(quiet_libs=True)
+
+    sp = sub.add_parser("run-train-stage")
+    _add_train_stage_args(sp, include_deprecated_ads_flag=False)
+    sp.set_defaults(func=cmd_run_train_stage)
+
     sp = sub.add_parser("run-stage")
-    sp.add_argument("--run-stage", required=True, choices=["smoke", "mini", "mid", "full"])
-    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
-    sp.add_argument("--run-config", default=None)
-    sp.add_argument("--model-config", default="configs/model/nand_best.yaml")
-    sp.add_argument("--cluster-config", default="configs/clustering/dbscan_paper.yaml")
-    sp.add_argument("--gates-config", default="configs/gates.yaml")
-    sp.add_argument("--run-id", default=None)
-    sp.add_argument("--device", default="auto")
-    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
-    sp.add_argument("--seeds", nargs="+", type=int, default=None)
-    sp.add_argument("--use-stub-embeddings", action="store_true")
-    sp.add_argument("--force", action="store_true")
-    sp.add_argument("--baseline-run-id", default=None)
-    sp.add_argument("--score-batch-size", type=int, default=8192)
-
-    sp.add_argument("--prefer-precomputed-ads", dest="prefer_precomputed_ads", action="store_true")
-    sp.add_argument("--no-prefer-precomputed-ads", dest="prefer_precomputed_ads", action="store_false")
-    sp.set_defaults(prefer_precomputed_ads=True)
-
-    sp.add_argument("--progress", dest="progress", action="store_true")
-    sp.add_argument("--no-progress", dest="progress", action="store_false")
-    sp.set_defaults(progress=True)
-
-    sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
-    sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
-    sp.set_defaults(quiet_libs=True)
-
+    _add_train_stage_args(sp, include_deprecated_ads_flag=True)
     sp.set_defaults(func=cmd_run_stage)
 
     sp = sub.add_parser("run-infer-ads")
     sp.add_argument("--dataset-id", required=True)
-    sp.add_argument("--model-run-id", required=True)
+    model_source = sp.add_mutually_exclusive_group(required=True)
+    model_source.add_argument("--model-run-id", default=None)
+    model_source.add_argument("--model-bundle", default=None)
     sp.add_argument("--paths-config", default="configs/paths.local.yaml")
     sp.add_argument("--cluster-config", default="configs/clustering/dbscan_paper.yaml")
+    sp.add_argument("--gates-config", default="configs/gates.yaml")
     sp.add_argument("--run-id", default=None)
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
     sp.add_argument("--score-batch-size", type=int, default=8192)
+    sp.add_argument("--baseline-run-id", default=None)
     sp.add_argument("--force", action="store_true")
-
     sp.add_argument("--progress", dest="progress", action="store_true")
     sp.add_argument("--no-progress", dest="progress", action="store_false")
     sp.set_defaults(progress=True)
-
     sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
     sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
     sp.set_defaults(quiet_libs=True)
-
     sp.set_defaults(func=cmd_run_infer_ads)
+
+    sp = sub.add_parser("export-model-bundle")
+    sp.add_argument("--model-run-id", required=True)
+    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
+    sp.add_argument("--output-dir", default=None)
+    sp.set_defaults(func=cmd_export_model_bundle)
 
     sp = sub.add_parser("prepare-lspo")
     sp.add_argument("--paths-config", default="configs/paths.local.yaml")

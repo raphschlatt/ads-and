@@ -1,129 +1,174 @@
 # Data Contracts
 
-## mentions.parquet
+## Core Tables
 
-Required columns:
+`mentions.parquet` required columns:
 
-- `mention_id` (str)
-- `bibcode` (str)
-- `author_idx` (int)
-- `author_raw` (str)
-- `title` (str)
-- `abstract` (str)
-- `year` (int or null)
-- `source_type` (str)
-- `block_key` (str)
+- `mention_id`
+- `bibcode`
+- `author_idx`
+- `author_raw`
+- `title`
+- `abstract`
+- `year`
+- `source_type`
+- `block_key`
 
-Optional columns:
+optional:
 
-- `orcid` (str, LSPO)
-- `aff` (str)
+- `orcid` (LSPO)
+- `aff`
 
-## pairs_*.parquet
+`pairs_*.parquet`:
 
-- `pair_id` (str)
-- `mention_id_1` (str)
-- `mention_id_2` (str)
-- `block_key` (str)
-- `split` (str)
-- `label` (int, LSPO only)
+- `pair_id`
+- `mention_id_1`
+- `mention_id_2`
+- `block_key`
+- `split`
+- `label` (LSPO-labeled pairs)
 
-## pair_scores.parquet
+`pair_scores.parquet`:
 
-- `pair_id` (str)
-- `mention_id_1` (str)
-- `mention_id_2` (str)
-- `block_key` (str)
-- `cosine_sim` (float)
-- `distance` (float)
+- `pair_id`
+- `mention_id_1`
+- `mention_id_2`
+- `block_key`
+- `cosine_sim`
+- `distance`
 
-## clusters.parquet
+`clusters.parquet`:
 
-- `mention_id` (str)
-- `block_key` (str)
-- `author_uid` (str)
+- `mention_id`
+- `block_key`
+- `author_uid`
 
-## publication_authors.parquet
+`publication_authors.parquet`:
 
-- `bibcode` (str)
-- `author_idx` (int)
-- `mention_id` (str)
-- `author_uid` (str)
-- `source_type` (str)
+- `bibcode`
+- `author_idx`
+- `mention_id`
+- `author_uid`
+- `source_type`
 
-## train_manifest.json (03)
+## Train Artifacts (`run-train-stage`)
 
-- `best_checkpoint` (str)
-- `best_threshold` (float)
-- `best_val_f1` (float)
-- `best_test_f1` (float, canonical final pairwise metric)
-- `best_test_metrics` (dict: `f1`, `precision`, `recall`, `accuracy`)
-- `best_val_class_counts` (dict: `pos`, `neg`)
-- `best_test_class_counts` (dict: `pos`, `neg`)
-- `precision_mode` (`fp32` or `amp_bf16`; canonical paper runs should use `fp32`)
+`00_context.json`:
 
-## stage_metrics.json (05)
+- `pipeline_scope: train` (required)
+- run/config/device metadata
 
-- `lspo_pairwise_f1` (float, canonical test-F1)
-- `lspo_pairwise_f1_val` (float, validation F1 for diagnostics)
-- `lspo_pairwise_f1_source` (`best_test_f1` or legacy fallback source)
-- `threshold` (float)
-- `threshold_selection_status` (str)
-- `split_balance_status` (str; e.g., `ok`, `split_balance_degraded`, `split_balance_infeasible`)
-- `pair_score_range_ok` (bool)
-- `singleton_ratio` (float)
-- `split_high_sim_rate` (float)
-- `split_high_sim_rate_probe` (float)
-- `merged_low_conf_rate` (float)
-- `merged_low_conf_rate_probe` (float)
-- `eps_boundary_hit` (bool or null)
-- `eps_boundary_side` (`min`/`max` or null)
-- `eps_n_valid_candidates` (int or null)
-- `eps_f1_gap_best_second` (float or null)
-- `eps_diag_ran` (bool or null)
-- `eps_range_limited` (bool or null)
-- `eps_diag_delta_f1` (float or null; diagnostic best minus canonical best)
-- `precision_mode` (`fp32` or `amp_bf16`)
-- `counts.ads_clusters` (int; canonical unique `author_uid`)
-- `counts.ads_cluster_assignments` (int; legacy count of mention->UID rows)
-- `counts.ads_blocks` (int)
+`03_train_manifest.json`:
 
-## cluster_qc.json (04)
+- `best_checkpoint`
+- `best_threshold`
+- `best_val_f1`
+- `best_test_f1` (canonical final train metric)
+- `best_test_metrics`
+- `best_val_class_counts`
+- `best_test_class_counts`
+- `precision_mode`
 
-- `cluster_count` (int)
-- `singleton_ratio` (float)
-- `n_pairs_evaluated` (int)
-- `split_high_sim_count` / `split_high_sim_rate` (threshold-based)
-- `merged_low_conf_count` / `merged_low_conf_rate` (threshold-based)
-- `probe_threshold` (float; fixed comparability threshold, default `0.35`)
-- `split_high_sim_count_probe` / `split_high_sim_rate_probe` (probe-threshold based)
-- `merged_low_conf_count_probe` / `merged_low_conf_rate_probe` (probe-threshold based)
+`04_clustering_config_used.json`:
 
-## go_no_go.json (05)
+- `eps_resolution` (canonical + diagnostic sweep metadata)
+- `cluster_config_used`
 
-- `go` (bool)
-- `checks` (list with `name`, `passed`, `detail`, `severity`)
-- `blockers` (list[str]; failed blocker checks)
-- `warnings` (list[str]; failed warning checks)
+`05_stage_metrics_<stage>.json`:
 
-## infer_ads run artifacts
+- `metric_scope: train` (required)
+- `lspo_pairwise_f1` (test-based canonical)
+- `lspo_pairwise_f1_val`
+- split feasibility and negative coverage fields
+- eps diagnostics
+- train counts
 
-For `python3 -m src.cli run-infer-ads`:
+`05_go_no_go_<stage>.json`:
 
-- `01_input_summary.json` (dataset paths, dataset fingerprint, mention/block counts)
-- `03_pairs_qc.json` (pair build diagnostics for ADS-only inference)
-- `05_stage_metrics_infer_ads.json` / `05_go_no_go_infer_ads.json`
+- `go`
+- `checks` (`name`, `passed`, `detail`, `severity`)
+- `blockers`
+- `warnings`
 
-Cluster outputs:
+optional compare:
+
+- `99_compare_train_to_baseline.json`
+
+## Infer Artifacts (`run-infer-ads`)
+
+`00_context.json`:
+
+- `pipeline_scope: infer` (required)
+- `dataset_id`
+- model source (`model_run_id` or `model_bundle_dir`)
+- resolved checkpoint/threshold/eps/precision
+
+`01_input_summary.json`:
+
+- dataset paths/fingerprint
+- mention and block counts
+
+`03_pairs_qc.json`:
+
+- ADS pair build diagnostics
+
+`04_cluster_qc.json`:
+
+- `cluster_count`
+- `singleton_ratio`
+- `n_pairs_evaluated`
+- threshold-based and probe-threshold-based split/merge rates
+- pair-score range stats
+
+`05_stage_metrics_infer_ads.json`:
+
+- `metric_scope: infer` (required)
+- coverage/UID checks
+- cluster quality rates
+- eps diagnostics
+- infer counts (`ads_mentions`, unique `ads_clusters`, assignment count, `ads_blocks`)
+
+`05_go_no_go_infer_ads.json`:
+
+- same schema as train go/no-go
+
+optional compare:
+
+- `99_compare_infer_to_baseline.json`
+
+cluster exports:
 
 - `artifacts/clusters/<run_id>/ads_clusters_infer_ads.parquet`
 - `artifacts/clusters/<run_id>/publication_authors_infer_ads.parquet`
 
-## cache_refs.json (00)
+## Model Bundle Contract (v1)
 
-- `artifact_type` (str)
-- `artifact_id` (str)
-- `shared_path` (str)
-- `run_path` (str)
+Bundle layout:
+
+- `bundle_manifest.json`
+- `checkpoint.pt`
+- `model_config.yaml`
+- `clustering_resolved.json`
+
+Manifest required keys:
+
+- `bundle_schema_version` (`v1`)
+- `source_model_run_id`
+- `created_utc`
+- `checkpoint_hash`
+- `selected_eps`
+- `best_threshold`
+- `precision_mode`
+
+`run-infer-ads --model-bundle <dir>` consumes this bundle directly.
+
+## Cache Reference Contract
+
+`00_cache_refs.json` rows:
+
+- `artifact_type`
+- `artifact_id`
+- `shared_path`
+- `run_path`
 - `materialization_mode` (`hardlink`/`symlink`/`copy`/`existing`)
-- `cache_schema_version` (optional str; for pair-score cache migration, e.g. `v1`/`v2`)
+- optional `cache_schema_version` (e.g., pair-score cache `v1`/`v2`)

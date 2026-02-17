@@ -85,8 +85,19 @@ def _normalize_severity(value: Any, default: str = "blocker") -> str:
 def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> Dict:
     gates = gate_config or _default_gate_config()
     stage = str(stage_metrics.get("stage", "smoke"))
-    stage_gates = dict(gates.get("stages", {}).get(stage, {}))
-    defaults = dict(gates.get("defaults", {}))
+    metric_scope = str(stage_metrics.get("metric_scope", "") or "").strip().lower()
+    is_train_scope = metric_scope == "train"
+    is_infer_scope = metric_scope == "infer" or stage == "infer_ads"
+    scope_key = "infer" if is_infer_scope else "train" if is_train_scope else ""
+    scoped = gates.get(scope_key) if scope_key else None
+    if isinstance(scoped, dict):
+        defaults = dict(gates.get("defaults", {}))
+        defaults.update(dict(scoped.get("defaults", {})))
+        stage_gates = dict(gates.get("stages", {}).get(stage, {}))
+        stage_gates.update(dict(scoped.get("stages", {}).get(stage, {})))
+    else:
+        stage_gates = dict(gates.get("stages", {}).get(stage, {}))
+        defaults = dict(gates.get("defaults", {}))
 
     f1_min = float(stage_gates.get("f1_min", 0.70))
     min_neg_val = int(stage_gates.get("min_neg_val", 0))
@@ -167,18 +178,22 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         "Run ID consistent across stage artifacts" if stage_metrics.get("run_id_consistent") else "Run ID mismatch",
     )
 
-    mention_coverage = stage_metrics.get("mention_coverage")
-    add_check(
-        "mention_coverage",
-        mention_coverage is not None and float(mention_coverage) >= coverage_min,
-        f"Observed coverage={mention_coverage}, required>={coverage_min}",
-    )
-    uid_uniqueness_max_observed = stage_metrics.get("uid_uniqueness_max")
-    add_check(
-        "uid_uniqueness_max",
-        uid_uniqueness_max_observed is not None and int(uid_uniqueness_max_observed) <= uid_uniqueness_max,
-        f"Observed max={uid_uniqueness_max_observed}, required<={uid_uniqueness_max}",
-    )
+    if is_train_scope:
+        add_check("mention_coverage", True, "not applicable for train scope")
+        add_check("uid_uniqueness_max", True, "not applicable for train scope")
+    else:
+        mention_coverage = stage_metrics.get("mention_coverage")
+        add_check(
+            "mention_coverage",
+            mention_coverage is not None and float(mention_coverage) >= coverage_min,
+            f"Observed coverage={mention_coverage}, required>={coverage_min}",
+        )
+        uid_uniqueness_max_observed = stage_metrics.get("uid_uniqueness_max")
+        add_check(
+            "uid_uniqueness_max",
+            uid_uniqueness_max_observed is not None and int(uid_uniqueness_max_observed) <= uid_uniqueness_max,
+            f"Observed max={uid_uniqueness_max_observed}, required<={uid_uniqueness_max}",
+        )
 
     val_counts = stage_metrics.get("val_class_counts", {}) or {}
     test_counts = stage_metrics.get("test_class_counts", {}) or {}
@@ -217,7 +232,9 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     )
 
     split_status = str(stage_metrics.get("split_balance_status", "") or "").strip().lower()
-    if split_status in {"", "unknown"}:
+    if is_infer_scope:
+        add_check("split_balance_status", True, "not applicable for infer scope")
+    elif split_status in {"", "unknown"}:
         add_check("split_balance_status", True, "status unavailable (legacy or missing split metadata)")
     elif split_status == "split_balance_infeasible":
         add_check(
@@ -238,7 +255,9 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
 
     max_possible_neg_total = stage_metrics.get("max_possible_neg_total")
     required_neg_total = stage_metrics.get("required_neg_total")
-    if max_possible_neg_total is None or required_neg_total is None:
+    if is_infer_scope:
+        add_check("split_neg_feasible", True, "not applicable for infer scope")
+    elif max_possible_neg_total is None or required_neg_total is None:
         add_check("split_neg_feasible", True, "not available")
     else:
         max_possible_neg_total = int(max_possible_neg_total)

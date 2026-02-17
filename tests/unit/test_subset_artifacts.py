@@ -5,6 +5,8 @@ import pandas as pd
 from src.common.cache_ops import resolve_shared_cache_root
 from src.common.io_schema import save_parquet
 from src.common.subset_artifacts import (
+    compute_ads_source_fp,
+    compute_lspo_source_fp,
     compute_source_fp,
     compute_subset_identity,
     load_subset_mentions,
@@ -43,6 +45,23 @@ def test_source_fingerprint_is_deterministic_and_input_sensitive(tmp_path: Path)
     save_parquet(pd.concat([_mention_df("ads"), _mention_df("ads2")], ignore_index=True), ads, index=False)
     fp3 = compute_source_fp(lspo, ads)
     assert fp3 != fp1
+
+
+def test_lspo_ads_source_fingerprints_are_separate(tmp_path: Path):
+    lspo = tmp_path / "lspo.parquet"
+    ads = tmp_path / "ads.parquet"
+    save_parquet(_mention_df("lspo"), lspo, index=False)
+    save_parquet(_mention_df("ads"), ads, index=False)
+
+    lspo_fp_1 = compute_lspo_source_fp(lspo)
+    ads_fp_1 = compute_ads_source_fp(ads)
+    assert lspo_fp_1 != ads_fp_1
+
+    save_parquet(pd.concat([_mention_df("lspo"), _mention_df("lspo2")], ignore_index=True), lspo, index=False)
+    lspo_fp_2 = compute_lspo_source_fp(lspo)
+    ads_fp_2 = compute_ads_source_fp(ads)
+    assert lspo_fp_2 != lspo_fp_1
+    assert ads_fp_2 == ads_fp_1
 
 
 def test_subset_identity_changes_when_sampling_config_changes():

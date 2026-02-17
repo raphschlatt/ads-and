@@ -39,6 +39,7 @@ def _make_configs(tmp_path: Path) -> dict[str, Path]:
             "pair_scores_dir": str(tmp_path / "artifacts/pair_scores"),
             "clusters_dir": str(tmp_path / "artifacts/clusters"),
             "metrics_dir": str(tmp_path / "artifacts/metrics"),
+            "models_dir": str(tmp_path / "artifacts/models"),
         },
     }
     cluster_cfg = {
@@ -191,23 +192,32 @@ def _apply_fast_mocks(monkeypatch) -> None:
     monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
 
 
-def _run_infer_ads(parser: argparse.ArgumentParser, cfg: dict[str, Path], dataset_id: str, model_run_id: str, run_id: str) -> None:
-    args = parser.parse_args(
-        [
-            "run-infer-ads",
-            "--dataset-id",
-            dataset_id,
-            "--model-run-id",
-            model_run_id,
-            "--paths-config",
-            str(cfg["paths"]),
-            "--cluster-config",
-            str(cfg["cluster"]),
-            "--run-id",
-            run_id,
-            "--no-progress",
-        ]
-    )
+def _run_infer_ads(
+    parser: argparse.ArgumentParser,
+    cfg: dict[str, Path],
+    dataset_id: str,
+    run_id: str,
+    *,
+    model_run_id: str | None = None,
+    model_bundle: str | None = None,
+) -> None:
+    argv = [
+        "run-infer-ads",
+        "--dataset-id",
+        dataset_id,
+        "--paths-config",
+        str(cfg["paths"]),
+        "--cluster-config",
+        str(cfg["cluster"]),
+        "--run-id",
+        run_id,
+        "--no-progress",
+    ]
+    if model_run_id is not None:
+        argv.extend(["--model-run-id", model_run_id])
+    if model_bundle is not None:
+        argv.extend(["--model-bundle", model_bundle])
+    args = parser.parse_args(argv)
     args.func(args)
 
 
@@ -241,12 +251,15 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     assert context["dataset_id"] == dataset_id
     assert context["model_run_id"] == model_run_id
     assert context["selected_eps"] == 0.42
+    assert context["pipeline_scope"] == "infer"
+    assert context["model_source_type"] == "run_id"
 
     summary = json.loads((metrics_dir / "01_input_summary.json").read_text(encoding="utf-8"))
     assert summary["references_present"] is False
 
     stage_metrics = json.loads((metrics_dir / "05_stage_metrics_infer_ads.json").read_text(encoding="utf-8"))
     assert stage_metrics["stage"] == "infer_ads"
+    assert stage_metrics["metric_scope"] == "infer"
     assert stage_metrics["counts"]["ads_mentions"] > 0
 
     cluster_path = tmp_path / "artifacts" / "clusters" / run_id / "ads_clusters_infer_ads.parquet"
@@ -281,3 +294,42 @@ def test_cli_run_infer_ads_resume_reuses_artifacts(monkeypatch, tmp_path: Path):
 
     _run_infer_ads(parser, cfg, dataset_id=dataset_id, model_run_id=model_run_id, run_id=run_id)
     assert (cfg["metrics_dir"] / run_id / "05_go_no_go_infer_ads.json").exists()
+
+
+def test_cli_run_infer_ads_supports_model_bundle(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    export_args = parser.parse_args(
+        [
+            "export-model-bundle",
+            "--model-run-id",
+            model_run_id,
+            "--paths-config",
+            str(cfg["paths"]),
+        ]
+    )
+    export_args.func(export_args)
+
+    bundle_manifest = tmp_path / "artifacts" / "models" / model_run_id / "bundle_v1" / "bundle_manifest.json"
+    assert bundle_manifest.exists()
+
+    run_id = "infer_ads_bundle"
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        run_id=run_id,
+        model_bundle=str(bundle_manifest.parent),
+    )
+
+    metrics_dir = cfg["metrics_dir"] / run_id
+    context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
+    assert context["model_source_type"] == "bundle"
+    assert context["model_bundle_dir"] == str(bundle_manifest.parent.resolve())
+    assert context["selected_eps"] == 0.42

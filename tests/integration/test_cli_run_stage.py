@@ -40,25 +40,6 @@ def _toy_lspo_mentions() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _toy_ads_mentions() -> pd.DataFrame:
-    rows = []
-    for i in range(8):
-        rows.append(
-            {
-                "mention_id": f"ads{i}::0",
-                "bibcode": f"ab{i}",
-                "author_idx": 0,
-                "author_raw": f"Doe {i}",
-                "title": f"title {i}",
-                "abstract": f"abstract {i}",
-                "year": 2000 + i,
-                "source_type": "ads",
-                "block_key": f"d.blk{i // 2}",
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def _make_configs(
     tmp_path: Path,
     split_balance: dict[str, int] | None = None,
@@ -84,6 +65,7 @@ def _make_configs(
             "pair_scores_dir": str(tmp_path / "artifacts/pair_scores"),
             "clusters_dir": str(tmp_path / "artifacts/clusters"),
             "metrics_dir": str(tmp_path / "artifacts/metrics"),
+            "models_dir": str(tmp_path / "artifacts/models"),
         },
     }
     run_cfg = {
@@ -160,12 +142,13 @@ def _make_configs(
         "cluster": _write_yaml(cfg_dir / "cluster.yaml", cluster_cfg),
         "gates": _write_yaml(cfg_dir / "gates.yaml", gates_cfg),
         "metrics_dir": Path(paths_cfg["artifacts"]["metrics_dir"]),
+        "clusters_dir": Path(paths_cfg["artifacts"]["clusters_dir"]),
+        "models_dir": Path(paths_cfg["artifacts"]["models_dir"]),
     }
 
 
 def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int | float] | None = None) -> None:
     lspo_df = _toy_lspo_mentions()
-    ads_df = _toy_ads_mentions()
 
     def _prepare_lspo(*, parquet_path=None, h5_path=None, output_path, **_kwargs):
         _ = parquet_path, h5_path
@@ -173,13 +156,6 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int | float] | None
         p.parent.mkdir(parents=True, exist_ok=True)
         lspo_df.to_parquet(p, index=False)
         return lspo_df.copy()
-
-    def _prepare_ads(*, publications_path=None, references_path=None, output_path, **_kwargs):
-        _ = publications_path, references_path
-        p = Path(output_path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        ads_df.to_parquet(p, index=False)
-        return ads_df.copy()
 
     def _chars(mentions, output_path, force_recompute=False, **_kwargs):
         p = Path(output_path)
@@ -295,6 +271,8 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int | float] | None
             "best_val_class_counts": {"pos": 8, "neg": 3},
             "best_test_class_counts": {"pos": 7, "neg": 2},
             "best_val_f1": 0.90,
+            "best_test_f1": 0.89,
+            "precision_mode": "fp32",
             "runs": [],
         }
         if metrics_output is not None:
@@ -319,18 +297,7 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int | float] | None
             out.to_parquet(output_path, index=False)
         return out
 
-    def _export(mentions, clusters, output_path):
-        out = mentions[["bibcode", "mention_id"]].merge(
-            clusters[["mention_id", "author_uid"]],
-            on="mention_id",
-            how="left",
-        )
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        out.to_parquet(output_path, index=False)
-        return out
-
     monkeypatch.setattr(cli, "prepare_lspo_mentions", _prepare_lspo)
-    monkeypatch.setattr(cli, "prepare_ads_mentions", _prepare_ads)
     monkeypatch.setattr(cli, "get_or_create_chars2vec_embeddings", _chars)
     monkeypatch.setattr(cli, "get_or_create_specter_embeddings", _text)
     monkeypatch.setattr(cli, "assign_lspo_splits", _assign)
@@ -338,12 +305,18 @@ def _apply_fast_mocks(monkeypatch, captured_split: dict[str, int | float] | None
     monkeypatch.setattr(cli, "train_nand_across_seeds", _train)
     monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _score)
     monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
-    monkeypatch.setattr(cli, "build_publication_author_mapping", _export)
 
 
-def _run_stage(parser: argparse.ArgumentParser, cfg: dict[str, Path], run_id: str, extra: list[str] | None = None) -> None:
+def _run_train_stage(
+    parser: argparse.ArgumentParser,
+    cfg: dict[str, Path],
+    run_id: str,
+    extra: list[str] | None = None,
+    *,
+    command: str = "run-train-stage",
+) -> None:
     argv = [
-        "run-stage",
+        command,
         "--run-stage",
         "smoke",
         "--paths-config",
@@ -366,13 +339,13 @@ def _run_stage(parser: argparse.ArgumentParser, cfg: dict[str, Path], run_id: st
     args.func(args)
 
 
-def test_cli_run_stage_smoke_stub(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_smoke_stub(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
-    run_id = "smoke_test_cli_run"
-    _run_stage(parser, cfg, run_id)
+    run_id = "smoke_test_cli_train_run"
+    _run_train_stage(parser, cfg, run_id)
 
     metrics_dir = cfg["metrics_dir"] / run_id
     assert (metrics_dir / "00_context.json").exists()
@@ -380,67 +353,70 @@ def test_cli_run_stage_smoke_stub(monkeypatch, tmp_path: Path):
     assert (metrics_dir / "02_split_balance.json").exists()
     assert (metrics_dir / "02_pairs_qc.json").exists()
     assert (metrics_dir / "03_train_manifest.json").exists()
-    assert (metrics_dir / "04_cluster_qc.json").exists()
+    assert (metrics_dir / "04_clustering_config_used.json").exists()
     assert (metrics_dir / "05_stage_metrics_smoke.json").exists()
     assert (metrics_dir / "05_go_no_go_smoke.json").exists()
+    assert (metrics_dir / "00_cache_refs.json").exists()
+    assert (cfg["models_dir"] / run_id / "bundle_v1" / "bundle_manifest.json").exists()
+
     context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
     assert context["precision_mode"] == "fp32"
+    assert context["pipeline_scope"] == "train"
     stage_metrics = json.loads((metrics_dir / "05_stage_metrics_smoke.json").read_text(encoding="utf-8"))
-    assert "ads_cluster_assignments" in stage_metrics["counts"]
-    assert "ads_blocks" in stage_metrics["counts"]
-    assert "split_balance_status" in stage_metrics
-    assert "eps_diag_ran" in stage_metrics
-    assert "eps_range_limited" in stage_metrics
-    assert "eps_diag_delta_f1" in stage_metrics
+    assert stage_metrics["metric_scope"] == "train"
+    assert stage_metrics["counts"]["ads_mentions"] == 0
+    assert stage_metrics["counts"]["ads_clusters"] == 0
+    assert stage_metrics["split_balance_status"] == "ok"
     go_payload = json.loads((metrics_dir / "05_go_no_go_smoke.json").read_text(encoding="utf-8"))
     assert "warnings" in go_payload
 
+    assert not (cfg["clusters_dir"] / run_id / "ads_clusters_smoke.parquet").exists()
 
-def test_cli_run_stage_resume_behavior(monkeypatch, tmp_path: Path):
+
+def test_cli_run_stage_alias_maps_to_train_only(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    parser = cli.build_parser()
+    run_id = "smoke_test_run_stage_alias"
+    _run_train_stage(parser, cfg, run_id, command="run-stage")
+    metrics_dir = cfg["metrics_dir"] / run_id
+    context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
+    assert context["pipeline_scope"] == "train"
+    assert (metrics_dir / "05_stage_metrics_smoke.json").exists()
+
+
+def test_cli_run_train_stage_resume_behavior(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
     run_id = "smoke_test_resume"
-    _run_stage(parser, cfg, run_id)
+    _run_train_stage(parser, cfg, run_id)
 
     def _should_not_run(*_args, **_kwargs):
         raise AssertionError("This function should not run during resume.")
 
     monkeypatch.setattr(cli, "prepare_lspo_mentions", _should_not_run)
-    monkeypatch.setattr(cli, "prepare_ads_mentions", _should_not_run)
     monkeypatch.setattr(cli, "build_stage_subset", _should_not_run)
     monkeypatch.setattr(cli, "train_nand_across_seeds", _should_not_run)
     monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _should_not_run)
     monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _should_not_run)
 
-    _run_stage(parser, cfg, run_id)
+    _run_train_stage(parser, cfg, run_id)
     assert (cfg["metrics_dir"] / run_id / "05_go_no_go_smoke.json").exists()
 
 
-def test_cli_run_stage_reuses_pair_scores_v2_across_run_ids(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_has_no_pair_score_cache_refs(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
     parser = cli.build_parser()
-
-    run_1 = "smoke_test_pair_scores_v2_a"
-    run_2 = "smoke_test_pair_scores_v2_b"
-    _run_stage(parser, cfg, run_1, extra=["--force"])
-    _run_stage(parser, cfg, run_2)
-
-    refs_1 = json.loads((cfg["metrics_dir"] / run_1 / "00_cache_refs.json").read_text(encoding="utf-8"))
-    refs_2 = json.loads((cfg["metrics_dir"] / run_2 / "00_cache_refs.json").read_text(encoding="utf-8"))
-    pair_ref_1 = next(r for r in refs_1["cache_refs"] if r.get("artifact_type") == "pair_scores")
-    pair_ref_2 = next(r for r in refs_2["cache_refs"] if r.get("artifact_type") == "pair_scores")
-
-    assert "ads_pair_scores_v2_" in str(pair_ref_1["shared_path"])
-    assert "ads_pair_scores_v2_" in str(pair_ref_2["shared_path"])
-    assert pair_ref_1.get("cache_schema_version") == "v2"
-    assert pair_ref_2.get("cache_schema_version") == "v2"
-    assert str(pair_ref_1["shared_path"]) == str(pair_ref_2["shared_path"])
+    run_id = "smoke_test_train_no_pair_scores"
+    _run_train_stage(parser, cfg, run_id, extra=["--force"])
+    refs = json.loads((cfg["metrics_dir"] / run_id / "00_cache_refs.json").read_text(encoding="utf-8"))
+    assert all(r.get("artifact_type") != "pair_scores" for r in refs["cache_refs"])
 
 
-def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path: Path):
     split_cfg = {"min_neg_val": 7, "min_neg_test": 9, "max_attempts": 13}
     split_assignment = {"train_ratio": 0.55, "val_ratio": 0.25}
     cfg = _make_configs(tmp_path, split_balance=split_cfg, split_assignment=split_assignment)
@@ -448,7 +424,7 @@ def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path:
     _apply_fast_mocks(monkeypatch, captured_split=captured)
 
     parser = cli.build_parser()
-    _run_stage(parser, cfg, "smoke_test_split_cfg", extra=["--force"])
+    _run_train_stage(parser, cfg, "smoke_test_split_cfg", extra=["--force"])
 
     assert captured["min_neg_val"] == 7
     assert captured["min_neg_test"] == 9
@@ -457,7 +433,7 @@ def test_cli_run_stage_uses_split_balance_from_run_config(monkeypatch, tmp_path:
     assert captured["val_ratio"] == 0.25
 
 
-def test_cli_run_stage_uses_train_seeds_from_run_config(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_uses_train_seeds_from_run_config(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path, train_seeds=[6, 7])
     _apply_fast_mocks(monkeypatch)
     captured: dict[str, list[int]] = {}
@@ -468,20 +444,36 @@ def test_cli_run_stage_uses_train_seeds_from_run_config(monkeypatch, tmp_path: P
         return base_train(*args, **kwargs)
 
     monkeypatch.setattr(cli, "train_nand_across_seeds", _capture_train)
-
     parser = cli.build_parser()
-    _run_stage(parser, cfg, "smoke_test_train_seeds", extra=["--force"])
+    _run_train_stage(parser, cfg, "smoke_test_train_seeds", extra=["--force"])
 
     assert captured["seeds"] == [6, 7]
 
 
-def test_cli_run_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path, train_seeds=[6, 7])
+    _apply_fast_mocks(monkeypatch)
+    captured: dict[str, list[int]] = {}
+    base_train = cli.train_nand_across_seeds
+
+    def _capture_train(*args, **kwargs):
+        captured["seeds"] = [int(s) for s in kwargs["seeds"]]
+        return base_train(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "train_nand_across_seeds", _capture_train)
+    parser = cli.build_parser()
+    _run_train_stage(parser, cfg, "smoke_test_train_seeds_override", extra=["--force", "--seeds", "2", "4"])
+
+    assert captured["seeds"] == [2, 4]
+
+
+def test_cli_run_train_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
     run_id = "smoke_test_eps_sweep"
-    _run_stage(parser, cfg, run_id, extra=["--force"])
+    _run_train_stage(parser, cfg, run_id, extra=["--force"])
 
     meta_path = cfg["metrics_dir"] / run_id / "04_clustering_config_used.json"
     payload = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -506,7 +498,7 @@ def test_cli_run_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path: Path
         assert 0.2 <= float(payload["cluster_config_used"]["eps"]) <= 0.5
 
 
-def test_cli_run_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
     state: dict[str, float] = {}
@@ -527,9 +519,6 @@ def test_cli_run_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path)
             "n_pairs": int(len(_pairs)),
         }
 
-    monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster_capture_eps)
-    monkeypatch.setattr(cli, "_cluster_pairwise_metrics", _metrics_force_edge)
-
     def _assign_all_val(mentions, return_meta=False, **_kwargs):
         out = mentions.copy()
         out["split"] = "val"
@@ -548,11 +537,13 @@ def test_cli_run_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path)
         }
         return (out, meta) if return_meta else out
 
+    monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster_capture_eps)
+    monkeypatch.setattr(cli, "_cluster_pairwise_metrics", _metrics_force_edge)
     monkeypatch.setattr(cli, "assign_lspo_splits", _assign_all_val)
 
     parser = cli.build_parser()
     run_id = "smoke_test_eps_boundary"
-    _run_stage(parser, cfg, run_id, extra=["--force"])
+    _run_train_stage(parser, cfg, run_id, extra=["--force"])
 
     meta_path = cfg["metrics_dir"] / run_id / "04_clustering_config_used.json"
     payload = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -570,45 +561,24 @@ def test_cli_run_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path)
     assert eps_meta["range_limited"] is True
 
 
-def test_cli_run_stage_cli_seeds_override_run_config(monkeypatch, tmp_path: Path):
-    cfg = _make_configs(tmp_path, train_seeds=[6, 7])
-    _apply_fast_mocks(monkeypatch)
-    captured: dict[str, list[int]] = {}
-    base_train = cli.train_nand_across_seeds
-
-    def _capture_train(*args, **kwargs):
-        captured["seeds"] = [int(s) for s in kwargs["seeds"]]
-        return base_train(*args, **kwargs)
-
-    monkeypatch.setattr(cli, "train_nand_across_seeds", _capture_train)
-
-    parser = cli.build_parser()
-    _run_stage(parser, cfg, "smoke_test_train_seeds_override", extra=["--force", "--seeds", "2", "4"])
-
-    assert captured["seeds"] == [2, 4]
-
-
-def test_cli_run_stage_rebuilds_invalid_shared_subset_cache(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_rebuilds_invalid_shared_subset_cache(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
     parser = cli.build_parser()
 
     prime_run = "smoke_test_cache_prime"
-    _run_stage(parser, cfg, prime_run, extra=["--force"])
+    _run_train_stage(parser, cfg, prime_run, extra=["--force"])
     prime_summary = json.loads((cfg["metrics_dir"] / prime_run / "01_subset_summary.json").read_text(encoding="utf-8"))
     subset_tag = prime_summary["subset_tag"]
 
     shared_subsets_dir = tmp_path / "data/cache/_shared/subsets"
     lspo_shared = shared_subsets_dir / f"lspo_mentions_{subset_tag}.parquet"
-    ads_shared = shared_subsets_dir / f"ads_mentions_{subset_tag}.parquet"
     assert lspo_shared.exists()
-    assert ads_shared.exists()
 
-    # Corrupt cache shape to force validator rebuild.
     _toy_lspo_mentions().head(1).to_parquet(lspo_shared, index=False)
 
     run_id = "smoke_test_cache_rebuild"
-    _run_stage(parser, cfg, run_id)
+    _run_train_stage(parser, cfg, run_id)
 
     summary = json.loads((cfg["metrics_dir"] / run_id / "01_subset_summary.json").read_text(encoding="utf-8"))
     assert summary["cache_rebuilt"] is True
@@ -616,7 +586,7 @@ def test_cli_run_stage_rebuilds_invalid_shared_subset_cache(monkeypatch, tmp_pat
     assert "expected" in str(summary.get("cache_invalid_reason"))
 
 
-def test_cli_run_stage_aborts_early_on_split_balance_infeasible(monkeypatch, tmp_path: Path):
+def test_cli_run_train_stage_aborts_early_on_split_balance_infeasible(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)
 
@@ -643,7 +613,11 @@ def test_cli_run_stage_aborts_early_on_split_balance_infeasible(monkeypatch, tmp
                 "min_neg_test": int(min_neg_test),
                 "required_neg_total": int(min_neg_val + min_neg_test),
                 "max_possible_neg_total": 1000,
-                "split_label_counts": {"train": {"pos": 10, "neg": 10, "labeled_pairs": 20}, "val": {"pos": 0, "neg": 0, "labeled_pairs": 0}, "test": {"pos": 0, "neg": 0, "labeled_pairs": 0}},
+                "split_label_counts": {
+                    "train": {"pos": 10, "neg": 10, "labeled_pairs": 20},
+                    "val": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                    "test": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                },
             }
         else:
             meta = {
@@ -653,7 +627,11 @@ def test_cli_run_stage_aborts_early_on_split_balance_infeasible(monkeypatch, tmp
                 "min_neg_test": int(min_neg_test),
                 "required_neg_total": int(min_neg_val + min_neg_test),
                 "max_possible_neg_total": 0,
-                "split_label_counts": {"train": {"pos": 10, "neg": 0, "labeled_pairs": 10}, "val": {"pos": 0, "neg": 0, "labeled_pairs": 0}, "test": {"pos": 0, "neg": 0, "labeled_pairs": 0}},
+                "split_label_counts": {
+                    "train": {"pos": 10, "neg": 0, "labeled_pairs": 10},
+                    "val": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                    "test": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                },
             }
         return (out, meta) if return_meta else out
 
@@ -665,4 +643,4 @@ def test_cli_run_stage_aborts_early_on_split_balance_infeasible(monkeypatch, tmp
 
     parser = cli.build_parser()
     with pytest.raises(RuntimeError, match="split_balance_infeasible"):
-        _run_stage(parser, cfg, "smoke_test_infeasible_abort", extra=["--force"])
+        _run_train_stage(parser, cfg, "smoke_test_infeasible_abort", extra=["--force"])

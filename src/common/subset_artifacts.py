@@ -68,7 +68,18 @@ def _normalize_subset_sampling(run_cfg: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def compute_lspo_source_fp(lspo_interim_path: Path) -> str:
+    payload = f"lspo:{_file_stamp(lspo_interim_path)}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def compute_ads_source_fp(ads_interim_path: Path) -> str:
+    payload = f"ads:{_file_stamp(ads_interim_path)}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def compute_source_fp(lspo_interim_path: Path, ads_interim_path: Path) -> str:
+    """Legacy combined source fingerprint (LSPO+ADS)."""
     payload = f"lspo:{_file_stamp(lspo_interim_path)}|ads:{_file_stamp(ads_interim_path)}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 

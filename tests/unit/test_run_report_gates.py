@@ -176,3 +176,41 @@ def test_go_no_go_infer_ads_does_not_require_lspo_f1():
     go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
     assert go["go"] is True
     assert "lspo_pairwise_f1_sanity" not in [c["name"] for c in go["checks"]]
+
+
+def test_go_no_go_train_scope_ignores_infer_only_checks():
+    metrics = _base_metrics()
+    metrics["metric_scope"] = "train"
+    metrics["mention_coverage"] = 0.0
+    metrics["uid_uniqueness_max"] = 99
+    go = evaluate_go_no_go(metrics, gate_config=_gate_cfg())
+    assert go["go"] is True
+    checks = {c["name"]: c for c in go["checks"]}
+    assert checks["mention_coverage"]["passed"] is True
+    assert "not applicable" in checks["mention_coverage"]["detail"]
+    assert checks["uid_uniqueness_max"]["passed"] is True
+    assert "not applicable" in checks["uid_uniqueness_max"]["detail"]
+
+
+def test_go_no_go_infer_scope_ignores_train_only_checks():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["metric_scope"] = "infer"
+    metrics["split_balance_status"] = "split_balance_infeasible"
+    metrics["max_possible_neg_total"] = 0
+    metrics["required_neg_total"] = 100
+    metrics["val_class_counts"] = {"pos": 0, "neg": 0}
+    metrics["test_class_counts"] = {"pos": 0, "neg": 0}
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    checks = {c["name"]: c for c in go["checks"]}
+    assert checks["split_balance_status"]["passed"] is True
+    assert "not applicable" in checks["split_balance_status"]["detail"]
+    assert checks["split_neg_feasible"]["passed"] is True
+    assert "not applicable" in checks["split_neg_feasible"]["detail"]

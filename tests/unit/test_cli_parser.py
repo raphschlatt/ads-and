@@ -3,23 +3,34 @@ import pytest
 from src import cli
 
 
-def test_run_stage_parser_defaults():
+def test_run_train_stage_parser_defaults():
     parser = cli.build_parser()
-    args = parser.parse_args(["run-stage", "--run-stage", "smoke"])
+    args = parser.parse_args(["run-train-stage", "--run-stage", "smoke"])
 
-    assert args.command == "run-stage"
+    assert args.command == "run-train-stage"
     assert args.run_stage == "smoke"
-    assert args.prefer_precomputed_ads is True
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.seeds is None
     assert args.device == "auto"
     assert args.precision_mode is None
     assert args.score_batch_size == 8192
+    assert args.export_model_bundle is True
+    assert args.func is cli.cmd_run_train_stage
+
+
+def test_run_stage_alias_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(["run-stage", "--run-stage", "smoke"])
+
+    assert args.command == "run-stage"
+    assert args.run_stage == "smoke"
+    assert args.prefer_precomputed_ads is True
+    assert args.export_model_bundle is True
     assert args.func is cli.cmd_run_stage
 
 
-def test_run_stage_parser_boolean_overrides():
+def test_run_stage_alias_parser_boolean_overrides():
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -29,6 +40,7 @@ def test_run_stage_parser_boolean_overrides():
             "--no-prefer-precomputed-ads",
             "--no-progress",
             "--verbose-libs",
+            "--no-export-model-bundle",
             "--seeds",
             "3",
             "5",
@@ -39,6 +51,7 @@ def test_run_stage_parser_boolean_overrides():
     assert args.prefer_precomputed_ads is False
     assert args.progress is False
     assert args.quiet_libs is False
+    assert args.export_model_bundle is False
     assert args.seeds == [3, 5]
 
 
@@ -94,7 +107,7 @@ def test_score_parser_precision_default():
     assert args.precision_mode == "fp32"
 
 
-def test_run_infer_ads_parser_defaults():
+def test_run_infer_ads_parser_defaults_with_model_run_id():
     parser = cli.build_parser()
     args = parser.parse_args(
         [
@@ -109,14 +122,31 @@ def test_run_infer_ads_parser_defaults():
     assert args.command == "run-infer-ads"
     assert args.dataset_id == "my_ads_2026"
     assert args.model_run_id == "full_2026abc"
+    assert args.model_bundle is None
     assert args.paths_config == "configs/paths.local.yaml"
     assert args.cluster_config == "configs/clustering/dbscan_paper.yaml"
+    assert args.gates_config == "configs/gates.yaml"
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
     assert args.score_batch_size == 8192
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_infer_ads
+
+
+def test_run_infer_ads_parser_defaults_with_model_bundle():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-ads",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            "/tmp/bundle",
+        ]
+    )
+    assert args.model_run_id is None
+    assert args.model_bundle == "/tmp/bundle"
 
 
 def test_run_infer_ads_parser_boolean_overrides():
@@ -143,7 +173,7 @@ def test_run_infer_ads_parser_boolean_overrides():
     assert args.score_batch_size == 4096
 
 
-def test_run_infer_ads_parser_requires_model_run_id():
+def test_run_infer_ads_parser_requires_exactly_one_model_source():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -153,3 +183,33 @@ def test_run_infer_ads_parser_requires_model_run_id():
                 "my_ads_2026",
             ]
         )
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run-infer-ads",
+                "--dataset-id",
+                "my_ads_2026",
+                "--model-run-id",
+                "full_2026abc",
+                "--model-bundle",
+                "/tmp/bundle",
+            ]
+        )
+
+
+def test_export_model_bundle_parser():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "export-model-bundle",
+            "--model-run-id",
+            "full_2026abc",
+            "--output-dir",
+            "/tmp/out",
+        ]
+    )
+    assert args.command == "export-model-bundle"
+    assert args.model_run_id == "full_2026abc"
+    assert args.output_dir == "/tmp/out"
+    assert args.func is cli.cmd_export_model_bundle

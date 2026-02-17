@@ -137,11 +137,18 @@ def load_notebook_context(
 
 def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_id: str) -> Dict[str, Path]:
     shared_root = resolve_shared_cache_root(data_cfg)
+    if artifacts_cfg.get("models_dir"):
+        models_root = Path(str(artifacts_cfg["models_dir"]))
+    elif artifacts_cfg.get("root"):
+        models_root = Path(str(artifacts_cfg["root"])) / "models"
+    else:
+        models_root = Path(str(artifacts_cfg["metrics_dir"])).parent / "models"
     dirs = {
         "metrics": Path(artifacts_cfg["metrics_dir"]) / run_id,
         "checkpoints": Path(artifacts_cfg["checkpoints_dir"]) / run_id,
         "pair_scores": Path(artifacts_cfg["pair_scores_dir"]) / run_id,
         "clusters": Path(artifacts_cfg["clusters_dir"]) / run_id,
+        "models": models_root / run_id,
         "embeddings": Path(artifacts_cfg["embeddings_dir"]) / run_id,
         "subset_cache": Path(data_cfg["subset_cache_dir"]) / run_id,
         "subset_manifests": Path(data_cfg["subset_manifest_dir"]),

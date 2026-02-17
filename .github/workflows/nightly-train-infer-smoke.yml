@@ -1,0 +1,28 @@
+name: nightly-train-infer-smoke
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  train-infer-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-research.txt
+          pip install pytest
+
+      - name: Run train->bundle->infer contract smoke
+        run: |
+          python -m pytest tests/e2e/test_train_bundle_infer_smoke.py -q
