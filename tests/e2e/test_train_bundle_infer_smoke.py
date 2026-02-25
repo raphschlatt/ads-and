@@ -273,6 +273,12 @@ def _apply_fast_mocks(monkeypatch) -> None:
         if output_path is not None:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             out.to_parquet(output_path, index=False)
+        if bool(_kwargs.get("return_meta")):
+            return out, {
+                "cluster_backend_requested": str(_kwargs.get("backend", "auto")),
+                "cluster_backend_effective": "sklearn_cpu",
+                "cpu_workers_effective": int(_kwargs.get("num_workers", 1)),
+            }
         return out
 
     def _export(mentions, clusters, output_path):

@@ -110,7 +110,15 @@ def test_resolve_infer_run_cfg_normalizes_defaults(tmp_path: Path):
                 "subset_target_mentions": 1234,
                 "seed": "7",
                 "subset_sampling": {"target_mean_block_size": "3.5"},
-                "infer_overrides": {"max_pairs_per_block": "999", "score_batch_size": "4096"},
+                "infer_overrides": {
+                    "max_pairs_per_block": "999",
+                    "score_batch_size": "4096",
+                    "cpu_sharding_mode": "on",
+                    "cpu_workers": "4",
+                    "cpu_min_pairs_per_worker": "2000000",
+                    "cpu_target_ram_fraction": "0.7",
+                    "cluster_backend": "sklearn_cpu",
+                },
             },
             f,
             sort_keys=False,
@@ -124,6 +132,11 @@ def test_resolve_infer_run_cfg_normalizes_defaults(tmp_path: Path):
     assert cfg["subset_sampling"]["target_mean_block_size"] == 3.5
     assert cfg["infer_overrides"]["max_pairs_per_block"] == 999
     assert cfg["infer_overrides"]["score_batch_size"] == 4096
+    assert cfg["infer_overrides"]["cpu_sharding_mode"] == "on"
+    assert cfg["infer_overrides"]["cpu_workers"] == 4
+    assert cfg["infer_overrides"]["cpu_min_pairs_per_worker"] == 2000000
+    assert cfg["infer_overrides"]["cpu_target_ram_fraction"] == 0.7
+    assert cfg["infer_overrides"]["cluster_backend"] == "sklearn_cpu"
 
 
 def test_compute_infer_subset_identity_changes_with_cfg():

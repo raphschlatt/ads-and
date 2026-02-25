@@ -156,7 +156,7 @@ def test_cache_doctor_and_purge_legacy_pair_scores_unused(tmp_path: Path, capsys
 
     legacy_used = pair_scores_dir / "ads_pair_scores_deadbeef.parquet"
     legacy_unused = pair_scores_dir / "ads_pair_scores_unused.parquet"
-    modern_v2 = pair_scores_dir / "ads_pair_scores_v2_abcd1234.parquet"
+    modern_v3 = pair_scores_dir / "ads_pair_scores_v3_abcd1234.parquet"
 
     sample = pd.DataFrame(
         [
@@ -172,7 +172,7 @@ def test_cache_doctor_and_purge_legacy_pair_scores_unused(tmp_path: Path, capsys
     )
     sample.to_parquet(legacy_used, index=False)
     sample.to_parquet(legacy_unused, index=False)
-    sample.to_parquet(modern_v2, index=False)
+    sample.to_parquet(modern_v3, index=False)
 
     refs_path = tmp_path / "artifacts/metrics/smoke_run_2/00_cache_refs.json"
     refs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,4 +212,4 @@ def test_cache_doctor_and_purge_legacy_pair_scores_unused(tmp_path: Path, capsys
     assert purge_payload["purged_count"] == 1
     assert legacy_used.exists()
     assert not legacy_unused.exists()
-    assert modern_v2.exists()
+    assert modern_v3.exists()

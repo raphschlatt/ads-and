@@ -185,6 +185,12 @@ def _apply_fast_mocks(monkeypatch) -> None:
         if output_path is not None:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             out.to_parquet(output_path, index=False)
+        if bool(_kwargs.get("return_meta")):
+            return out, {
+                "cluster_backend_requested": str(_kwargs.get("backend", "auto")),
+                "cluster_backend_effective": "sklearn_cpu",
+                "cpu_workers_effective": int(_kwargs.get("num_workers", 1)),
+            }
         return out
 
     monkeypatch.setattr(cli, "get_or_create_chars2vec_embeddings", _chars)
@@ -262,6 +268,9 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     assert context["model_source_type"] == "run_id"
     assert context["infer_stage"] == "full"
     assert context["score_batch_size"] == 8192
+    assert context["cpu_sharding_mode"] == "auto"
+    assert context["cluster_backend_requested"] == "auto"
+    assert context["cluster_backend_effective"] in {"auto", "sklearn_cpu"}
 
     summary = json.loads((metrics_dir / "01_input_summary.json").read_text(encoding="utf-8"))
     assert summary["references_present"] is False

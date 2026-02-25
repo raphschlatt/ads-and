@@ -30,6 +30,14 @@ from src.common.cache_ops import (
     resolve_shared_cache_root,
     stable_hash,
 )
+from src.common.cpu_runtime import (
+    cap_workers_by_ram,
+    compute_ram_budget_bytes,
+    detect_available_ram_bytes,
+    detect_cpu_limit,
+    normalize_workers_request,
+    resolve_effective_workers,
+)
 from src.common.config import (
     build_run_dirs,
     find_project_root,
@@ -416,6 +424,44 @@ def _resolve_infer_run_cfg(
         overrides["max_pairs_per_block"] = int(overrides["max_pairs_per_block"])
     if "score_batch_size" in overrides and overrides["score_batch_size"] is not None:
         overrides["score_batch_size"] = int(overrides["score_batch_size"])
+    if "cpu_sharding_mode" in overrides:
+        overrides["cpu_sharding_mode"] = str(overrides["cpu_sharding_mode"]).strip().lower()
+    else:
+        overrides["cpu_sharding_mode"] = "auto"
+    if overrides["cpu_sharding_mode"] not in {"auto", "on", "off"}:
+        raise ValueError(
+            f"Invalid infer_overrides.cpu_sharding_mode={overrides['cpu_sharding_mode']!r}; expected auto/on/off."
+        )
+
+    if "cpu_workers" in overrides:
+        normalized_workers = normalize_workers_request(overrides.get("cpu_workers"))
+        overrides["cpu_workers"] = "auto" if normalized_workers is None else int(normalized_workers)
+    else:
+        overrides["cpu_workers"] = "auto"
+
+    if "cpu_min_pairs_per_worker" in overrides:
+        overrides["cpu_min_pairs_per_worker"] = int(overrides["cpu_min_pairs_per_worker"])
+    else:
+        overrides["cpu_min_pairs_per_worker"] = 1_000_000
+    if int(overrides["cpu_min_pairs_per_worker"]) < 1:
+        raise ValueError("infer_overrides.cpu_min_pairs_per_worker must be >= 1.")
+
+    if "cpu_target_ram_fraction" in overrides:
+        overrides["cpu_target_ram_fraction"] = float(overrides["cpu_target_ram_fraction"])
+    else:
+        overrides["cpu_target_ram_fraction"] = 0.6
+    if not (0.0 < float(overrides["cpu_target_ram_fraction"]) <= 1.0):
+        raise ValueError("infer_overrides.cpu_target_ram_fraction must be in (0, 1].")
+
+    if "cluster_backend" in overrides:
+        overrides["cluster_backend"] = str(overrides["cluster_backend"]).strip().lower()
+    else:
+        overrides["cluster_backend"] = "auto"
+    if overrides["cluster_backend"] not in {"auto", "sklearn_cpu", "cuml_gpu"}:
+        raise ValueError(
+            f"Invalid infer_overrides.cluster_backend={overrides['cluster_backend']!r}; "
+            "expected auto/sklearn_cpu/cuml_gpu."
+        )
     cfg["infer_overrides"] = overrides
     return cfg, cfg_source
 
@@ -1401,7 +1447,7 @@ def _collect_legacy_pair_score_records(paths_cfg: dict[str, Any]) -> list[dict[s
     if not shared_pair_scores_dir.exists():
         return out
     for p in sorted(shared_pair_scores_dir.glob("ads_pair_scores_*.parquet")):
-        if p.name.startswith("ads_pair_scores_v2_"):
+        if p.name.startswith("ads_pair_scores_v2_") or p.name.startswith("ads_pair_scores_v3_"):
             continue
         referenced_by = list(shared_refs.get(str(p), []))
         out.append(
@@ -2031,7 +2077,7 @@ def cmd_run_train_stage(args):
         try:
             model_state_hash = hash_checkpoint_model_state(
                 train_manifest["best_checkpoint"],
-                score_pipeline_version="v2",
+                score_pipeline_version="v3",
             )
         except Exception:
             model_state_hash = hash_file(train_manifest["best_checkpoint"])
@@ -2230,6 +2276,49 @@ def cmd_run_infer_ads(args):
         )
         memory_policy = str(getattr(args, "memory_policy", "fail")).strip().lower()
         max_ram_fraction = float(getattr(args, "max_ram_fraction", 0.80))
+        cpu_sharding_mode = str(
+            args.cpu_sharding if getattr(args, "cpu_sharding", None) is not None else infer_overrides.get("cpu_sharding_mode", "auto")
+        ).strip().lower()
+        if cpu_sharding_mode not in {"auto", "on", "off"}:
+            raise ValueError(f"Invalid --cpu-sharding={cpu_sharding_mode!r}; expected auto/on/off.")
+
+        cpu_workers_requested = normalize_workers_request(
+            args.cpu_workers if getattr(args, "cpu_workers", None) is not None else infer_overrides.get("cpu_workers", "auto")
+        )
+        cpu_min_pairs_per_worker = int(
+            args.cpu_min_pairs_per_worker
+            if getattr(args, "cpu_min_pairs_per_worker", None) is not None
+            else infer_overrides.get("cpu_min_pairs_per_worker", 1_000_000)
+        )
+        if cpu_min_pairs_per_worker < 1:
+            raise ValueError("--cpu-min-pairs-per-worker must be >= 1.")
+
+        cpu_target_ram_fraction = float(
+            args.cpu_target_ram_fraction
+            if getattr(args, "cpu_target_ram_fraction", None) is not None
+            else infer_overrides.get("cpu_target_ram_fraction", 0.6)
+        )
+        if not (0.0 < cpu_target_ram_fraction <= 1.0):
+            raise ValueError("--cpu-target-ram-fraction must be in (0, 1].")
+
+        cluster_backend_requested = str(
+            args.cluster_backend
+            if getattr(args, "cluster_backend", None) is not None
+            else infer_overrides.get("cluster_backend", "auto")
+        ).strip().lower()
+        if cluster_backend_requested not in {"auto", "sklearn_cpu", "cuml_gpu"}:
+            raise ValueError(
+                f"Invalid --cluster-backend={cluster_backend_requested!r}; expected auto/sklearn_cpu/cuml_gpu."
+            )
+
+        cpu_limit_info = detect_cpu_limit()
+        available_ram_bytes = detect_available_ram_bytes()
+        cpu_ram_budget_bytes = compute_ram_budget_bytes(
+            target_fraction=cpu_target_ram_fraction,
+            available_ram_bytes=available_ram_bytes,
+        )
+        cpu_workers_effective = int(cpu_limit_info["cpu_limit"]) if cpu_workers_requested is None else int(cpu_workers_requested)
+        cluster_backend_effective = cluster_backend_requested
 
         run_id = args.run_id or _default_run_id("infer_ads")
         stage = "infer_ads"
@@ -2312,39 +2401,47 @@ def cmd_run_infer_ads(args):
         cache_refs_path = metrics_dir / "00_cache_refs.json"
         cache_refs: list[dict[str, Any]] = []
 
-        write_json(
-            {
-                "run_id": run_id,
-                "run_stage": stage,
-                "pipeline_scope": "infer",
-                "infer_stage": infer_stage,
-                "infer_run_config": str(infer_cfg_source),
-                "dataset_id": dataset_info["dataset_id"],
-                "dataset_dir": str(dataset_info["dataset_dir"]),
-                "publications_path": str(dataset_info["publications_path"]),
-                "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
-                "references_present": bool(dataset_info["references_present"]),
-                "dataset_source_fp": dataset_source_fp,
-                "subset_tag": subset_tag,
-                "model_run_id": model_info["model_run_id"],
-                "model_source_type": str(model_info.get("model_source_type", "run_id")),
-                "model_bundle_dir": model_info.get("model_bundle_dir"),
-                "model_train_manifest": str(model_info["train_manifest_path"]),
-                "checkpoint": str(model_info["best_checkpoint"]),
-                "selected_eps": float(model_info["selected_eps"]),
-                "best_threshold": float(model_info["best_threshold"]),
-                "model_config": model_info["model_cfg_path"],
-                "cluster_config": str(cluster_cfg_path),
-                "max_pairs_per_block": max_pairs_per_block,
-                "score_batch_size": int(score_batch_size),
-                "memory_policy": memory_policy,
-                "max_ram_fraction": max_ram_fraction,
-                "device": args.device,
-                "precision_mode": str(args.precision_mode),
-                "quiet_libs": bool(args.quiet_libs),
-            },
-            metrics_dir / "00_context.json",
-        )
+        context_payload = {
+            "run_id": run_id,
+            "run_stage": stage,
+            "pipeline_scope": "infer",
+            "infer_stage": infer_stage,
+            "infer_run_config": str(infer_cfg_source),
+            "dataset_id": dataset_info["dataset_id"],
+            "dataset_dir": str(dataset_info["dataset_dir"]),
+            "publications_path": str(dataset_info["publications_path"]),
+            "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
+            "references_present": bool(dataset_info["references_present"]),
+            "dataset_source_fp": dataset_source_fp,
+            "subset_tag": subset_tag,
+            "model_run_id": model_info["model_run_id"],
+            "model_source_type": str(model_info.get("model_source_type", "run_id")),
+            "model_bundle_dir": model_info.get("model_bundle_dir"),
+            "model_train_manifest": str(model_info["train_manifest_path"]),
+            "checkpoint": str(model_info["best_checkpoint"]),
+            "selected_eps": float(model_info["selected_eps"]),
+            "best_threshold": float(model_info["best_threshold"]),
+            "model_config": model_info["model_cfg_path"],
+            "cluster_config": str(cluster_cfg_path),
+            "max_pairs_per_block": max_pairs_per_block,
+            "score_batch_size": int(score_batch_size),
+            "memory_policy": memory_policy,
+            "max_ram_fraction": max_ram_fraction,
+            "cpu_sharding_mode": cpu_sharding_mode,
+            "cpu_workers_requested": "auto" if cpu_workers_requested is None else int(cpu_workers_requested),
+            "cpu_workers_effective": int(cpu_workers_effective),
+            "cpu_limit_detected": int(cpu_limit_info["cpu_limit"]),
+            "cpu_limit_source": str(cpu_limit_info["cpu_limit_source"]),
+            "cpu_min_pairs_per_worker": int(cpu_min_pairs_per_worker),
+            "cpu_target_ram_fraction": float(cpu_target_ram_fraction),
+            "cluster_backend_requested": cluster_backend_requested,
+            "cluster_backend_effective": cluster_backend_effective,
+            "ram_budget_bytes": None if cpu_ram_budget_bytes is None else int(cpu_ram_budget_bytes),
+            "device": args.device,
+            "precision_mode": str(args.precision_mode),
+            "quiet_libs": bool(args.quiet_libs),
+        }
+        write_json(context_payload, metrics_dir / "00_context.json")
         write_run_consistency(
             run_id=run_id,
             run_stage=stage,
@@ -2534,12 +2631,43 @@ def cmd_run_infer_ads(args):
             score_batch_size=score_batch_size,
             max_ram_fraction=max_ram_fraction,
         )
+        worker_resolution = resolve_effective_workers(
+            total_pairs_est=int(preflight.get("pair_upper_bound", 0)),
+            n_blocks=int(preflight.get("n_blocks", 0)),
+            requested_workers=cpu_workers_requested,
+            cpu_limit=int(cpu_limit_info["cpu_limit"]),
+            min_pairs_per_worker=int(cpu_min_pairs_per_worker),
+        )
+        max_block_n = int(preflight.get("block_max", 0))
+        max_block_pairs = int(max(0, max_block_n * (max_block_n - 1) // 2))
+        if max_pairs_per_block is not None:
+            max_block_pairs = int(min(max_block_pairs, int(max_pairs_per_block)))
+        per_worker_peak_bytes = int(max(max_block_pairs * 160, max_block_n * max_block_n * 4, 1))
+        cpu_workers_effective = cap_workers_by_ram(
+            workers=int(worker_resolution["effective"]),
+            ram_budget_bytes=cpu_ram_budget_bytes,
+            per_worker_bytes=per_worker_peak_bytes,
+        )
+
         preflight["run_id"] = run_id
         preflight["run_stage"] = stage
         preflight["pipeline_scope"] = "infer"
         preflight["infer_stage"] = infer_stage
         preflight["subset_tag"] = subset_tag
+        preflight["cpu_sharding_mode"] = cpu_sharding_mode
+        preflight["cpu_workers_requested"] = "auto" if cpu_workers_requested is None else int(cpu_workers_requested)
+        preflight["cpu_workers_effective"] = int(cpu_workers_effective)
+        preflight["cpu_limit_detected"] = int(cpu_limit_info["cpu_limit"])
+        preflight["cpu_limit_source"] = str(cpu_limit_info["cpu_limit_source"])
+        preflight["cpu_min_pairs_per_worker"] = int(cpu_min_pairs_per_worker)
+        preflight["cpu_target_ram_fraction"] = float(cpu_target_ram_fraction)
+        preflight["cluster_backend_requested"] = cluster_backend_requested
+        preflight["cluster_backend_effective"] = cluster_backend_effective
+        preflight["cpu_ram_budget_bytes"] = None if cpu_ram_budget_bytes is None else int(cpu_ram_budget_bytes)
         write_json(preflight, preflight_path)
+        context_payload["cpu_workers_effective"] = int(cpu_workers_effective)
+        context_payload["cluster_backend_effective"] = cluster_backend_effective
+        write_json(context_payload, metrics_dir / "00_context.json")
         write_run_consistency(
             run_id=run_id,
             run_stage=stage,
@@ -2665,6 +2793,10 @@ def cmd_run_infer_ads(args):
                 chunk_rows=int(infer_cfg.get("pair_chunk_rows", 200_000)),
                 return_pairs=False,
                 return_meta=True,
+                num_workers=int(cpu_workers_effective),
+                sharding_mode=cpu_sharding_mode,
+                min_pairs_per_worker=int(cpu_min_pairs_per_worker),
+                ram_budget_bytes=cpu_ram_budget_bytes,
             )
             if _ads_pairs is not None:
                 _ads_pairs = _ensure_columns(_ads_pairs, PAIR_REQUIRED_COLUMNS + ["label"])
@@ -2714,7 +2846,7 @@ def cmd_run_infer_ads(args):
         )
 
         ui.start("Score ADS pairs")
-        score_pipeline_version = "v2"
+        score_pipeline_version = "v3"
         try:
             model_state_hash = hash_checkpoint_model_state(
                 model_info["best_checkpoint"],
@@ -2737,7 +2869,7 @@ def cmd_run_infer_ads(args):
                 "precision_mode": str(args.precision_mode),
             }
         )
-        pair_scores_id_v2 = stable_hash(
+        pair_scores_id_v3 = stable_hash(
             {
                 "ads_pairs_id": ads_pairs_id,
                 "model_state_hash": model_state_hash,
@@ -2752,28 +2884,28 @@ def cmd_run_infer_ads(args):
                 "score_cfg_hash": score_cfg_hash,
             }
         )
-        pair_scores_shared_path_v2 = shared_pair_scores_dir / f"ads_pair_scores_v2_{pair_scores_id_v2}.parquet"
+        pair_scores_shared_path_v3 = shared_pair_scores_dir / f"ads_pair_scores_v3_{pair_scores_id_v3}.parquet"
         pair_scores_shared_path_legacy = shared_pair_scores_dir / f"ads_pair_scores_{pair_scores_id_legacy}.parquet"
-        pair_scores_shared_path_used = pair_scores_shared_path_v2
-        pair_scores_cache_schema_version = "v2"
-        pair_scores_artifact_id = pair_scores_id_v2
+        pair_scores_shared_path_used = pair_scores_shared_path_v3
+        pair_scores_cache_schema_version = "v3"
+        pair_scores_artifact_id = pair_scores_id_v3
 
-        if pair_scores_shared_path_v2.exists() and not args.force:
-            ui.skip("Reused pair scores from v2 cache.")
+        if pair_scores_shared_path_v3.exists() and not args.force:
+            ui.skip("Reused pair scores from v3 cache.")
         elif pair_scores_shared_path_legacy.exists() and not args.force:
             pair_scores_cache_schema_version = "v1"
             pair_scores_artifact_id = pair_scores_id_legacy
             pair_scores_shared_path_used = pair_scores_shared_path_legacy
-            promote_mode = link_or_copy(pair_scores_shared_path_legacy, pair_scores_shared_path_v2)
-            if pair_scores_shared_path_v2.exists():
-                pair_scores_shared_path_used = pair_scores_shared_path_v2
-                pair_scores_cache_schema_version = "v2"
-                pair_scores_artifact_id = pair_scores_id_v2
+            promote_mode = link_or_copy(pair_scores_shared_path_legacy, pair_scores_shared_path_v3)
+            if pair_scores_shared_path_v3.exists():
+                pair_scores_shared_path_used = pair_scores_shared_path_v3
+                pair_scores_cache_schema_version = "v3"
+                pair_scores_artifact_id = pair_scores_id_v3
             ui.skip(f"Reused legacy pair scores (promote={promote_mode}).")
         else:
             if int(ads_pairs_count) == 0:
                 empty_scores = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
-                save_parquet(empty_scores, pair_scores_shared_path_v2, index=False)
+                save_parquet(empty_scores, pair_scores_shared_path_v3, index=False)
                 ui.done("No ADS pairs to score; wrote empty pair_scores artifact.")
             else:
                 pairs_input: pd.DataFrame | str | Path
@@ -2788,7 +2920,7 @@ def cmd_run_infer_ads(args):
                     chars2vec=ads_chars,
                     text_emb=ads_text,
                     checkpoint_path=model_info["best_checkpoint"],
-                    output_path=pair_scores_shared_path_v2,
+                    output_path=pair_scores_shared_path_v3,
                     batch_size=int(score_batch_size),
                     device=args.device,
                     precision_mode=str(args.precision_mode),
@@ -2797,9 +2929,9 @@ def cmd_run_infer_ads(args):
                     return_scores=not use_chunked_scoring,
                 )
                 ui.done(f"Scored {ads_pairs_count} ADS pairs.")
-            pair_scores_shared_path_used = pair_scores_shared_path_v2
-            pair_scores_cache_schema_version = "v2"
-            pair_scores_artifact_id = pair_scores_id_v2
+            pair_scores_shared_path_used = pair_scores_shared_path_v3
+            pair_scores_cache_schema_version = "v3"
+            pair_scores_artifact_id = pair_scores_id_v3
 
         _record_cache_ref(
             cache_refs,
@@ -2825,12 +2957,22 @@ def cmd_run_infer_ads(args):
             cluster_cache_hit = cluster_cache_hit and references_disambig_path.exists()
 
         eps_meta: dict[str, Any] = {}
+        cluster_runtime_meta: dict[str, Any] = {}
         if cluster_cache_hit:
             clusters = read_parquet(clusters_path)
             cluster_qc = _load_json(cluster_qc_path)
             source_export_qc = _load_json(source_export_qc_path)
             cfg_payload = _load_json(cluster_cfg_used_path) or {}
             eps_meta = dict(cfg_payload.get("eps_resolution", {}) or {})
+            cluster_runtime_meta = dict(cfg_payload.get("cluster_runtime", {}) or {})
+            cluster_backend_effective = str(
+                cluster_runtime_meta.get("cluster_backend_effective", cluster_backend_requested)
+            )
+            context_payload["cluster_backend_effective"] = cluster_backend_effective
+            context_payload["cpu_workers_effective"] = int(
+                cluster_runtime_meta.get("cpu_workers_effective", cpu_workers_effective)
+            )
+            write_json(context_payload, metrics_dir / "00_context.json")
             ui.skip(f"Reused clustering outputs ({len(clusters)} mentions).")
         else:
             selected_eps = float(model_info["selected_eps"])
@@ -2856,6 +2998,30 @@ def cmd_run_infer_ads(args):
                 "eps_min": eps_min,
                 "eps_max": eps_max,
             }
+
+            pair_scores = read_parquet(pair_scores_shared_path_used)
+            clusters, cluster_runtime_meta = cluster_blockwise_dbscan(
+                mentions=ads_mentions,
+                pair_scores=pair_scores,
+                cluster_config=cluster_cfg_used,
+                output_path=clusters_path,
+                show_progress=args.progress,
+                num_workers=int(cpu_workers_effective),
+                sharding_mode=cpu_sharding_mode,
+                min_pairs_per_worker=int(cpu_min_pairs_per_worker),
+                ram_budget_bytes=cpu_ram_budget_bytes,
+                backend=cluster_backend_requested,
+                return_meta=True,
+            )
+            cluster_backend_effective = str(
+                cluster_runtime_meta.get("cluster_backend_effective", cluster_backend_requested)
+            )
+            context_payload["cluster_backend_effective"] = cluster_backend_effective
+            context_payload["cpu_workers_effective"] = int(
+                cluster_runtime_meta.get("cpu_workers_effective", cpu_workers_effective)
+            )
+            write_json(context_payload, metrics_dir / "00_context.json")
+
             write_json(
                 {
                     "run_id": run_id,
@@ -2866,17 +3032,9 @@ def cmd_run_infer_ads(args):
                     "best_threshold": float(model_info["best_threshold"]),
                     "eps_resolution": eps_meta,
                     "cluster_config_used": cluster_cfg_used,
+                    "cluster_runtime": cluster_runtime_meta,
                 },
                 cluster_cfg_used_path,
-            )
-
-            pair_scores = read_parquet(pair_scores_shared_path_used)
-            clusters = cluster_blockwise_dbscan(
-                mentions=ads_mentions,
-                pair_scores=pair_scores,
-                cluster_config=cluster_cfg_used,
-                output_path=clusters_path,
-                show_progress=args.progress,
             )
             _ = build_publication_author_mapping(
                 mentions=ads_mentions,
@@ -3044,6 +3202,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--score-batch-size", type=int, default=None)
     sp.add_argument("--memory-policy", choices=["fail", "warn"], default="fail")
     sp.add_argument("--max-ram-fraction", type=float, default=0.80)
+    sp.add_argument("--cpu-sharding", choices=["auto", "on", "off"], default=None)
+    sp.add_argument("--cpu-workers", default=None)
+    sp.add_argument("--cpu-min-pairs-per-worker", type=int, default=None)
+    sp.add_argument("--cpu-target-ram-fraction", type=float, default=None)
+    sp.add_argument("--cluster-backend", choices=["auto", "sklearn_cpu", "cuml_gpu"], default=None)
     sp.add_argument("--baseline-run-id", default=None)
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--progress", dest="progress", action="store_true")

@@ -6,3 +6,8 @@ subset_sampling:
 infer_overrides:
   max_pairs_per_block: 500000
   score_batch_size: 8192
+  cpu_sharding_mode: auto
+  cpu_workers: auto
+  cpu_min_pairs_per_worker: 1000000
+  cpu_target_ram_fraction: 0.6
+  cluster_backend: auto

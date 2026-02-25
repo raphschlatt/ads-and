@@ -29,7 +29,10 @@ Mit Full-Run-ID:
 python -m src.cli run-infer-ads \
   --dataset-id ads_prod_current \
   --model-run-id full_20260218T111506Z_cli02681429 \
-  --infer-stage full
+  --infer-stage full \
+  --cpu-sharding auto \
+  --cpu-workers auto \
+  --cluster-backend auto
 ```
 
 Oder mit Bundle:
@@ -38,7 +41,10 @@ Oder mit Bundle:
 python -m src.cli run-infer-ads \
   --dataset-id ads_prod_current \
   --model-bundle artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1 \
-  --infer-stage full
+  --infer-stage full \
+  --cpu-sharding auto \
+  --cpu-workers auto \
+  --cluster-backend auto
 ```
 
 ## Cleanup-Restore

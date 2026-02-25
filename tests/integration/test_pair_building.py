@@ -84,3 +84,56 @@ def test_pair_builder_can_stream_to_output_without_returning_pairs(tmp_path):
     written = pd.read_parquet(out_path)
     assert len(written) == 3
     assert meta["pairs_written"] == 3
+
+
+def test_pair_builder_sharding_is_deterministic_across_worker_counts():
+    rows = []
+    for block_idx in range(6):
+        block = f"blk.{block_idx}"
+        for mention_idx in range(12):
+            rows.append(
+                {
+                    "mention_id": f"{block}::{mention_idx}",
+                    "bibcode": f"{block}_{mention_idx}",
+                    "author_idx": mention_idx,
+                    "author_raw": "Doe, J",
+                    "title": f"title {block_idx}",
+                    "abstract": "x",
+                    "year": 2000 + mention_idx,
+                    "source_type": "ads",
+                    "block_key": block,
+                    "split": "inference",
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    pairs_1, meta_1 = build_pairs_within_blocks(
+        df,
+        seed=23,
+        max_pairs_per_block=15,
+        require_same_split=False,
+        labeled_only=False,
+        balance_train=False,
+        exclude_same_bibcode=False,
+        num_workers=1,
+        sharding_mode="on",
+        return_meta=True,
+    )
+    pairs_4, meta_4 = build_pairs_within_blocks(
+        df,
+        seed=23,
+        max_pairs_per_block=15,
+        require_same_split=False,
+        labeled_only=False,
+        balance_train=False,
+        exclude_same_bibcode=False,
+        num_workers=4,
+        sharding_mode="on",
+        return_meta=True,
+    )
+
+    key_cols = ["pair_id", "mention_id_1", "mention_id_2", "block_key", "split"]
+    lhs = pairs_1[key_cols].sort_values(key_cols).reset_index(drop=True)
+    rhs = pairs_4[key_cols].sort_values(key_cols).reset_index(drop=True)
+    pd.testing.assert_frame_equal(lhs, rhs)
+    assert meta_1["pairs_written"] == meta_4["pairs_written"]

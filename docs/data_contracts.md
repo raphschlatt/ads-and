@@ -102,6 +102,17 @@ optional compare:
 - `dataset_id`
 - model source (`model_run_id` or `model_bundle_dir`)
 - resolved checkpoint/threshold/eps/precision
+- CPU runtime controls and resolution:
+  - `cpu_sharding_mode`
+  - `cpu_workers_requested`
+  - `cpu_workers_effective`
+  - `cpu_limit_detected`
+  - `cpu_min_pairs_per_worker`
+  - `cpu_target_ram_fraction`
+  - `ram_budget_bytes`
+- clustering backend resolution:
+  - `cluster_backend_requested`
+  - `cluster_backend_effective`
 
 `01_input_summary.json`:
 
@@ -116,6 +127,14 @@ optional compare:
 - `pair_upper_bound`
 - conservative memory estimate by component
 - `memory_feasible` (gate-relevant)
+- CPU sharding controls and resolved worker values:
+  - `cpu_sharding_mode`
+  - `cpu_workers_requested`
+  - `cpu_workers_effective`
+  - `cpu_limit_detected`
+  - `cluster_backend_requested`
+  - `cluster_backend_effective`
+  - `cpu_ram_budget_bytes`
 
 `03_pairs_qc.json`:
 
@@ -192,4 +211,4 @@ Manifest required keys:
 - `shared_path`
 - `run_path`
 - `materialization_mode` (`hardlink`/`symlink`/`copy`/`existing`)
-- optional `cache_schema_version` (e.g., pair-score cache `v1`/`v2`)
+- optional `cache_schema_version` (e.g., pair-score cache `v1`/`v2`/`v3`)

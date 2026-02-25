@@ -133,6 +133,11 @@ def test_run_infer_ads_parser_defaults_with_model_run_id():
     assert args.score_batch_size is None
     assert args.memory_policy == "fail"
     assert args.max_ram_fraction == 0.80
+    assert args.cpu_sharding is None
+    assert args.cpu_workers is None
+    assert args.cpu_min_pairs_per_worker is None
+    assert args.cpu_target_ram_fraction is None
+    assert args.cluster_backend is None
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_infer_ads
@@ -176,6 +181,16 @@ def test_run_infer_ads_parser_boolean_overrides():
             "warn",
             "--max-ram-fraction",
             "0.5",
+            "--cpu-sharding",
+            "on",
+            "--cpu-workers",
+            "4",
+            "--cpu-min-pairs-per-worker",
+            "2000000",
+            "--cpu-target-ram-fraction",
+            "0.7",
+            "--cluster-backend",
+            "sklearn_cpu",
         ]
     )
 
@@ -187,6 +202,11 @@ def test_run_infer_ads_parser_boolean_overrides():
     assert args.score_batch_size == 4096
     assert args.memory_policy == "warn"
     assert args.max_ram_fraction == 0.5
+    assert args.cpu_sharding == "on"
+    assert args.cpu_workers == "4"
+    assert args.cpu_min_pairs_per_worker == 2000000
+    assert args.cpu_target_ram_fraction == 0.7
+    assert args.cluster_backend == "sklearn_cpu"
 
 
 def test_run_infer_ads_parser_requires_exactly_one_model_source():
