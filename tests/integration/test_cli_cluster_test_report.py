@@ -282,17 +282,23 @@ def _apply_fast_mocks(monkeypatch) -> None:
     monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
 
 
-def _run_report(parser: argparse.ArgumentParser, cfg: dict[str, Any], model_run_id: str) -> None:
-    args = parser.parse_args(
-        [
-            "run-cluster-test-report",
-            "--model-run-id",
-            model_run_id,
-            "--paths-config",
-            str(cfg["paths"]),
-            "--no-progress",
-        ]
-    )
+def _run_report(
+    parser: argparse.ArgumentParser,
+    cfg: dict[str, Any],
+    model_run_id: str,
+    extra: list[str] | None = None,
+) -> None:
+    argv = [
+        "run-cluster-test-report",
+        "--model-run-id",
+        model_run_id,
+        "--paths-config",
+        str(cfg["paths"]),
+        "--no-progress",
+    ]
+    if extra:
+        argv.extend(extra)
+    args = parser.parse_args(argv)
     args.func(args)
 
 
@@ -329,9 +335,120 @@ def test_cli_run_cluster_test_report_writes_outputs(monkeypatch, tmp_path: Path)
     assert payload["status"] == "ok"
     assert payload["model_run_id"] == model_run_id
     assert payload["pipeline_scope"] == "train"
+    assert payload["cluster_config_source_mode"] == "train_only"
+    assert payload["cluster_config_override_path"] is None
+    assert payload["override_ignored_fields"] == []
+    assert payload["report_tag"] is None
     assert payload["seeds_expected"] == [1, 2]
     assert payload["seeds_evaluated"] == [1, 2]
     assert set(payload["variants"].keys()) == {"dbscan_no_constraints", "dbscan_with_constraints"}
+
+
+def test_cli_run_cluster_test_report_override_requires_report_tag(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+
+    override_cfg_path = tmp_path / "cfg" / "cluster_override.yaml"
+    _write_yaml(
+        override_cfg_path,
+        {
+            "eps": 0.40,
+            "eps_mode": "val_sweep",
+            "selected_eps": 0.40,
+            "constraints": {"enabled": False},
+        },
+    )
+
+    parser = cli.build_parser()
+    with pytest.raises(ValueError, match="requires --report-tag"):
+        _run_report(
+            parser,
+            cfg,
+            model_run_id=model_run_id,
+            extra=["--cluster-config-override", str(override_cfg_path)],
+        )
+
+
+def test_cli_run_cluster_test_report_override_writes_tagged_outputs(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+    Path(cfg["paths_payload"]["data"]["raw_lspo_h5"]).write_text("stub", encoding="utf-8")
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    _run_report(parser, cfg, model_run_id=model_run_id)
+
+    override_cfg_path = tmp_path / "cfg" / "cluster_override.yaml"
+    _write_yaml(
+        override_cfg_path,
+        {
+            "eps": 0.60,
+            "selected_eps": 0.60,
+            "eps_mode": "val_sweep",
+            "constraints": {"enabled": False},
+            "eps_block_policy": {"enabled": True},
+        },
+    )
+    _run_report(
+        parser,
+        cfg,
+        model_run_id=model_run_id,
+        extra=[
+            "--cluster-config-override",
+            str(override_cfg_path),
+            "--report-tag",
+            "epsbkt_v1",
+        ],
+    )
+
+    metrics_dir = cfg["metrics_dir"] / model_run_id
+    baseline_json = metrics_dir / "06_clustering_test_report.json"
+    tagged_json = metrics_dir / "06_clustering_test_report__epsbkt_v1.json"
+    tagged_summary = metrics_dir / "06_clustering_test_summary__epsbkt_v1.csv"
+    tagged_per_seed = metrics_dir / "06_clustering_test_per_seed__epsbkt_v1.csv"
+    tagged_md = metrics_dir / "06_clustering_test_report__epsbkt_v1.md"
+
+    assert baseline_json.exists()
+    assert tagged_json.exists()
+    assert tagged_summary.exists()
+    assert tagged_per_seed.exists()
+    assert tagged_md.exists()
+
+    payload = json.loads(tagged_json.read_text(encoding="utf-8"))
+    assert payload["report_tag"] == "epsbkt_v1"
+    assert payload["cluster_config_source_mode"] == "train_plus_override"
+    assert payload["cluster_config_override_path"] == str(override_cfg_path.resolve())
+    assert payload["override_ignored_fields"] == ["eps", "selected_eps", "eps_mode"]
+    assert payload["selected_eps"] == 0.35
+    assert payload["cluster_config_effective"]["eps"] == 0.35
+    assert payload["cluster_config_effective"]["eps_mode"] == "fixed"
 
 
 def test_cli_run_cluster_test_report_fails_when_lspo_raw_missing(monkeypatch, tmp_path: Path):

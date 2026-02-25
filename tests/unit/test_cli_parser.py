@@ -266,6 +266,8 @@ def test_run_cluster_test_report_parser_defaults():
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
     assert args.score_batch_size == 8192
+    assert args.cluster_config_override is None
+    assert args.report_tag is None
     assert args.force is False
     assert args.progress is True
     assert args.quiet_libs is True
@@ -287,6 +289,10 @@ def test_run_cluster_test_report_parser_overrides():
             "amp_bf16",
             "--score-batch-size",
             "4096",
+            "--cluster-config-override",
+            "cfg/cluster.yaml",
+            "--report-tag",
+            "epsbkt_v1",
             "--force",
             "--no-progress",
             "--verbose-libs",
@@ -296,6 +302,8 @@ def test_run_cluster_test_report_parser_overrides():
     assert args.device == "cpu"
     assert args.precision_mode == "amp_bf16"
     assert args.score_batch_size == 4096
+    assert args.cluster_config_override == "cfg/cluster.yaml"
+    assert args.report_tag == "epsbkt_v1"
     assert args.force is True
     assert args.progress is False
     assert args.quiet_libs is False

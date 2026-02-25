@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 import warnings
@@ -77,6 +78,8 @@ MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 INFER_MENTIONS_CACHE_SCHEMA_VERSION = "v1"
 INFER_SUBSET_CACHE_VERSION = "v1"
 _RUN_STAGE_DEPRECATION_SHOWN = False
+_CLUSTER_OVERRIDE_EPS_FIELDS = ("eps", "selected_eps", "eps_mode")
+_REPORT_TAG_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _load_run_cfg(path: str | Path) -> dict:
@@ -1038,6 +1041,61 @@ def _resolve_selected_eps(cluster_used_payload: dict[str, Any], *, source_path: 
             f"Expected eps_resolution.selected_eps/resolved_eps or cluster_config_used.eps in {source_path}."
         )
     return float(selected_eps)
+
+
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = json.loads(json.dumps(base))
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(dict(merged[key]), value)
+        else:
+            merged[key] = json.loads(json.dumps(value))
+    return merged
+
+
+def _sanitize_report_tag(tag: str | None) -> str | None:
+    if tag is None:
+        return None
+    value = str(tag).strip()
+    if value == "":
+        raise ValueError("report_tag must be non-empty when provided.")
+    if _REPORT_TAG_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "Invalid report_tag. Allowed characters are: a-z, A-Z, 0-9, '.', '_' and '-'."
+        )
+    return value
+
+
+def _resolve_report_paths(metrics_dir: Path, report_tag: str | None) -> dict[str, Path]:
+    suffix = "" if report_tag is None else f"__{report_tag}"
+    return {
+        "json": metrics_dir / f"06_clustering_test_report{suffix}.json",
+        "summary_csv": metrics_dir / f"06_clustering_test_summary{suffix}.csv",
+        "per_seed_csv": metrics_dir / f"06_clustering_test_per_seed{suffix}.csv",
+        "markdown": metrics_dir / f"06_clustering_test_report{suffix}.md",
+    }
+
+
+def _apply_cluster_config_override(
+    *,
+    base_cluster_config: dict[str, Any],
+    override_path: str | Path | None,
+) -> tuple[dict[str, Any], str, str | None, list[str]]:
+    base = json.loads(json.dumps(base_cluster_config))
+    if override_path is None:
+        return base, "train_only", None, []
+
+    project_root = find_project_root(Path.cwd())
+    resolved_override_path = resolve_existing_path(override_path, project_root=project_root) or Path(override_path)
+    override_cfg = load_yaml(resolved_override_path)
+    if not isinstance(override_cfg, dict):
+        raise ValueError(
+            f"Cluster config override must be a YAML object/map: {resolved_override_path}"
+        )
+
+    ignored = [field for field in _CLUSTER_OVERRIDE_EPS_FIELDS if field in override_cfg]
+    merged = _deep_merge_dict(base, override_cfg)
+    return merged, "train_plus_override", str(Path(resolved_override_path).resolve()), ignored
 
 
 def _resolve_train_seed_runs(train_manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3354,6 +3412,9 @@ def cmd_run_cluster_test_report(args):
         metrics_dir = Path(str(art_cfg["metrics_dir"])) / model_run_id
         if not metrics_dir.exists():
             raise FileNotFoundError(f"Train metrics directory not found for model_run_id={model_run_id}: {metrics_dir}")
+        report_tag = _sanitize_report_tag(args.report_tag)
+        if args.cluster_config_override and report_tag is None:
+            raise ValueError("--cluster-config-override requires --report-tag to avoid overwriting baseline 06_* reports.")
 
         context_path = metrics_dir / "00_context.json"
         train_manifest_path = metrics_dir / "03_train_manifest.json"
@@ -3398,6 +3459,17 @@ def cmd_run_cluster_test_report(args):
             raise ValueError(
                 f"cluster_config_used missing or empty in {cluster_used_path}; cannot run clustering benchmark."
             )
+        base_cluster_cfg, cluster_config_source_mode, cluster_config_override_path, override_ignored_fields = (
+            _apply_cluster_config_override(
+                base_cluster_config=cluster_config_used,
+                override_path=args.cluster_config_override,
+            )
+        )
+        base_cluster_cfg["eps"] = float(selected_eps)
+        base_cluster_cfg["selected_eps"] = float(selected_eps)
+        base_cluster_cfg["eps_mode"] = "fixed"
+        min_samples = int(base_cluster_cfg.get("min_samples", 1))
+        metric = str(base_cluster_cfg.get("metric", "precomputed"))
 
         raw_lspo_parquet = Path(str(data_cfg["raw_lspo_parquet"]))
         if not raw_lspo_parquet.exists():
@@ -3552,13 +3624,6 @@ def cmd_run_cluster_test_report(args):
         ui.done(f"Embeddings ready for test split ({tuple(test_chars.shape)}/{tuple(test_text.shape)}).")
 
         ui.start("Evaluate clustering variants across train seeds")
-        base_cluster_cfg = json.loads(json.dumps(cluster_config_used))
-        base_cluster_cfg["eps"] = float(selected_eps)
-        base_cluster_cfg["selected_eps"] = float(selected_eps)
-        base_cluster_cfg["eps_mode"] = "fixed"
-        min_samples = int(base_cluster_cfg.get("min_samples", 1))
-        metric = str(base_cluster_cfg.get("metric", "precomputed"))
-
         variants = [
             ("dbscan_no_constraints", False),
             ("dbscan_with_constraints", True),
@@ -3644,6 +3709,10 @@ def cmd_run_cluster_test_report(args):
             "source_context_path": str(context_path),
             "train_manifest_path": str(train_manifest_path),
             "cluster_config_used_path": str(cluster_used_path),
+            "cluster_config_source_mode": str(cluster_config_source_mode),
+            "cluster_config_override_path": cluster_config_override_path,
+            "override_ignored_fields": override_ignored_fields,
+            "report_tag": report_tag,
             "lspo_source_paths": {
                 "raw_lspo_parquet": str(raw_lspo_parquet),
                 "raw_lspo_h5": None if raw_lspo_h5 is None else str(raw_lspo_h5),
@@ -3657,6 +3726,7 @@ def cmd_run_cluster_test_report(args):
             "selected_eps": float(selected_eps),
             "min_samples": int(min_samples),
             "metric": str(metric),
+            "cluster_config_effective": base_cluster_cfg,
             "variants": summary_payload,
             "per_seed_rows": per_seed_rows,
             "delta_with_constraints_minus_no_constraints": delta,
@@ -3664,10 +3734,11 @@ def cmd_run_cluster_test_report(args):
         }
         report_md = _build_cluster_test_report_markdown(report_payload)
 
-        report_json_path = metrics_dir / "06_clustering_test_report.json"
-        report_summary_csv_path = metrics_dir / "06_clustering_test_summary.csv"
-        report_per_seed_csv_path = metrics_dir / "06_clustering_test_per_seed.csv"
-        report_md_path = metrics_dir / "06_clustering_test_report.md"
+        report_paths = _resolve_report_paths(metrics_dir, report_tag=report_tag)
+        report_json_path = report_paths["json"]
+        report_summary_csv_path = report_paths["summary_csv"]
+        report_per_seed_csv_path = report_paths["per_seed_csv"]
+        report_md_path = report_paths["markdown"]
 
         write_json(report_payload, report_json_path)
         summary_df.to_csv(report_summary_csv_path, index=False)
@@ -3772,6 +3843,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
     sp.add_argument("--score-batch-size", type=int, default=8192)
+    sp.add_argument("--cluster-config-override", default=None)
+    sp.add_argument("--report-tag", default=None)
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--progress", dest="progress", action="store_true")
     sp.add_argument("--no-progress", dest="progress", action="store_false")
