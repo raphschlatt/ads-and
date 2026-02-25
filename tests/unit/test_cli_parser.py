@@ -249,3 +249,53 @@ def test_export_model_bundle_parser():
     assert args.model_run_id == "full_2026abc"
     assert args.output_dir == "/tmp/out"
     assert args.func is cli.cmd_export_model_bundle
+
+
+def test_run_cluster_test_report_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-cluster-test-report",
+            "--model-run-id",
+            "full_2026abc",
+        ]
+    )
+    assert args.command == "run-cluster-test-report"
+    assert args.model_run_id == "full_2026abc"
+    assert args.paths_config == "configs/paths.local.yaml"
+    assert args.device == "auto"
+    assert args.precision_mode == "fp32"
+    assert args.score_batch_size == 8192
+    assert args.force is False
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_run_cluster_test_report
+
+
+def test_run_cluster_test_report_parser_overrides():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-cluster-test-report",
+            "--model-run-id",
+            "full_2026abc",
+            "--paths-config",
+            "cfg/paths.yaml",
+            "--device",
+            "cpu",
+            "--precision-mode",
+            "amp_bf16",
+            "--score-batch-size",
+            "4096",
+            "--force",
+            "--no-progress",
+            "--verbose-libs",
+        ]
+    )
+    assert args.paths_config == "cfg/paths.yaml"
+    assert args.device == "cpu"
+    assert args.precision_mode == "amp_bf16"
+    assert args.score_batch_size == 4096
+    assert args.force is True
+    assert args.progress is False
+    assert args.quiet_libs is False

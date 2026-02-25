@@ -900,6 +900,207 @@ def _cluster_pairwise_metrics(pairs, clusters) -> dict[str, Any]:
     }
 
 
+def _compute_mean_sem(values: list[float]) -> tuple[float | None, float | None]:
+    if len(values) == 0:
+        return None, None
+    arr = np.asarray(values, dtype=np.float64)
+    mean = float(arr.mean())
+    if len(arr) < 2:
+        return mean, None
+    sem = float(arr.std(ddof=1) / np.sqrt(len(arr)))
+    return mean, sem
+
+
+def _summarize_cluster_test_rows(per_seed_rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    if len(per_seed_rows) == 0:
+        return {}
+
+    metric_keys = ["accuracy", "precision", "recall", "f1"]
+    summary: dict[str, dict[str, Any]] = {}
+    variants = sorted({str(row["variant"]) for row in per_seed_rows})
+    for variant in variants:
+        rows = [row for row in per_seed_rows if str(row["variant"]) == variant]
+        payload: dict[str, Any] = {
+            "seed_count": int(len(rows)),
+        }
+        for key in metric_keys:
+            values = [float(row[key]) for row in rows]
+            mean, sem = _compute_mean_sem(values)
+            payload[f"{key}_mean"] = mean
+            payload[f"{key}_sem"] = sem
+        n_pairs_vals = [int(row["n_pairs"]) for row in rows]
+        n_pairs_mean, _ = _compute_mean_sem([float(v) for v in n_pairs_vals])
+        payload["n_pairs_mean"] = n_pairs_mean
+        payload["n_pairs_total"] = int(sum(n_pairs_vals))
+        summary[variant] = payload
+    return summary
+
+
+def _build_cluster_test_report_markdown(report: dict[str, Any]) -> str:
+    def _fmt(value: Any, digits: int = 6) -> str:
+        if value is None:
+            return "n/a"
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            return f"{float(value):.{digits}f}"
+        return str(value)
+
+    lines: list[str] = []
+    lines.append("# Final Clustering Test Report")
+    lines.append("")
+    lines.append(f"- model_run_id: `{report.get('model_run_id')}`")
+    lines.append(f"- run_stage: `{report.get('run_stage')}`")
+    lines.append(f"- generated_utc: `{report.get('generated_utc')}`")
+    lines.append(f"- selected_eps: `{_fmt(report.get('selected_eps'))}`")
+    lines.append(f"- min_samples: `{_fmt(report.get('min_samples'))}`")
+    lines.append(f"- metric: `{report.get('metric')}`")
+    lines.append(f"- seeds_expected: `{report.get('seeds_expected')}`")
+    lines.append(f"- seeds_evaluated: `{report.get('seeds_evaluated')}`")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| variant | accuracy_mean | accuracy_sem | precision_mean | precision_sem | recall_mean | recall_sem | f1_mean | f1_sem | n_pairs_mean | n_pairs_total |")
+    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    summary = dict(report.get("variants", {}) or {})
+    for variant in sorted(summary.keys()):
+        row = dict(summary.get(variant, {}) or {})
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(variant),
+                    _fmt(row.get("accuracy_mean")),
+                    _fmt(row.get("accuracy_sem")),
+                    _fmt(row.get("precision_mean")),
+                    _fmt(row.get("precision_sem")),
+                    _fmt(row.get("recall_mean")),
+                    _fmt(row.get("recall_sem")),
+                    _fmt(row.get("f1_mean")),
+                    _fmt(row.get("f1_sem")),
+                    _fmt(row.get("n_pairs_mean")),
+                    _fmt(row.get("n_pairs_total")),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    lines.append("## Delta (with_constraints - no_constraints)")
+    lines.append("")
+    delta = dict(report.get("delta_with_constraints_minus_no_constraints", {}) or {})
+    lines.append(
+        "| accuracy | precision | recall | f1 |\n"
+        "|---:|---:|---:|---:|\n"
+        f"| {_fmt(delta.get('accuracy'))} | {_fmt(delta.get('precision'))} | {_fmt(delta.get('recall'))} | {_fmt(delta.get('f1'))} |"
+    )
+    lines.append("")
+    lines.append("## Per Seed")
+    lines.append("")
+    lines.append("| seed | variant | threshold | accuracy | precision | recall | f1 | n_pairs | checkpoint |")
+    lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---|")
+    per_seed_rows = sorted(
+        list(report.get("per_seed_rows", []) or []),
+        key=lambda r: (str(r.get("variant", "")), int(r.get("seed", 0))),
+    )
+    for row in per_seed_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _fmt(row.get("seed"), digits=0),
+                    str(row.get("variant")),
+                    _fmt(row.get("threshold")),
+                    _fmt(row.get("accuracy")),
+                    _fmt(row.get("precision")),
+                    _fmt(row.get("recall")),
+                    _fmt(row.get("f1")),
+                    _fmt(row.get("n_pairs"), digits=0),
+                    str(row.get("checkpoint")),
+                ]
+            )
+            + " |"
+        )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _resolve_selected_eps(cluster_used_payload: dict[str, Any], *, source_path: Path) -> float:
+    eps_resolution = dict(cluster_used_payload.get("eps_resolution", {}) or {})
+    selected_eps = eps_resolution.get("selected_eps")
+    if selected_eps is None:
+        selected_eps = eps_resolution.get("resolved_eps")
+    if selected_eps is None:
+        selected_eps = (cluster_used_payload.get("cluster_config_used", {}) or {}).get("eps")
+    if selected_eps is None:
+        raise ValueError(
+            "selected_eps missing in clustering metadata. "
+            f"Expected eps_resolution.selected_eps/resolved_eps or cluster_config_used.eps in {source_path}."
+        )
+    return float(selected_eps)
+
+
+def _resolve_train_seed_runs(train_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    runs = train_manifest.get("runs")
+    default_threshold = train_manifest.get("best_threshold")
+    if default_threshold is None:
+        raise ValueError("best_threshold missing in train manifest.")
+    default_threshold = float(default_threshold)
+
+    if not isinstance(runs, list) or len(runs) == 0:
+        best_checkpoint = train_manifest.get("best_checkpoint")
+        if best_checkpoint is None:
+            raise ValueError(
+                "Train manifest does not contain per-seed runs and is missing best_checkpoint. "
+                "Expected non-empty `runs` or `best_checkpoint` in 03_train_manifest.json."
+            )
+        warnings.warn(
+            "Train manifest has no per-seed `runs`; falling back to a single-seed clustering report from best_checkpoint.",
+            RuntimeWarning,
+        )
+        best_seed = int(train_manifest.get("best_seed", 1))
+        return [
+            {
+                "seed": best_seed,
+                "checkpoint": Path(str(best_checkpoint)).expanduser(),
+                "threshold": default_threshold,
+            }
+        ]
+
+    seed_runs: list[dict[str, Any]] = []
+    for row in runs:
+        if not isinstance(row, dict):
+            raise ValueError(f"Invalid run entry in manifest: {row!r}")
+        if row.get("seed") is None:
+            raise ValueError(f"Manifest run entry missing seed: {row!r}")
+        if row.get("checkpoint") is None:
+            raise ValueError(f"Manifest run entry missing checkpoint: {row!r}")
+        seed = int(row["seed"])
+        checkpoint = Path(str(row["checkpoint"])).expanduser()
+        threshold = float(row.get("threshold", default_threshold))
+        seed_runs.append(
+            {
+                "seed": seed,
+                "checkpoint": checkpoint,
+                "threshold": threshold,
+            }
+        )
+
+    seed_runs = sorted(seed_runs, key=lambda r: int(r["seed"]))
+    seeds = [int(r["seed"]) for r in seed_runs]
+    if len(seeds) != len(set(seeds)):
+        raise ValueError(f"Duplicate seeds found in manifest runs: {seeds}")
+    return seed_runs
+
+
+def _build_cluster_variant_config(base_cluster_cfg: dict[str, Any], *, enable_constraints: bool) -> dict[str, Any]:
+    out = json.loads(json.dumps(base_cluster_cfg))
+    constraints_cfg = dict(out.get("constraints", {}) or {})
+    constraints_cfg["enabled"] = bool(enable_constraints)
+    out["constraints"] = constraints_cfg
+    return out
+
+
 def _resolve_stage_eps(
     *,
     cluster_cfg: dict[str, Any],
@@ -3139,6 +3340,354 @@ def cmd_run_infer_ads(args):
         ui.close()
 
 
+def cmd_run_cluster_test_report(args):
+    ui = CliUI(total_steps=6, progress=args.progress)
+    try:
+        ui.start("Initialize clustering test report context")
+        _configure_library_noise(args.quiet_libs)
+
+        paths = _load_paths_cfg(args.paths_config)
+        data_cfg = dict(paths.get("data", {}) or {})
+        art_cfg = dict(paths.get("artifacts", {}) or {})
+
+        model_run_id = str(args.model_run_id)
+        metrics_dir = Path(str(art_cfg["metrics_dir"])) / model_run_id
+        if not metrics_dir.exists():
+            raise FileNotFoundError(f"Train metrics directory not found for model_run_id={model_run_id}: {metrics_dir}")
+
+        context_path = metrics_dir / "00_context.json"
+        train_manifest_path = metrics_dir / "03_train_manifest.json"
+        cluster_used_path = metrics_dir / "04_clustering_config_used.json"
+        for p in [context_path, train_manifest_path, cluster_used_path]:
+            if not p.exists():
+                raise FileNotFoundError(f"Missing required train artifact for clustering report: {p}")
+
+        context_payload = _load_json(context_path)
+        if str(context_payload.get("pipeline_scope", "")).strip().lower() != "train":
+            raise ValueError(
+                f"Expected pipeline_scope=train in {context_path}, got {context_payload.get('pipeline_scope')!r}."
+            )
+
+        run_stage = str(context_payload.get("run_stage", "")).strip()
+        if not run_stage:
+            raise ValueError(f"run_stage missing in {context_path}.")
+
+        stage_metrics_path = metrics_dir / f"05_stage_metrics_{run_stage}.json"
+        if not stage_metrics_path.exists():
+            raise FileNotFoundError(
+                f"Missing stage metrics for run_stage={run_stage}: {stage_metrics_path}"
+            )
+        stage_metrics = _load_json(stage_metrics_path)
+        expected_subset_cache_key = str(stage_metrics.get("subset_cache_key", "")).strip()
+        if not expected_subset_cache_key:
+            raise ValueError(
+                f"subset_cache_key missing in {stage_metrics_path}; cannot verify reproducibility."
+            )
+
+        train_manifest = _load_json(train_manifest_path)
+        seed_runs = _resolve_train_seed_runs(train_manifest)
+        for row in seed_runs:
+            ckpt = Path(row["checkpoint"])
+            if not ckpt.exists():
+                raise FileNotFoundError(f"Checkpoint for seed={row['seed']} does not exist: {ckpt}")
+
+        cluster_used_payload = _load_json(cluster_used_path)
+        selected_eps = _resolve_selected_eps(cluster_used_payload, source_path=cluster_used_path)
+        cluster_config_used = dict(cluster_used_payload.get("cluster_config_used", {}) or {})
+        if len(cluster_config_used) == 0:
+            raise ValueError(
+                f"cluster_config_used missing or empty in {cluster_used_path}; cannot run clustering benchmark."
+            )
+
+        raw_lspo_parquet = Path(str(data_cfg["raw_lspo_parquet"]))
+        if not raw_lspo_parquet.exists():
+            raise FileNotFoundError(
+                f"LSPO parquet is required for report generation but was not found: {raw_lspo_parquet}"
+            )
+        raw_lspo_h5_val = data_cfg.get("raw_lspo_h5")
+        raw_lspo_h5 = Path(str(raw_lspo_h5_val)) if raw_lspo_h5_val else None
+        if raw_lspo_h5 is not None and not raw_lspo_h5.exists():
+            warnings.warn(
+                f"Optional LSPO H5 path is configured but missing: {raw_lspo_h5}",
+                RuntimeWarning,
+            )
+
+        run_cfg_path = context_payload.get("run_config")
+        model_cfg_path = context_payload.get("model_config")
+        if not run_cfg_path:
+            raise ValueError(f"run_config missing in {context_path}; cannot reconstruct subset.")
+        if not model_cfg_path:
+            raise ValueError(f"model_config missing in {context_path}; cannot reconstruct embeddings setup.")
+
+        run_cfg = _load_run_cfg(run_cfg_path)
+        run_cfg["stage"] = run_stage
+        split_assignment_cfg = _resolve_split_assignment_cfg(run_cfg)
+        pair_build_cfg = _resolve_pair_build_cfg(run_cfg)
+        split_balance_cfg = dict(run_cfg.get("split_balance", {}) or {})
+        model_cfg = _load_model_cfg(model_cfg_path)
+        ui.done(f"Loaded train context for {model_run_id} (stage={run_stage}, seeds={len(seed_runs)}).")
+
+        ui.start("Rebuild LSPO subset and verify subset fingerprint")
+        lspo_mentions_path = Path(str(data_cfg["interim_dir"])) / "lspo_mentions.parquet"
+        if lspo_mentions_path.exists() and not args.force:
+            lspo_mentions = read_parquet(lspo_mentions_path)
+        else:
+            lspo_mentions = prepare_lspo_mentions(
+                parquet_path=raw_lspo_parquet,
+                h5_path=raw_lspo_h5,
+                output_path=lspo_mentions_path,
+            )
+
+        source_fp = compute_lspo_source_fp(lspo_mentions_path)
+        subset_identity = compute_subset_identity(
+            run_cfg=run_cfg,
+            source_fp=source_fp,
+            sampler_version=SUBSET_CACHE_VERSION,
+        )
+        if subset_identity.subset_tag != expected_subset_cache_key:
+            raise ValueError(
+                "Subset reproducibility check failed: computed subset_cache_key does not match train stage metrics. "
+                f"computed={subset_identity.subset_tag}, expected={expected_subset_cache_key}."
+            )
+
+        lspo_subset = build_stage_subset(
+            lspo_mentions,
+            stage=run_stage,
+            seed=int(run_cfg.get("seed", 11)),
+            target_mentions=run_cfg.get("subset_target_mentions"),
+            subset_sampling=run_cfg.get("subset_sampling", {}),
+        )
+        lspo_mentions_split, split_meta = assign_lspo_splits(
+            lspo_subset,
+            seed=int(run_cfg.get("seed", 11)),
+            train_ratio=float(split_assignment_cfg["train_ratio"]),
+            val_ratio=float(split_assignment_cfg["val_ratio"]),
+            min_neg_val=int(split_balance_cfg.get("min_neg_val", 0)),
+            min_neg_test=int(split_balance_cfg.get("min_neg_test", 0)),
+            max_attempts=int(split_balance_cfg.get("max_attempts", 1)),
+            return_meta=True,
+        )
+        if str(split_meta.get("status", "")).strip().lower() == "split_balance_infeasible":
+            raise RuntimeError(
+                "LSPO split assignment is infeasible under current split balance config; "
+                f"split_meta={split_meta}"
+            )
+
+        lspo_pairs = build_pairs_within_blocks(
+            mentions=lspo_mentions_split,
+            max_pairs_per_block=run_cfg.get("max_pairs_per_block"),
+            seed=int(run_cfg.get("seed", 11)),
+            require_same_split=True,
+            labeled_only=False,
+            balance_train=True,
+            exclude_same_bibcode=bool(pair_build_cfg.get("exclude_same_bibcode", True)),
+            show_progress=False,
+        )
+        if lspo_pairs is None:
+            raise RuntimeError("Pair builder returned None during clustering report generation.")
+
+        test_mentions = lspo_mentions_split[lspo_mentions_split["split"].astype(str) == "test"].reset_index(drop=True)
+        test_pairs = lspo_pairs[
+            (lspo_pairs["split"].astype(str) == "test") & lspo_pairs["label"].notna()
+        ].reset_index(drop=True)
+        if len(test_mentions) < 2:
+            raise RuntimeError(
+                f"Test split has too few mentions for clustering benchmark: {len(test_mentions)}"
+            )
+        if len(test_pairs) == 0:
+            raise RuntimeError("No labeled LSPO test pairs available for clustering benchmark.")
+        ui.done(f"Prepared LSPO test split ({len(test_mentions)} mentions, {len(test_pairs)} labeled pairs).")
+
+        ui.start("Build or load LSPO embeddings")
+        rep_cfg = dict(model_cfg.get("representation", {}) or {})
+        representation_cfg_hash = stable_hash(rep_cfg)
+        model_version = str(model_cfg.get("name", "nand"))
+        embedding_id = stable_hash(
+            {
+                "subset_id": subset_identity.subset_tag,
+                "representation_cfg_hash": representation_cfg_hash,
+                "model_version": model_version,
+                "pipeline_scope": "train",
+            }
+        )
+        shared_embeddings_dir = resolve_shared_cache_root(data_cfg) / "embeddings"
+        shared_embeddings_dir.mkdir(parents=True, exist_ok=True)
+        lspo_chars_path = shared_embeddings_dir / f"lspo_chars2vec_{embedding_id}.npy"
+        lspo_text_path = shared_embeddings_dir / f"lspo_specter_{embedding_id}.npy"
+
+        lspo_chars = get_or_create_chars2vec_embeddings(
+            mentions=lspo_subset,
+            output_path=lspo_chars_path,
+            force_recompute=bool(args.force),
+            use_stub_if_missing=False,
+            quiet_libraries=bool(args.quiet_libs),
+        )
+        lspo_text = get_or_create_specter_embeddings(
+            mentions=lspo_subset,
+            output_path=lspo_text_path,
+            force_recompute=bool(args.force),
+            model_name=rep_cfg.get("text_model_name", "allenai/specter"),
+            text_backend=rep_cfg.get("text_backend", "transformers"),
+            text_adapter_name=rep_cfg.get("text_adapter_name"),
+            text_adapter_alias=rep_cfg.get("text_adapter_alias", "specter2"),
+            max_length=int(rep_cfg.get("max_length", 256)),
+            batch_size=16,
+            device=args.device,
+            prefer_precomputed=False,
+            use_stub_if_missing=False,
+            show_progress=bool(args.progress),
+            quiet_libraries=bool(args.quiet_libs),
+            reuse_model=True,
+        )
+        subset_index = {
+            str(m): int(i)
+            for i, m in enumerate(lspo_subset["mention_id"].astype(str).tolist())
+        }
+        test_idx = test_mentions["mention_id"].astype(str).map(subset_index)
+        if test_idx.isna().any():
+            raise RuntimeError("Failed to align test mentions with embedding indices from reconstructed subset.")
+        test_idx_np = test_idx.astype(int).to_numpy()
+        test_chars = lspo_chars[test_idx_np]
+        test_text = lspo_text[test_idx_np]
+        ui.done(f"Embeddings ready for test split ({tuple(test_chars.shape)}/{tuple(test_text.shape)}).")
+
+        ui.start("Evaluate clustering variants across train seeds")
+        base_cluster_cfg = json.loads(json.dumps(cluster_config_used))
+        base_cluster_cfg["eps"] = float(selected_eps)
+        base_cluster_cfg["selected_eps"] = float(selected_eps)
+        base_cluster_cfg["eps_mode"] = "fixed"
+        min_samples = int(base_cluster_cfg.get("min_samples", 1))
+        metric = str(base_cluster_cfg.get("metric", "precomputed"))
+
+        variants = [
+            ("dbscan_no_constraints", False),
+            ("dbscan_with_constraints", True),
+        ]
+        per_seed_rows: list[dict[str, Any]] = []
+        for run_row in seed_runs:
+            seed = int(run_row["seed"])
+            checkpoint = Path(run_row["checkpoint"])
+            threshold = float(run_row["threshold"])
+
+            pair_scores = score_pairs_with_checkpoint(
+                mentions=test_mentions,
+                pairs=test_pairs,
+                chars2vec=test_chars,
+                text_emb=test_text,
+                checkpoint_path=checkpoint,
+                output_path=None,
+                batch_size=int(args.score_batch_size),
+                device=args.device,
+                precision_mode=args.precision_mode,
+                show_progress=False,
+            )
+
+            for variant_name, enable_constraints in variants:
+                eval_cfg = _build_cluster_variant_config(
+                    base_cluster_cfg,
+                    enable_constraints=enable_constraints,
+                )
+                clusters = cluster_blockwise_dbscan(
+                    mentions=test_mentions,
+                    pair_scores=pair_scores,
+                    cluster_config=eval_cfg,
+                    output_path=None,
+                    show_progress=False,
+                )
+                metrics = _cluster_pairwise_metrics(test_pairs, clusters)
+                if metrics.get("f1") is None:
+                    raise RuntimeError(
+                        "Cluster metrics are empty for test split; cannot build final report."
+                    )
+                per_seed_rows.append(
+                    {
+                        "seed": seed,
+                        "checkpoint": str(checkpoint),
+                        "threshold": threshold,
+                        "variant": variant_name,
+                        "accuracy": float(metrics["accuracy"]),
+                        "precision": float(metrics["precision"]),
+                        "recall": float(metrics["recall"]),
+                        "f1": float(metrics["f1"]),
+                        "n_pairs": int(metrics["n_pairs"]),
+                    }
+                )
+        ui.done(f"Evaluated {len(seed_runs)} seeds across {len(variants)} variants.")
+
+        ui.start("Write final clustering test report artifacts")
+        summary_payload = _summarize_cluster_test_rows(per_seed_rows)
+        summary_rows: list[dict[str, Any]] = []
+        for variant in sorted(summary_payload.keys()):
+            summary_rows.append(
+                {
+                    "variant": variant,
+                    **dict(summary_payload[variant]),
+                }
+            )
+        summary_df = pd.DataFrame(summary_rows)
+        per_seed_df = pd.DataFrame(per_seed_rows).sort_values(["variant", "seed"]).reset_index(drop=True)
+
+        with_constraints = dict(summary_payload.get("dbscan_with_constraints", {}) or {})
+        no_constraints = dict(summary_payload.get("dbscan_no_constraints", {}) or {})
+        delta = {}
+        for key in ["accuracy_mean", "precision_mean", "recall_mean", "f1_mean"]:
+            a = with_constraints.get(key)
+            b = no_constraints.get(key)
+            delta_key = key.replace("_mean", "")
+            delta[delta_key] = None if a is None or b is None else float(a) - float(b)
+
+        report_payload = {
+            "model_run_id": model_run_id,
+            "run_stage": run_stage,
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "pipeline_scope": "train",
+            "source_context_path": str(context_path),
+            "train_manifest_path": str(train_manifest_path),
+            "cluster_config_used_path": str(cluster_used_path),
+            "lspo_source_paths": {
+                "raw_lspo_parquet": str(raw_lspo_parquet),
+                "raw_lspo_h5": None if raw_lspo_h5 is None else str(raw_lspo_h5),
+                "interim_lspo_mentions": str(lspo_mentions_path),
+            },
+            "lspo_source_fingerprint": subset_identity.source_fp,
+            "subset_cache_key_expected": expected_subset_cache_key,
+            "subset_cache_key_computed": subset_identity.subset_tag,
+            "seeds_expected": [int(row["seed"]) for row in seed_runs],
+            "seeds_evaluated": sorted({int(row["seed"]) for row in per_seed_rows}),
+            "selected_eps": float(selected_eps),
+            "min_samples": int(min_samples),
+            "metric": str(metric),
+            "variants": summary_payload,
+            "per_seed_rows": per_seed_rows,
+            "delta_with_constraints_minus_no_constraints": delta,
+            "status": "ok",
+        }
+        report_md = _build_cluster_test_report_markdown(report_payload)
+
+        report_json_path = metrics_dir / "06_clustering_test_report.json"
+        report_summary_csv_path = metrics_dir / "06_clustering_test_summary.csv"
+        report_per_seed_csv_path = metrics_dir / "06_clustering_test_per_seed.csv"
+        report_md_path = metrics_dir / "06_clustering_test_report.md"
+
+        write_json(report_payload, report_json_path)
+        summary_df.to_csv(report_summary_csv_path, index=False)
+        per_seed_df.to_csv(report_per_seed_csv_path, index=False)
+        report_md_path.write_text(report_md, encoding="utf-8")
+        ui.done("Wrote 06_clustering_test_report.{json,csv,md} artifacts.")
+
+        ui.start("Finalize")
+        ui.info(f"Report JSON: {report_json_path}")
+        ui.info(f"Summary CSV: {report_summary_csv_path}")
+        ui.info(f"Per-seed CSV: {report_per_seed_csv_path}")
+        ui.info(f"Report MD: {report_md_path}")
+        ui.done(f"Run complete: {model_run_id}")
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
 def cmd_export_model_bundle(args):
     paths = _load_paths_cfg(args.paths_config)
     meta = _write_model_bundle(paths_cfg=paths, model_run_id=args.model_run_id, output_dir=args.output_dir)
@@ -3216,6 +3765,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
     sp.set_defaults(quiet_libs=True)
     sp.set_defaults(func=cmd_run_infer_ads)
+
+    sp = sub.add_parser("run-cluster-test-report")
+    sp.add_argument("--model-run-id", required=True)
+    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
+    sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
+    sp.add_argument("--score-batch-size", type=int, default=8192)
+    sp.add_argument("--force", action="store_true")
+    sp.add_argument("--progress", dest="progress", action="store_true")
+    sp.add_argument("--no-progress", dest="progress", action="store_false")
+    sp.set_defaults(progress=True)
+    sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
+    sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
+    sp.set_defaults(quiet_libs=True)
+    sp.set_defaults(func=cmd_run_cluster_test_report)
 
     sp = sub.add_parser("export-model-bundle")
     sp.add_argument("--model-run-id", required=True)

@@ -305,6 +305,9 @@ def _apply_fast_mocks(monkeypatch) -> None:
 def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _write_dataset(tmp_path, dataset_id="ads_fixture")
+    raw_lspo_path = tmp_path / "data" / "raw" / "lspo" / "mock.parquet"
+    raw_lspo_path.parent.mkdir(parents=True, exist_ok=True)
+    _toy_lspo_mentions().to_parquet(raw_lspo_path, index=False)
     _apply_fast_mocks(monkeypatch)
     parser = cli.build_parser()
 
@@ -330,6 +333,23 @@ def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
         ]
     )
     args.func(args)
+
+    report_args = parser.parse_args(
+        [
+            "run-cluster-test-report",
+            "--model-run-id",
+            train_run_id,
+            "--paths-config",
+            str(cfg["paths"]),
+            "--no-progress",
+        ]
+    )
+    report_args.func(report_args)
+
+    report_json = tmp_path / "artifacts" / "metrics" / train_run_id / "06_clustering_test_report.json"
+    assert report_json.exists()
+    report_payload = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report_payload["status"] == "ok"
 
     export_args = parser.parse_args(
         [

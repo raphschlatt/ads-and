@@ -3,8 +3,9 @@
 ## Goal
 
 1. Train and benchmark NAND on LSPO (`run-train-stage`).
-2. Export/deploy model bundle.
-3. Disambiguate ADS datasets (`run-infer-ads`).
+2. Generate final LSPO test clustering report (`run-cluster-test-report`).
+3. Export/deploy model bundle.
+4. Disambiguate ADS datasets (`run-infer-ads`).
 
 ## Canonical Settings
 
@@ -34,6 +35,16 @@ Export bundle:
 python3 -m src.cli export-model-bundle \
   --model-run-id smoke_2026... \
   --paths-config configs/paths.local.yaml
+```
+
+Final clustering test report:
+
+```bash
+PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+  --model-run-id smoke_2026... \
+  --paths-config configs/paths.local.yaml \
+  --device auto \
+  --precision-mode fp32
 ```
 
 Infer (run id source):

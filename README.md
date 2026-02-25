@@ -33,6 +33,16 @@ python3 -m src.cli run-train-stage \
   --device auto
 ```
 
+Finaler Clustering-Testreport auf LSPO-Testsplit (per-seed + mean/SEM):
+
+```bash
+PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+  --model-run-id full_20260218T111506Z_cli02681429 \
+  --paths-config configs/paths.local.yaml \
+  --device auto \
+  --precision-mode fp32
+```
+
 Deprecated alias (same behavior, warning emitted):
 
 ```bash
@@ -211,6 +221,10 @@ Train run (`artifacts/metrics/<run_id>/`):
 - `04_clustering_config_used.json` (LSPO val eps resolution)
 - `05_stage_metrics_<stage>.json` (`metric_scope: train`)
 - `05_go_no_go_<stage>.json`
+- `06_clustering_test_report.json` (final LSPO test clustering benchmark)
+- `06_clustering_test_summary.csv` (variant summary: mean/SEM)
+- `06_clustering_test_per_seed.csv` (seed-wise metrics)
+- `06_clustering_test_report.md` (readable benchmark report)
 - optional `99_compare_train_to_baseline.json`
 
 Infer run (`artifacts/metrics/<run_id>/`):

@@ -1,0 +1,400 @@
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import pytest
+import yaml
+
+from src import cli
+from src.common.subset_artifacts import compute_lspo_source_fp, compute_subset_identity
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(payload, f, sort_keys=False)
+    return path
+
+
+def _toy_lspo_mentions() -> pd.DataFrame:
+    rows = [
+        {
+            "mention_id": "m0",
+            "bibcode": "b0",
+            "author_idx": 0,
+            "author_raw": "Doe, J",
+            "title": "T0",
+            "abstract": "A0",
+            "year": 2000,
+            "source_type": "lspo",
+            "block_key": "blk0",
+            "orcid": "o0",
+        },
+        {
+            "mention_id": "m1",
+            "bibcode": "b1",
+            "author_idx": 0,
+            "author_raw": "Doe, J.",
+            "title": "T1",
+            "abstract": "A1",
+            "year": 2001,
+            "source_type": "lspo",
+            "block_key": "blk0",
+            "orcid": "o0",
+        },
+        {
+            "mention_id": "m2",
+            "bibcode": "b2",
+            "author_idx": 0,
+            "author_raw": "Smith, A",
+            "title": "T2",
+            "abstract": "A2",
+            "year": 2002,
+            "source_type": "lspo",
+            "block_key": "blk1",
+            "orcid": "o1",
+        },
+        {
+            "mention_id": "m3",
+            "bibcode": "b3",
+            "author_idx": 0,
+            "author_raw": "Smith, A.",
+            "title": "T3",
+            "abstract": "A3",
+            "year": 2003,
+            "source_type": "lspo",
+            "block_key": "blk1",
+            "orcid": "o1",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def _make_configs(tmp_path: Path) -> dict[str, Path]:
+    paths_cfg = {
+        "project_root": str(tmp_path),
+        "data": {
+            "raw_lspo_parquet": str(tmp_path / "data/raw/lspo/LSPO_v1.parquet"),
+            "raw_lspo_h5": str(tmp_path / "data/raw/lspo/LSPO_v1.h5"),
+            "raw_ads_publications": str(tmp_path / "data/raw/ads/legacy_publications.jsonl"),
+            "raw_ads_references": str(tmp_path / "data/raw/ads/legacy_references.json"),
+            "interim_dir": str(tmp_path / "data/interim"),
+            "processed_dir": str(tmp_path / "data/processed"),
+            "subset_cache_dir": str(tmp_path / "data/subsets/cache"),
+            "subset_manifest_dir": str(tmp_path / "data/subsets/manifests"),
+        },
+        "artifacts": {
+            "root": str(tmp_path / "artifacts"),
+            "embeddings_dir": str(tmp_path / "artifacts/embeddings"),
+            "checkpoints_dir": str(tmp_path / "artifacts/checkpoints"),
+            "pair_scores_dir": str(tmp_path / "artifacts/pair_scores"),
+            "clusters_dir": str(tmp_path / "artifacts/clusters"),
+            "metrics_dir": str(tmp_path / "artifacts/metrics"),
+            "models_dir": str(tmp_path / "artifacts/models"),
+        },
+    }
+    run_cfg = {
+        "stage": "full",
+        "subset_target_mentions": None,
+        "seed": 11,
+        "subset_sampling": {"target_mean_block_size": 2},
+        "split_assignment": {"train_ratio": 0.6, "val_ratio": 0.2},
+        "pair_building": {"exclude_same_bibcode": True},
+        "max_pairs_per_block": 100,
+        "split_balance": {"min_neg_val": 0, "min_neg_test": 0, "max_attempts": 3},
+    }
+    model_cfg = {
+        "name": "mock-nand",
+        "representation": {
+            "text_model_name": "mock-specter",
+            "max_length": 64,
+        },
+        "training": {
+            "precision_mode": "fp32",
+        },
+    }
+    cfg_dir = tmp_path / "cfg"
+    return {
+        "paths": _write_yaml(cfg_dir / "paths.yaml", paths_cfg),
+        "run": _write_yaml(cfg_dir / "run.yaml", run_cfg),
+        "model": _write_yaml(cfg_dir / "model.yaml", model_cfg),
+        "metrics_dir": Path(paths_cfg["artifacts"]["metrics_dir"]),
+        "paths_payload": paths_cfg,
+        "run_payload": run_cfg,
+    }
+
+
+def _write_train_artifacts(tmp_path: Path, cfg: dict[str, Any], model_run_id: str, subset_cache_key: str) -> None:
+    metrics_dir = cfg["metrics_dir"] / model_run_id
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    ckpt_dir = tmp_path / "artifacts" / "checkpoints" / model_run_id
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt1 = ckpt_dir / f"{model_run_id}_seed1.pt"
+    ckpt2 = ckpt_dir / f"{model_run_id}_seed2.pt"
+    ckpt1.write_text("checkpoint-1", encoding="utf-8")
+    ckpt2.write_text("checkpoint-2", encoding="utf-8")
+
+    with (metrics_dir / "00_context.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_id": model_run_id,
+                "run_stage": "full",
+                "pipeline_scope": "train",
+                "run_config": str(cfg["run"]),
+                "model_config": str(cfg["model"]),
+            },
+            f,
+            indent=2,
+        )
+
+    with (metrics_dir / "03_train_manifest.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_id": model_run_id,
+                "best_threshold": 0.5,
+                "runs": [
+                    {"seed": 1, "checkpoint": str(ckpt1), "threshold": 0.5},
+                    {"seed": 2, "checkpoint": str(ckpt2), "threshold": 0.5},
+                ],
+            },
+            f,
+            indent=2,
+        )
+
+    with (metrics_dir / "04_clustering_config_used.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "eps_resolution": {"selected_eps": 0.35},
+                "cluster_config_used": {
+                    "method": "dbscan",
+                    "eps": 0.35,
+                    "min_samples": 1,
+                    "metric": "precomputed",
+                    "constraints": {
+                        "enabled": True,
+                    },
+                },
+            },
+            f,
+            indent=2,
+        )
+
+    with (metrics_dir / "05_stage_metrics_full.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_id": model_run_id,
+                "stage": "full",
+                "metric_scope": "train",
+                "subset_cache_key": subset_cache_key,
+            },
+            f,
+            indent=2,
+        )
+
+
+def _apply_fast_mocks(monkeypatch) -> None:
+    def _assign(mentions, return_meta=False, **_kwargs):
+        out = mentions.copy()
+        out["split"] = "test"
+        meta = {
+            "status": "ok",
+            "attempts": 1,
+            "split_label_counts": {
+                "train": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                "val": {"pos": 0, "neg": 0, "labeled_pairs": 0},
+                "test": {"pos": 2, "neg": 0, "labeled_pairs": 2},
+            },
+        }
+        return (out, meta) if return_meta else out
+
+    def _pairs(mentions, **_kwargs):
+        rows = []
+        for block_key, grp in mentions.groupby("block_key", sort=False):
+            if len(grp) < 2:
+                continue
+            a = grp.iloc[0]
+            b = grp.iloc[1]
+            rows.append(
+                {
+                    "pair_id": f"{a['mention_id']}__{b['mention_id']}",
+                    "mention_id_1": str(a["mention_id"]),
+                    "mention_id_2": str(b["mention_id"]),
+                    "block_key": str(block_key),
+                    "split": str(a.get("split", "test")),
+                    "label": int(str(a.get("orcid", "")) == str(b.get("orcid", ""))),
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def _chars(mentions, output_path, force_recompute=False, **_kwargs):
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and not force_recompute:
+            return np.load(p)
+        arr = np.ones((len(mentions), 50), dtype=np.float32)
+        np.save(p, arr)
+        return arr
+
+    def _text(mentions, output_path, force_recompute=False, **_kwargs):
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.exists() and not force_recompute:
+            return np.load(p)
+        arr = np.ones((len(mentions), 768), dtype=np.float32)
+        np.save(p, arr)
+        return arr
+
+    def _score(mentions, pairs, output_path=None, **_kwargs):
+        out = pairs[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
+        out["cosine_sim"] = 0.9
+        out["distance"] = 0.1
+        if output_path is not None:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(output_path, index=False)
+        return out
+
+    def _cluster(mentions, pair_scores, cluster_config, output_path=None, **_kwargs):
+        enabled = bool((cluster_config.get("constraints", {}) or {}).get("enabled", False))
+        out = mentions[["mention_id", "block_key"]].copy()
+        if enabled:
+            out["author_uid"] = out["block_key"].astype(str) + "::0"
+        else:
+            out["author_uid"] = [
+                f"{blk}::{idx}"
+                for idx, blk in enumerate(out["block_key"].astype(str).tolist())
+            ]
+        if output_path is not None:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(output_path, index=False)
+        return out
+
+    monkeypatch.setattr(cli, "assign_lspo_splits", _assign)
+    monkeypatch.setattr(cli, "build_pairs_within_blocks", _pairs)
+    monkeypatch.setattr(cli, "get_or_create_chars2vec_embeddings", _chars)
+    monkeypatch.setattr(cli, "get_or_create_specter_embeddings", _text)
+    monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _score)
+    monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
+
+
+def _run_report(parser: argparse.ArgumentParser, cfg: dict[str, Any], model_run_id: str) -> None:
+    args = parser.parse_args(
+        [
+            "run-cluster-test-report",
+            "--model-run-id",
+            model_run_id,
+            "--paths-config",
+            str(cfg["paths"]),
+            "--no-progress",
+        ]
+    )
+    args.func(args)
+
+
+def test_cli_run_cluster_test_report_writes_outputs(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+    Path(cfg["paths_payload"]["data"]["raw_lspo_h5"]).write_text("stub", encoding="utf-8")
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    _run_report(parser, cfg, model_run_id=model_run_id)
+
+    metrics_dir = cfg["metrics_dir"] / model_run_id
+    assert (metrics_dir / "06_clustering_test_report.json").exists()
+    assert (metrics_dir / "06_clustering_test_summary.csv").exists()
+    assert (metrics_dir / "06_clustering_test_per_seed.csv").exists()
+    assert (metrics_dir / "06_clustering_test_report.md").exists()
+
+    payload = json.loads((metrics_dir / "06_clustering_test_report.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "ok"
+    assert payload["model_run_id"] == model_run_id
+    assert payload["pipeline_scope"] == "train"
+    assert payload["seeds_expected"] == [1, 2]
+    assert payload["seeds_evaluated"] == [1, 2]
+    assert set(payload["variants"].keys()) == {"dbscan_no_constraints", "dbscan_with_constraints"}
+
+
+def test_cli_run_cluster_test_report_fails_when_lspo_raw_missing(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    with pytest.raises(FileNotFoundError, match="LSPO parquet is required"):
+        _run_report(parser, cfg, model_run_id=model_run_id)
+
+
+def test_cli_run_cluster_test_report_fails_on_missing_checkpoint(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+
+    ckpt = tmp_path / "artifacts" / "checkpoints" / model_run_id / f"{model_run_id}_seed2.pt"
+    ckpt.unlink()
+
+    parser = cli.build_parser()
+    with pytest.raises(FileNotFoundError, match="Checkpoint for seed=2 does not exist"):
+        _run_report(parser, cfg, model_run_id=model_run_id)
+
+
+def test_cli_run_cluster_test_report_fails_on_subset_key_mismatch(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key="wrong_subset_key")
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    with pytest.raises(ValueError, match="Subset reproducibility check failed"):
+        _run_report(parser, cfg, model_run_id=model_run_id)

@@ -90,6 +90,35 @@ optional:
 - `blockers`
 - `warnings`
 
+`06_clustering_test_report.json`:
+
+- `pipeline_scope: train`
+- `model_run_id`, `run_stage`, `generated_utc`
+- `source_context_path`, `train_manifest_path`, `cluster_config_used_path`
+- `lspo_source_paths`, `lspo_source_fingerprint`
+- `seeds_expected`, `seeds_evaluated`
+- `selected_eps`, `min_samples`, `metric`
+- variant aggregates:
+  - `dbscan_no_constraints`
+  - `dbscan_with_constraints`
+  - each with `accuracy_mean/sem`, `precision_mean/sem`, `recall_mean/sem`, `f1_mean/sem`, `n_pairs_mean`, `n_pairs_total`
+- `per_seed_rows` (`seed`, `checkpoint`, `threshold`, `variant`, `accuracy`, `precision`, `recall`, `f1`, `n_pairs`)
+- `delta_with_constraints_minus_no_constraints`
+- `status` (`ok` on successful completion; command is fail-fast on preflight mismatches)
+
+`06_clustering_test_summary.csv`:
+
+- one row per variant (`dbscan_no_constraints`, `dbscan_with_constraints`)
+- aggregated metrics and SEM
+
+`06_clustering_test_per_seed.csv`:
+
+- one row per (`seed`, `variant`) evaluation
+
+`06_clustering_test_report.md`:
+
+- human-readable table version of the JSON report
+
 optional compare:
 
 - `99_compare_train_to_baseline.json`
