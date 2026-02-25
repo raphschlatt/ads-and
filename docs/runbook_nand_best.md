@@ -67,12 +67,12 @@ python3 -m src.cli run-infer-ads \
   --infer-stage mini \
   --paths-config configs/paths.local.yaml \
   --device auto
+```
 
 Infer stage presets:
 
 - `full` (default): process full deduplicated ADS mentions.
 - `smoke|mini|mid`: deterministic subset profiles from `configs/infer_runs/*.yaml`.
-```
 
 ## Gate Expectations
 
@@ -94,3 +94,41 @@ Infer scope checks:
 
 - `run-stage` is deprecated and maps to train-only behavior.
 - Legacy runs remain readable (read-only compatibility).
+- `raw_lspo_h5` warning can be ignored when `data/raw/lspo/LSPO_v1.parquet` exists.
+
+## Lean Baseline Anchor
+
+Canonical baseline id:
+
+- `full_20260218T111506Z_cli02681429`
+
+Before comparing any new experiment, run:
+
+```bash
+PYTHONPATH=. python3 scripts/ops/check_baseline_integrity.py \
+  --baseline-run-id full_20260218T111506Z_cli02681429
+```
+
+Pass criteria:
+
+- required keep-set files exist
+- `subset_cache_key_expected == subset_cache_key_computed`
+- `06_clustering_test_report.json` has `status=ok` and seeds `[1,2,3,4,5]`
+
+If the check reports missing files, restore only those missing paths from:
+
+- `/home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved`
+
+Targeted restore for the known shared baseline set:
+
+```bash
+mkdir -p data/cache/_shared/subsets data/cache/_shared/embeddings data/cache/_shared/pairs data/cache/_shared/eps_sweeps
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/subsets/lspo_mentions_full_seed11_targetfull_cfg0dbcdaf9_srcd52b159f766e.parquet data/cache/_shared/subsets/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/embeddings/lspo_chars2vec_05757fec0582.npy data/cache/_shared/embeddings/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/embeddings/lspo_specter_05757fec0582.npy data/cache/_shared/embeddings/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/pairs/lspo_mentions_split_978ea2bd7512.parquet data/cache/_shared/pairs/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/pairs/lspo_pairs_978ea2bd7512.parquet data/cache/_shared/pairs/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/pairs/split_balance_978ea2bd7512.json data/cache/_shared/pairs/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/pairs/pairs_qc_train_978ea2bd7512.json data/cache/_shared/pairs/
+cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/eps_sweeps/eps_sweep_4f69281cae15.json data/cache/_shared/eps_sweeps/
+```

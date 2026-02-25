@@ -43,6 +43,13 @@ PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
   --precision-mode fp32
 ```
 
+Lean-Baseline-Integritätscheck (vor Vergleichsläufen):
+
+```bash
+PYTHONPATH=. python3 scripts/ops/check_baseline_integrity.py \
+  --baseline-run-id full_20260218T111506Z_cli02681429
+```
+
 Deprecated alias (same behavior, warning emitted):
 
 ```bash
