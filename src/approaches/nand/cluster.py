@@ -230,6 +230,176 @@ def resolve_dbscan_eps(cluster_config: Dict[str, Any], cosine_threshold: float |
     return resolved, meta
 
 
+def _eps_bucket_label(bucket: dict[str, Any]) -> str:
+    max_size = bucket.get("max_size")
+    suffix = "inf" if max_size is None else str(int(max_size))
+    return f"{int(bucket['min_size'])}-{suffix}"
+
+
+def _normalize_eps_block_policy(cluster_config: Dict[str, Any]) -> dict[str, Any]:
+    raw_policy = cluster_config.get("eps_block_policy") or {}
+    if not isinstance(raw_policy, dict):
+        raise ValueError("eps_block_policy must be an object when provided.")
+
+    enabled = bool(raw_policy.get("enabled", False))
+    strategy = str(raw_policy.get("strategy", "size_delta")).strip().lower()
+    default_delta = float(raw_policy.get("default_delta", 0.0))
+    raw_buckets = raw_policy.get("buckets", [])
+
+    if not enabled:
+        return {
+            "enabled": False,
+            "strategy": "size_delta",
+            "default_delta": default_delta,
+            "buckets": [],
+        }
+
+    if strategy != "size_delta":
+        raise ValueError(
+            f"Unsupported eps_block_policy.strategy={strategy!r}; expected 'size_delta'."
+        )
+    if not isinstance(raw_buckets, list) or len(raw_buckets) == 0:
+        raise ValueError("eps_block_policy.enabled=true requires a non-empty buckets list.")
+
+    buckets: list[dict[str, Any]] = []
+    for idx, raw_bucket in enumerate(raw_buckets):
+        if not isinstance(raw_bucket, dict):
+            raise ValueError(f"eps_block_policy.buckets[{idx}] must be an object.")
+        if "min_size" not in raw_bucket:
+            raise ValueError(f"eps_block_policy.buckets[{idx}] missing required key 'min_size'.")
+        if "delta" not in raw_bucket:
+            raise ValueError(f"eps_block_policy.buckets[{idx}] missing required key 'delta'.")
+
+        min_size = int(raw_bucket["min_size"])
+        max_size_raw = raw_bucket.get("max_size")
+        max_size = None if max_size_raw is None else int(max_size_raw)
+        delta = float(raw_bucket["delta"])
+
+        if min_size < 1:
+            raise ValueError(
+                f"eps_block_policy.buckets[{idx}].min_size must be >= 1; got {min_size}."
+            )
+        if max_size is not None and max_size < min_size:
+            raise ValueError(
+                f"eps_block_policy.buckets[{idx}] invalid range: min_size={min_size}, max_size={max_size}."
+            )
+        buckets.append({"min_size": min_size, "max_size": max_size, "delta": delta})
+
+    buckets = sorted(
+        buckets,
+        key=lambda b: (
+            int(b["min_size"]),
+            float("inf") if b.get("max_size") is None else int(b["max_size"]),
+        ),
+    )
+
+    prev_max = 0
+    open_ended_seen = False
+    for idx, bucket in enumerate(buckets):
+        min_size = int(bucket["min_size"])
+        max_size = bucket.get("max_size")
+        if open_ended_seen:
+            raise ValueError(
+                "eps_block_policy has a bucket after an open-ended bucket (max_size=null), which overlaps."
+            )
+        if min_size <= prev_max:
+            raise ValueError(
+                "eps_block_policy buckets overlap or touch ambiguously; "
+                f"bucket[{idx}] starts at {min_size} while previous max_size is {prev_max}."
+            )
+        if max_size is None:
+            open_ended_seen = True
+        else:
+            prev_max = int(max_size)
+
+    return {
+        "enabled": True,
+        "strategy": "size_delta",
+        "default_delta": default_delta,
+        "buckets": buckets,
+    }
+
+
+def _resolve_block_eps(
+    *,
+    block_size: int,
+    eps_base: float,
+    eps_min: float,
+    eps_max: float,
+    eps_block_policy: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    delta = float(eps_block_policy.get("default_delta", 0.0))
+    bucket_label = "default"
+
+    if bool(eps_block_policy.get("enabled", False)):
+        for bucket in eps_block_policy.get("buckets", []):
+            min_size = int(bucket["min_size"])
+            max_size = bucket.get("max_size")
+            if block_size < min_size:
+                continue
+            if max_size is not None and block_size > int(max_size):
+                continue
+            delta = float(bucket["delta"])
+            bucket_label = _eps_bucket_label(bucket)
+            break
+
+    raw_eps = float(eps_base) + float(delta)
+    effective_eps = float(np.clip(raw_eps, eps_min, eps_max))
+    return effective_eps, {
+        "bucket": bucket_label,
+        "delta": float(delta),
+        "raw_eps": float(raw_eps),
+        "effective_eps": float(effective_eps),
+    }
+
+
+def _summarize_block_eps(
+    *,
+    eps_base: float,
+    eps_block_policy: dict[str, Any],
+    block_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    bucket_counts: dict[str, int] = {}
+    effective_eps_values: list[float] = []
+    for row in block_rows:
+        label = str(row["bucket"])
+        bucket_counts[label] = int(bucket_counts.get(label, 0)) + 1
+        effective_eps_values.append(float(row["effective_eps"]))
+
+    if len(effective_eps_values) == 0:
+        eff_min = None
+        eff_max = None
+        eff_mean = None
+    else:
+        arr = np.asarray(effective_eps_values, dtype=np.float64)
+        eff_min = float(arr.min())
+        eff_max = float(arr.max())
+        eff_mean = float(arr.mean())
+
+    bucket_specs = []
+    for bucket in eps_block_policy.get("buckets", []):
+        bucket_specs.append(
+            {
+                "label": _eps_bucket_label(bucket),
+                "min_size": int(bucket["min_size"]),
+                "max_size": None if bucket.get("max_size") is None else int(bucket["max_size"]),
+                "delta": float(bucket["delta"]),
+            }
+        )
+
+    return {
+        "strategy": str(eps_block_policy.get("strategy", "size_delta")),
+        "default_delta": float(eps_block_policy.get("default_delta", 0.0)),
+        "bucket_specs": bucket_specs,
+        "bucket_counts": bucket_counts,
+        "effective_eps_min": eff_min,
+        "effective_eps_max": eff_max,
+        "effective_eps_mean": eff_mean,
+        "n_blocks": int(len(block_rows)),
+        "eps_base": float(eps_base),
+    }
+
+
 def _resolve_cluster_backend(backend: str, metric: str) -> dict[str, Any]:
     requested = str(backend or "auto").strip().lower()
     if requested not in {"auto", "sklearn_cpu", "cuml_gpu"}:
@@ -392,7 +562,12 @@ def _cluster_worker(payload: dict[str, Any]) -> dict[str, Any]:
 def _build_block_entries(
     mentions: pd.DataFrame,
     pair_scores: pd.DataFrame,
-) -> list[dict[str, Any]]:
+    *,
+    eps_base: float,
+    eps_min: float,
+    eps_max: float,
+    eps_block_policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     grouped = mentions.groupby("block_key", sort=False)
     if len(pair_scores) > 0 and "block_key" in pair_scores.columns:
         score_indices = pair_scores.groupby("block_key", sort=False).indices
@@ -400,6 +575,7 @@ def _build_block_entries(
         score_indices = {}
 
     entries: list[dict[str, Any]] = []
+    eps_rows: list[dict[str, Any]] = []
     for block_key, block_mentions in grouped:
         block_mentions = block_mentions.reset_index(drop=True)
         block_idx = score_indices.get(block_key)
@@ -410,6 +586,14 @@ def _build_block_entries(
 
         n = int(len(block_mentions))
         pair_est = int(n * (n - 1) // 2)
+        effective_eps, eps_row = _resolve_block_eps(
+            block_size=n,
+            eps_base=float(eps_base),
+            eps_min=float(eps_min),
+            eps_max=float(eps_max),
+            eps_block_policy=eps_block_policy,
+        )
+        eps_rows.append(eps_row)
         entries.append(
             {
                 "block_key": str(block_key),
@@ -418,9 +602,16 @@ def _build_block_entries(
                 "size": n,
                 "pair_est": pair_est,
                 "matrix_bytes": int(max(1, n * n) * 4),
+                "effective_eps": float(effective_eps),
+                "eps_bucket": str(eps_row["bucket"]),
             }
         )
-    return entries
+    summary = _summarize_block_eps(
+        eps_base=float(eps_base),
+        eps_block_policy=eps_block_policy,
+        block_rows=eps_rows,
+    )
+    return entries, summary
 
 
 def _aggregate_sanitize_totals(rows: list[dict[str, int]]) -> dict[str, int]:
@@ -469,7 +660,7 @@ def _cluster_entries_sequential(
             block_key=entry["block_key"],
             block_mentions=entry["mentions"],
             block_scores=entry["scores"],
-            eps=eps,
+            eps=float(entry.get("effective_eps", eps)),
             min_samples=min_samples,
             metric=metric,
             constraints=constraints,
@@ -495,11 +686,21 @@ def cluster_blockwise_dbscan(
     return_meta: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, Dict[str, Any]]:
     eps = float(cluster_config.get("eps", 0.35))
+    eps_min = float(cluster_config.get("eps_min", 0.0))
+    eps_max = float(cluster_config.get("eps_max", 1.0))
     min_samples = int(cluster_config.get("min_samples", 1))
     metric = str(cluster_config.get("metric", "precomputed"))
     constraints = cluster_config.get("constraints", {})
+    eps_block_policy = _normalize_eps_block_policy(cluster_config)
 
-    entries = _build_block_entries(mentions=mentions, pair_scores=pair_scores)
+    entries, eps_block_policy_summary = _build_block_entries(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        eps_base=eps,
+        eps_min=eps_min,
+        eps_max=eps_max,
+        eps_block_policy=eps_block_policy,
+    )
     total_pairs_est = int(sum(int(e["pair_est"]) for e in entries))
     n_blocks = int(len(entries))
 
@@ -646,7 +847,7 @@ def cluster_blockwise_dbscan(
                                 "block_key": candidate["block_key"],
                                 "block_mentions": candidate["mentions"],
                                 "block_scores": candidate["scores"],
-                                "eps": float(eps),
+                                "eps": float(candidate.get("effective_eps", eps)),
                                 "min_samples": int(min_samples),
                                 "metric": str(metric),
                                 "constraints": dict(constraints or {}),
@@ -662,7 +863,7 @@ def cluster_blockwise_dbscan(
                                 "block_key": candidate["block_key"],
                                 "block_mentions": candidate["mentions"],
                                 "block_scores": candidate["scores"],
-                                "eps": float(eps),
+                                "eps": float(candidate.get("effective_eps", eps)),
                                 "min_samples": int(min_samples),
                                 "metric": str(metric),
                                 "constraints": dict(constraints or {}),
@@ -710,6 +911,9 @@ def cluster_blockwise_dbscan(
         save_parquet(out, output_path, index=False)
 
     meta = {
+        "eps_base": float(eps),
+        "eps_block_policy_enabled": bool(eps_block_policy.get("enabled", False)),
+        "eps_block_policy_summary": eps_block_policy_summary,
         "cluster_backend_requested": backend_requested,
         "cluster_backend_effective": backend_effective,
         "cluster_backend_reason": backend_info.get("reason"),

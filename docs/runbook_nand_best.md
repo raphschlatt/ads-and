@@ -132,3 +132,51 @@ cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_sh
 cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/pairs/pairs_qc_train_978ea2bd7512.json data/cache/_shared/pairs/
 cp -a /home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved/data/_shared/eps_sweeps/eps_sweep_4f69281cae15.json data/cache/_shared/eps_sweeps/
 ```
+
+## Quality Experiment Gate (`eps` buckets)
+
+Use this cycle for isolated clustering-quality iteration without touching blocking logic:
+
+```bash
+# Smoke run
+PYTHONPATH=. python3 -m src.cli run-train-stage \
+  --run-stage smoke \
+  --paths-config configs/paths.local.yaml \
+  --model-config configs/model/nand_best.yaml \
+  --cluster-config configs/clustering/dbscan_paper_eps_buckets_v1.yaml \
+  --run-id smoke_epsbkt_v1_$(date -u +%Y%m%dT%H%M%SZ) \
+  --device auto
+
+# Full candidate run
+PYTHONPATH=. python3 -m src.cli run-train-stage \
+  --run-stage full \
+  --paths-config configs/paths.local.yaml \
+  --model-config configs/model/nand_best.yaml \
+  --cluster-config configs/clustering/dbscan_paper_eps_buckets_v1.yaml \
+  --run-id full_epsbkt_v1_$(date -u +%Y%m%dT%H%M%SZ) \
+  --baseline-run-id full_20260218T111506Z_cli02681429 \
+  --device auto
+
+# Final clustering report for candidate full run
+PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+  --model-run-id full_epsbkt_v1_<timestamp> \
+  --paths-config configs/paths.local.yaml \
+  --device auto \
+  --precision-mode fp32
+```
+
+Hard gate decision (LSPO-only):
+
+```bash
+PYTHONPATH=. python3 scripts/ops/compare_cluster_test_reports.py \
+  --baseline-report artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report.json \
+  --candidate-report artifacts/metrics/full_epsbkt_v1_<timestamp>/06_clustering_test_report.json \
+  --variant dbscan_with_constraints \
+  --min-delta-f1 0.0 \
+  --max-precision-drop 0.001
+```
+
+Decision policy:
+
+- exit `0` => promote candidate
+- exit `1` => rollback to baseline

@@ -498,6 +498,35 @@ def test_cli_run_train_stage_writes_val_sweep_eps_metadata(monkeypatch, tmp_path
         assert 0.2 <= float(payload["cluster_config_used"]["eps"]) <= 0.5
 
 
+def test_cli_run_train_stage_accepts_eps_block_policy_config(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    cluster_cfg = yaml.safe_load(Path(cfg["cluster"]).read_text(encoding="utf-8"))
+    cluster_cfg["eps_block_policy"] = {
+        "enabled": True,
+        "strategy": "size_delta",
+        "default_delta": 0.0,
+        "buckets": [
+            {"min_size": 1, "max_size": 10, "delta": 0.03},
+            {"min_size": 11, "max_size": 65, "delta": 0.0},
+            {"min_size": 66, "max_size": None, "delta": -0.05},
+        ],
+    }
+    _write_yaml(Path(cfg["cluster"]), cluster_cfg)
+
+    parser = cli.build_parser()
+    run_id = "smoke_test_eps_block_policy_cfg"
+    _run_train_stage(parser, cfg, run_id, extra=["--force"])
+
+    meta_path = cfg["metrics_dir"] / run_id / "04_clustering_config_used.json"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    policy = payload["cluster_config_used"]["eps_block_policy"]
+    assert policy["enabled"] is True
+    assert policy["strategy"] == "size_delta"
+    assert float(policy["default_delta"]) == 0.0
+    assert len(policy["buckets"]) == 3
+
+
 def test_cli_run_train_stage_marks_val_sweep_boundary_hit(monkeypatch, tmp_path: Path):
     cfg = _make_configs(tmp_path)
     _apply_fast_mocks(monkeypatch)

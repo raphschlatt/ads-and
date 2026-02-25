@@ -50,6 +50,44 @@ PYTHONPATH=. python3 scripts/ops/check_baseline_integrity.py \
   --baseline-run-id full_20260218T111506Z_cli02681429
 ```
 
+`eps`-Bucket-Qualitätsexperiment (isoliert, LSPO-only Vergleich):
+
+```bash
+# 1) Smoke
+PYTHONPATH=. python3 -m src.cli run-train-stage \
+  --run-stage smoke \
+  --paths-config configs/paths.local.yaml \
+  --model-config configs/model/nand_best.yaml \
+  --cluster-config configs/clustering/dbscan_paper_eps_buckets_v1.yaml \
+  --run-id smoke_epsbkt_v1_$(date -u +%Y%m%dT%H%M%SZ) \
+  --device auto
+
+# 2) Full
+PYTHONPATH=. python3 -m src.cli run-train-stage \
+  --run-stage full \
+  --paths-config configs/paths.local.yaml \
+  --model-config configs/model/nand_best.yaml \
+  --cluster-config configs/clustering/dbscan_paper_eps_buckets_v1.yaml \
+  --run-id full_epsbkt_v1_$(date -u +%Y%m%dT%H%M%SZ) \
+  --baseline-run-id full_20260218T111506Z_cli02681429 \
+  --device auto
+
+# 3) Finaler Testreport für den Full-Kandidaten
+PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+  --model-run-id full_epsbkt_v1_<timestamp> \
+  --paths-config configs/paths.local.yaml \
+  --device auto \
+  --precision-mode fp32
+
+# 4) Harte Gate-Entscheidung gegen Baseline (F1 up + precision safe)
+PYTHONPATH=. python3 scripts/ops/compare_cluster_test_reports.py \
+  --baseline-report artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report.json \
+  --candidate-report artifacts/metrics/full_epsbkt_v1_<timestamp>/06_clustering_test_report.json \
+  --variant dbscan_with_constraints \
+  --min-delta-f1 0.0 \
+  --max-precision-drop 0.001
+```
+
 Deprecated alias (same behavior, warning emitted):
 
 ```bash

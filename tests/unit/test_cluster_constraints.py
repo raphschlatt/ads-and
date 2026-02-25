@@ -118,6 +118,185 @@ def test_resolve_dbscan_eps_val_sweep_prefers_selected_then_fallback():
     assert meta2["source"] == "val_sweep_fallback"
 
 
+def _complete_block_pair_scores(block_key: str, mention_ids: list[str], distance: float = 0.05) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for i in range(len(mention_ids)):
+        for j in range(i + 1, len(mention_ids)):
+            a = str(mention_ids[i])
+            b = str(mention_ids[j])
+            rows.append(
+                {
+                    "pair_id": f"{a}__{b}",
+                    "mention_id_1": a,
+                    "mention_id_2": b,
+                    "block_key": block_key,
+                    "distance": float(distance),
+                }
+            )
+    return rows
+
+
+def test_cluster_eps_block_policy_disabled_uses_base_eps(monkeypatch):
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "b1", "block_key": "blk.b", "author_raw": "B, B", "year": 2000},
+            {"mention_id": "b2", "block_key": "blk.b", "author_raw": "B, B", "year": 2001},
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        _complete_block_pair_scores("blk.a", ["a1", "a2"])
+        + _complete_block_pair_scores("blk.b", ["b1", "b2"])
+    )
+    cfg = {
+        "eps": 0.35,
+        "eps_min": 0.15,
+        "eps_max": 0.85,
+        "min_samples": 1,
+        "metric": "precomputed",
+        "constraints": {"enabled": False},
+        "eps_block_policy": {
+            "enabled": False,
+            "strategy": "size_delta",
+            "default_delta": 0.0,
+            "buckets": [
+                {"min_size": 1, "max_size": 10, "delta": 0.03},
+            ],
+        },
+    }
+
+    seen_eps: list[float] = []
+
+    class _FakeDBSCAN:
+        def __init__(self, *, eps, min_samples, metric):
+            seen_eps.append(float(eps))
+
+        def fit_predict(self, dist):
+            return np.zeros(dist.shape[0], dtype=np.int64)
+
+    monkeypatch.setattr("src.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
+
+    clusters, meta = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        backend="sklearn_cpu",
+        return_meta=True,
+    )
+
+    assert len(clusters) == 4
+    assert seen_eps == [0.35, 0.35]
+    assert meta["eps_base"] == 0.35
+    assert meta["eps_block_policy_enabled"] is False
+    assert meta["eps_block_policy_summary"]["bucket_counts"] == {"default": 2}
+
+
+def test_cluster_eps_block_policy_applies_buckets_and_clamp(monkeypatch):
+    small_ids = [f"s{i}" for i in range(2)]
+    mid_ids = [f"m{i}" for i in range(12)]
+    big_ids = [f"b{i}" for i in range(66)]
+
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": m, "block_key": "blk.small", "author_raw": "S, A", "year": 2000}
+            for m in small_ids
+        ]
+        + [
+            {"mention_id": m, "block_key": "blk.mid", "author_raw": "M, A", "year": 2001}
+            for m in mid_ids
+        ]
+        + [
+            {"mention_id": m, "block_key": "blk.big", "author_raw": "B, A", "year": 2002}
+            for m in big_ids
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        _complete_block_pair_scores("blk.small", small_ids)
+        + _complete_block_pair_scores("blk.mid", mid_ids)
+        + _complete_block_pair_scores("blk.big", big_ids)
+    )
+    cfg = {
+        "eps": 0.35,
+        "eps_min": 0.15,
+        "eps_max": 0.38,
+        "min_samples": 1,
+        "metric": "precomputed",
+        "constraints": {"enabled": False},
+        "eps_block_policy": {
+            "enabled": True,
+            "strategy": "size_delta",
+            "default_delta": 0.0,
+            "buckets": [
+                {"min_size": 1, "max_size": 10, "delta": 0.03},
+                {"min_size": 11, "max_size": 65, "delta": 0.0},
+                {"min_size": 66, "max_size": None, "delta": -0.05},
+            ],
+        },
+    }
+
+    seen_eps: list[float] = []
+
+    class _FakeDBSCAN:
+        def __init__(self, *, eps, min_samples, metric):
+            seen_eps.append(float(eps))
+
+        def fit_predict(self, dist):
+            return np.zeros(dist.shape[0], dtype=np.int64)
+
+    monkeypatch.setattr("src.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
+
+    _, meta = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        backend="sklearn_cpu",
+        return_meta=True,
+    )
+
+    rounded = sorted(round(v, 3) for v in seen_eps)
+    assert rounded == [0.3, 0.35, 0.38]
+    summary = meta["eps_block_policy_summary"]
+    assert summary["bucket_counts"] == {"1-10": 1, "11-65": 1, "66-inf": 1}
+    assert summary["effective_eps_min"] == pytest.approx(0.3)
+    assert summary["effective_eps_max"] == pytest.approx(0.38)
+
+
+def test_cluster_eps_block_policy_rejects_overlapping_buckets():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+        ]
+    )
+    pair_scores = pd.DataFrame(_complete_block_pair_scores("blk.a", ["a1", "a2"]))
+    cfg = {
+        "eps": 0.35,
+        "eps_min": 0.15,
+        "eps_max": 0.85,
+        "min_samples": 1,
+        "metric": "precomputed",
+        "constraints": {"enabled": False},
+        "eps_block_policy": {
+            "enabled": True,
+            "strategy": "size_delta",
+            "default_delta": 0.0,
+            "buckets": [
+                {"min_size": 1, "max_size": 10, "delta": 0.03},
+                {"min_size": 10, "max_size": 20, "delta": 0.0},
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="overlap|overlapping|starts"):
+        cluster_blockwise_dbscan(
+            mentions=mentions,
+            pair_scores=pair_scores,
+            cluster_config=cfg,
+            backend="sklearn_cpu",
+        )
+
+
 def test_cluster_blockwise_dbscan_sanitizes_invalid_precomputed_values():
     mentions = pd.DataFrame(
         [
