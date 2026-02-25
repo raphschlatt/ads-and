@@ -26,7 +26,12 @@ def test_cluster_then_export_consistency():
     )
 
     cfg = {"eps": 0.35, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": True, "max_year_gap": 30, "enforce_name_conflict": True}}
-    clusters = cluster_blockwise_dbscan(mentions=mentions, pair_scores=pair_scores, cluster_config=cfg)
+    clusters = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        backend="sklearn_cpu",
+    )
     exported = build_publication_author_mapping(mentions=mentions, clusters=clusters)
 
     assert exported["mention_id"].nunique() == len(mentions)

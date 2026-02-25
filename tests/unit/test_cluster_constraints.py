@@ -148,7 +148,12 @@ def test_cluster_blockwise_dbscan_sanitizes_invalid_precomputed_values():
     cfg = {"eps": 0.35, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
 
     with pytest.warns(RuntimeWarning, match="Sanitized DBSCAN precomputed distances"):
-        clusters = cluster_blockwise_dbscan(mentions=mentions, pair_scores=pair_scores, cluster_config=cfg)
+        clusters = cluster_blockwise_dbscan(
+            mentions=mentions,
+            pair_scores=pair_scores,
+            cluster_config=cfg,
+            backend="sklearn_cpu",
+        )
 
     assert len(clusters) == 4
     assert clusters["mention_id"].nunique() == 4

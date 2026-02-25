@@ -58,7 +58,12 @@ python3 -m src.cli run-infer-ads \
   --model-run-id full_2026... \
   --infer-stage full \
   --paths-config configs/paths.local.yaml \
-  --device auto
+  --device auto \
+  --cpu-sharding auto \
+  --cpu-workers auto \
+  --cpu-min-pairs-per-worker 1000000 \
+  --cpu-target-ram-fraction 0.6 \
+  --cluster-backend auto
 ```
 
 Infer ADS with model bundle:
@@ -69,8 +74,117 @@ python3 -m src.cli run-infer-ads \
   --model-bundle artifacts/models/full_2026.../bundle_v1 \
   --infer-stage mini \
   --paths-config configs/paths.local.yaml \
-  --device auto
+  --device auto \
+  --cpu-sharding auto \
+  --cpu-workers auto \
+  --cpu-min-pairs-per-worker 1000000 \
+  --cpu-target-ram-fraction 0.6 \
+  --cluster-backend auto
 ```
+
+Benchmark CPU-heavy infer stages (pair-building + clustering):
+
+```bash
+PYTHONPATH=. python3 scripts/benchmarks/bench_infer_cpu_stages.py \
+  --mentions-path data/cache/_shared/subsets/ads_mentions_infer_mid_seed11_target100000_cfg692bc637_src429cfdb0e85b.parquet \
+  --warmup-runs 1 \
+  --measure-runs 3 \
+  --cpu-min-pairs-per-worker 40000 \
+  --optimized-workers auto \
+  --optimized-sharding on \
+  --cluster-backend sklearn_cpu
+```
+
+## CPU/GPU Runtime Controls
+
+`run-infer-ads` supports mixed execution modes. Embeddings/pair-scoring can run on GPU (`--device auto`) while pair-building/clustering can be CPU-sharded.
+
+Default policy is GPU-first for clustering: `--cluster-backend auto` tries `cuml_gpu` first and uses CPU only as fallback.
+
+- `--cpu-sharding {auto,on,off}`:
+  - `auto`: enable only when estimated pair load is high enough.
+  - `on`: force sharding if effective workers > 1.
+  - `off`: force sequential CPU path.
+- `--cpu-workers {auto|N}`:
+  - `auto` resolves against cgroup/affinity CPU limits and pair complexity.
+  - `N` caps workers to user value, CPU limit, and block constraints.
+- `--cpu-min-pairs-per-worker <int>`:
+  - autoscaling threshold based on estimated pair count.
+  - default `1_000_000`.
+- `--cpu-target-ram-fraction <float>`:
+  - target fraction of available RAM used as CPU sharding budget.
+  - default `0.6`.
+- `--cluster-backend {auto,sklearn_cpu,cuml_gpu}`:
+  - `auto` (default/recommended): use cuML DBSCAN when available and compatible, else CPU sklearn fallback.
+  - `sklearn_cpu`: force paper-reference CPU backend.
+  - `cuml_gpu`: request GPU DBSCAN; runtime falls back to CPU on incompatibility/failure.
+
+## Runtime Modes
+
+- `CPU only`:
+  - `--device cpu --cluster-backend sklearn_cpu`.
+- `GPU embeddings/scoring + CPU clustering`:
+  - `--device auto --cluster-backend sklearn_cpu`.
+- `GPU embeddings/scoring + GPU clustering`:
+  - `--device auto --cluster-backend auto` (or `cuml_gpu`).
+  - requires optional cuML dependencies and supported CUDA runtime.
+
+## Optional cuML GPU Clustering
+
+cuML is optional and not required for default CPU-safe operation.
+
+Install in a dedicated environment:
+
+```bash
+python3 -m venv .venv-cuml
+source .venv-cuml/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-research.txt
+python -m pip install "cuml-cu12>=26.2,<27" "cupy-cuda12x>=14,<15"
+```
+
+Runtime behavior:
+
+- if `cuml`/`cupy` are missing, `cluster_backend=auto` resolves to `sklearn_cpu`.
+- if `cluster_backend=cuml_gpu` is requested but unavailable, runtime warns and falls back to `sklearn_cpu`.
+- if GPU DBSCAN fails at runtime, execution falls back deterministically to CPU DBSCAN with warning and reason.
+
+Smoke-check backend behavior:
+
+```bash
+PYTHONPATH=. python3 scripts/benchmarks/cuml_e2e_smoke.py
+```
+
+Require real GPU backend resolution in a cuML-enabled env:
+
+```bash
+PYTHONPATH=. python3 scripts/benchmarks/cuml_e2e_smoke.py --require-gpu-backend
+```
+
+## Performance (Measured)
+
+Reference benchmark run on `2026-02-25` (`100k` ADS mentions subset, estimated `292,456` pairs):
+
+- machine: `8 vCPU` host with effective cgroup CPU limit `7`.
+- benchmark method: `1` warmup + `3` measured runs, medians reported.
+- benchmark report: `artifacts/benchmarks/cpu_sharding_20260225T102412Z.json`.
+- benchmark setting for auto-scaling: `cpu_min_pairs_per_worker=40000` (default is `1000000`; on smaller subsets default may keep auto in sequential mode).
+
+| Stage | Baseline (`workers=1`, `sharding=off`) | Optimized (`workers=auto`, `sharding=on`) | Speedup |
+|---|---:|---:|---:|
+| Pair-building | 68.024s | 32.987s | 2.062x |
+| Clustering | 58.652s | 42.325s | 1.386x |
+| CPU total | 127.486s | 76.342s | 1.670x |
+
+Interpretation:
+
+- measured CPU-stage time reduction is about `40.1%`.
+- gate status on this run:
+  - pair-building `>=2.0x`: passed.
+  - clustering `>=2.0x`: not passed.
+  - CPU total `>=2.0x`: not passed.
+- end-to-end speedup depends on how dominant CPU stages are in your run.
+- with CPU share in `40%-80%`, Amdahl projection gives about `1.19x-1.47x` total speedup for this measured `1.670x` CPU-stage gain.
 
 ## ADS Input Contract
 

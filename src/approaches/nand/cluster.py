@@ -491,7 +491,7 @@ def cluster_blockwise_dbscan(
     sharding_mode: str = "auto",
     min_pairs_per_worker: int = 1_000_000,
     ram_budget_bytes: int | None = None,
-    backend: str = "sklearn_cpu",
+    backend: str = "auto",
     return_meta: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, Dict[str, Any]]:
     eps = float(cluster_config.get("eps", 0.35))
