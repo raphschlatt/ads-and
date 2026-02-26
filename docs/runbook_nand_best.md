@@ -164,3 +164,18 @@ Decision policy:
 
 - exit `0` => promote candidate
 - exit `1` => rollback to baseline
+
+Freeze + Soft Rollback artifacts:
+
+```bash
+PYTHONPATH=. python3 scripts/ops/freeze_eps_experiments.py \
+  --baseline-run-id full_20260218T111506Z_cli02681429
+```
+
+Expected outputs:
+
+- `98_eps_experiments_manifest.json`
+- `98_eps_experiments_manifest.md`
+- `98_active_baseline.json`
+
+Current status: `dbscan_paper_eps_buckets_v1.yaml`, `dbscan_paper_eps_buckets_v2.yaml`, `dbscan_paper_eps_buckets_v3.yaml` remain experiment-only and are not promoted.

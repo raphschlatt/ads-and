@@ -1,0 +1,39 @@
+method: "dbscan"
+eps_mode: "val_sweep"  # fixed | from_threshold | val_sweep
+eps: 0.35
+eps_fallback: 0.35
+eps_sweep_min: 0.2
+eps_sweep_max: 0.5
+eps_sweep_step: 0.05
+eps_min: 0.15
+eps_max: 0.85
+eps_block_policy:
+  enabled: true
+  strategy: "size_delta"
+  default_delta: 0.0
+  buckets:
+    - min_size: 1
+      max_size: 10
+      delta: 0.02
+    - min_size: 11
+      max_size: 65
+      delta: 0.0
+    - min_size: 66
+      max_size: null
+      delta: -0.02
+boundary_diagnostics:
+  diag_min: 0.55
+  diag_max: 0.70
+  diag_step: 0.05
+  delta_f1_threshold: 0.005
+min_samples: 1
+metric: "precomputed"
+constraints:
+  enabled: true
+  constraint_mode: "soft"  # soft | hard
+  name_conflict_mode: "hard"  # hard | soft
+  year_gap_mode: "soft"  # hard | soft
+  max_year_gap: 30
+  enforce_name_conflict: true
+  name_conflict_min_distance: 0.75
+  year_gap_min_distance: 0.65

@@ -72,6 +72,21 @@ PYTHONPATH=. python3 scripts/ops/compare_cluster_test_reports.py \
   --max-precision-drop 0.001
 ```
 
+Ergebnisse sichern + Soft Rollback auf Baseline:
+
+```bash
+PYTHONPATH=. python3 scripts/ops/freeze_eps_experiments.py \
+  --baseline-run-id full_20260218T111506Z_cli02681429
+```
+
+Das erzeugt:
+
+- `artifacts/metrics/full_20260218T111506Z_cli02681429/98_eps_experiments_manifest.json`
+- `artifacts/metrics/full_20260218T111506Z_cli02681429/98_eps_experiments_manifest.md`
+- `artifacts/metrics/full_20260218T111506Z_cli02681429/98_active_baseline.json`
+
+Hinweis: `configs/clustering/dbscan_paper_eps_buckets_v1.yaml`, `configs/clustering/dbscan_paper_eps_buckets_v2.yaml` und `configs/clustering/dbscan_paper_eps_buckets_v3.yaml` sind aktuell experimentell und nicht promoted.
+
 Deprecated alias (same behavior, warning emitted):
 
 ```bash
