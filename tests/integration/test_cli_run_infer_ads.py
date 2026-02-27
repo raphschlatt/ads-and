@@ -514,3 +514,90 @@ def test_cli_and_api_infer_ads_parity(monkeypatch, tmp_path: Path):
     assert cli_stage["infer_stage"] == api_stage["infer_stage"] == "full"
     assert cli_stage["counts"]["ads_mentions"] == api_stage["counts"]["ads_mentions"]
     assert cli_stage["counts"]["ads_cluster_assignments"] == api_stage["counts"]["ads_cluster_assignments"]
+
+
+def test_cli_run_infer_ads_uid_scope_registry_is_stable_across_runs(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id_a = "infer_ads_registry_a"
+    run_id_b = "infer_ads_registry_b"
+    uid_namespace = "stable_ads"
+
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id_a,
+        uid_scope="registry",
+        uid_namespace=uid_namespace,
+    )
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id_b,
+        uid_scope="registry",
+        uid_namespace=uid_namespace,
+    )
+
+    clusters_a = pd.read_parquet(tmp_path / "artifacts" / "clusters" / run_id_a / "ads_clusters_infer_ads.parquet")
+    clusters_b = pd.read_parquet(tmp_path / "artifacts" / "clusters" / run_id_b / "ads_clusters_infer_ads.parquet")
+    merged = clusters_a[["mention_id", "author_uid"]].merge(
+        clusters_b[["mention_id", "author_uid"]],
+        on="mention_id",
+        suffixes=("_a", "_b"),
+        how="inner",
+    )
+    assert len(merged) == len(clusters_a)
+    assert (merged["author_uid_a"].astype(str) == merged["author_uid_b"].astype(str)).all()
+    assert merged["author_uid_a"].astype(str).str.startswith("stable_ads::au").all()
+
+
+def test_cli_run_infer_ads_uid_scope_registry_rebuilds_stage_reports_on_resume(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id = "infer_ads_registry_resume"
+    uid_namespace = "stable_ads"
+
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id,
+        uid_scope="registry",
+        uid_namespace=uid_namespace,
+    )
+
+    metrics_dir = cfg["metrics_dir"] / run_id
+    stage_path = metrics_dir / "05_stage_metrics_infer_ads.json"
+    stage_path.write_text('{"stale": true}', encoding="utf-8")
+
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id,
+        uid_scope="registry",
+        uid_namespace=uid_namespace,
+    )
+
+    rebuilt_stage = json.loads(stage_path.read_text(encoding="utf-8"))
+    assert rebuilt_stage.get("stale") is None
+    assert rebuilt_stage["stage"] == "infer_ads"
+    assert rebuilt_stage["metric_scope"] == "infer"

@@ -191,11 +191,12 @@ Default policy is GPU-first for clustering: `--cluster-backend auto` tries `cuml
   - `auto` (default/recommended): use cuML DBSCAN when available and compatible, else CPU sklearn fallback.
   - `sklearn_cpu`: force paper-reference CPU backend.
   - `cuml_gpu`: request GPU DBSCAN; runtime falls back to CPU on incompatibility/failure.
-- `--uid-scope {dataset,local}`:
+- `--uid-scope {dataset,local,registry}`:
   - `dataset` (default): writes dataset-namespaced global IDs (`<dataset-tag>::<local_uid>`).
   - `local`: keeps legacy local IDs (`<block_key>::<cluster_label>`).
+  - `registry`: writes persistent stable IDs (`<uid-namespace>::au#########`) by reusing a shared UID registry across runs.
 - `--uid-namespace <str>`:
-  - optional override for dataset namespace when `--uid-scope dataset`.
+  - optional override for namespace when `--uid-scope dataset|registry`.
   - defaults to normalized dataset tag from `--dataset-id`.
 
 ## Runtime Modes

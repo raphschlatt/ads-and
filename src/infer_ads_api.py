@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 
-UidScope = Literal["dataset", "local"]
+UidScope = Literal["dataset", "local", "registry"]
 
 
 @dataclass

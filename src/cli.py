@@ -60,6 +60,7 @@ from src.common.pipeline_reports import (
     write_json,
 )
 from src.common.run_report import evaluate_go_no_go, load_gate_config, write_go_no_go_report
+from src.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
 from src.common.subset_artifacts import (
     atomic_save_parquet,
     compute_lspo_source_fp,
@@ -80,7 +81,7 @@ INFER_SUBSET_CACHE_VERSION = "v1"
 _RUN_STAGE_DEPRECATION_SHOWN = False
 _CLUSTER_OVERRIDE_EPS_FIELDS = ("eps", "selected_eps", "eps_mode")
 _REPORT_TAG_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
-_UID_SCOPE_VALUES = {"dataset", "local"}
+_UID_SCOPE_VALUES = {"dataset", "local", "registry"}
 
 
 def _load_run_cfg(path: str | Path) -> dict:
@@ -1087,7 +1088,7 @@ def _resolve_uid_namespace(
 
     value = str(dataset_tag if uid_namespace is None else uid_namespace).strip()
     if value == "":
-        raise ValueError("uid_namespace must be non-empty when uid_scope='dataset'.")
+        raise ValueError(f"uid_namespace must be non-empty when uid_scope={uid_scope!r}.")
     if "::" in value:
         raise ValueError("uid_namespace must not contain '::'.")
     if _REPORT_TAG_PATTERN.fullmatch(value) is None:
@@ -1124,6 +1125,50 @@ def _apply_uid_scope_to_clusters(
     else:
         out["author_uid"] = out["author_uid_local"].astype(str)
     return out
+
+
+def _apply_uid_mode_to_clusters(
+    *,
+    clusters: pd.DataFrame,
+    uid_scope: str,
+    uid_namespace: str | None,
+    uid_registry_path: Path | None,
+) -> tuple[pd.DataFrame, dict[str, Any] | None]:
+    if uid_scope != "registry":
+        scoped = _apply_uid_scope_to_clusters(
+            clusters=clusters,
+            uid_scope=uid_scope,
+            uid_namespace=uid_namespace,
+        )
+        return scoped, None
+
+    if uid_namespace is None:
+        raise ValueError("uid_namespace is required when uid_scope='registry'.")
+    if uid_registry_path is None:
+        raise ValueError("uid_registry_path is required when uid_scope='registry'.")
+
+    registry = load_uid_registry(uid_registry_path, namespace=uid_namespace)
+    scoped, registry_out, assign_meta = assign_registry_uids(
+        clusters=clusters,
+        registry=registry,
+        uid_namespace=uid_namespace,
+    )
+    save_uid_registry(uid_registry_path, registry_out)
+    return scoped, {
+        "uid_scope": "registry",
+        "uid_namespace": uid_namespace,
+        "uid_registry_path": str(uid_registry_path),
+        "uid_registry_schema_version": str(registry_out.get("schema_version")),
+        "uid_registry_size_after": int(assign_meta.registry_size_after),
+        "uid_registry_next_id_after": int(assign_meta.next_id_after),
+        "uid_registry_clusters_total": int(assign_meta.clusters_total),
+        "uid_registry_clusters_reused": int(assign_meta.clusters_reused),
+        "uid_registry_clusters_new": int(assign_meta.clusters_new),
+        "uid_registry_clusters_merged_conflicts": int(assign_meta.clusters_merged_conflicts),
+        "uid_registry_mentions_total": int(assign_meta.mentions_total),
+        "uid_registry_mentions_previously_mapped": int(assign_meta.mentions_previously_mapped),
+        "uid_registry_mentions_newly_mapped": int(assign_meta.mentions_newly_mapped),
+    }
 
 
 def _resolve_report_paths(metrics_dir: Path, report_tag: str | None) -> dict[str, Path]:
@@ -2694,6 +2739,11 @@ def _run_infer_ads_impl(args):
             uid_namespace=getattr(args, "uid_namespace", None),
             dataset_tag=dataset_tag,
         )
+        uid_registry_path = (
+            None
+            if uid_scope != "registry"
+            else Path(str(art_cfg["root"])) / "uid_registry" / f"{uid_namespace}.json"
+        )
         subset_identity = _compute_infer_subset_identity(
             dataset_source_fp=dataset_source_fp,
             infer_stage=infer_stage,
@@ -2740,6 +2790,7 @@ def _run_infer_ads_impl(args):
             "dataset_source_fp": dataset_source_fp,
             "uid_scope": uid_scope,
             "uid_namespace": uid_namespace,
+            "uid_registry_path": None if uid_registry_path is None else str(uid_registry_path),
             "subset_tag": subset_tag,
             "model_run_id": model_info["model_run_id"],
             "model_source_type": str(model_info.get("model_source_type", "run_id")),
@@ -2924,6 +2975,7 @@ def _run_infer_ads_impl(args):
                 "dataset_source_fp": dataset_source_fp,
                 "uid_scope": uid_scope,
                 "uid_namespace": uid_namespace,
+                "uid_registry_path": None if uid_registry_path is None else str(uid_registry_path),
                 "ads_mentions_path": str(ads_mentions_path),
                 "ads_mentions_full_path": str(ads_mentions_full_path),
                 "ads_mentions_full": int(len(ads_mentions_full)),
@@ -3284,19 +3336,54 @@ def _run_infer_ads_impl(args):
         )
         if dataset_info["references_present"]:
             cluster_cache_hit = cluster_cache_hit and references_disambig_path.exists()
+        cluster_cfg_used_existing: dict[str, Any] = {}
+        if cluster_cache_hit:
+            cluster_cfg_used_existing = _load_json(cluster_cfg_used_path) or {}
+            existing_uid_scope = str(cluster_cfg_used_existing.get("uid_scope", "dataset"))
+            existing_uid_namespace = cluster_cfg_used_existing.get("uid_namespace")
+            if uid_scope != existing_uid_scope or uid_namespace != existing_uid_namespace:
+                cluster_cache_hit = False
 
         eps_meta: dict[str, Any] = {}
         cluster_runtime_meta: dict[str, Any] = {}
+        uid_mode_meta: dict[str, Any] | None = None
         if cluster_cache_hit:
             clusters = read_parquet(clusters_path)
-            clusters = _apply_uid_scope_to_clusters(
+            clusters, uid_mode_meta = _apply_uid_mode_to_clusters(
                 clusters=clusters,
                 uid_scope=uid_scope,
                 uid_namespace=uid_namespace,
+                uid_registry_path=uid_registry_path,
             )
-            cluster_qc = _load_json(cluster_qc_path)
-            source_export_qc = _load_json(source_export_qc_path)
-            cfg_payload = _load_json(cluster_cfg_used_path) or {}
+            save_parquet(clusters, clusters_path, index=False)
+            if uid_scope == "registry":
+                _ = build_publication_author_mapping(
+                    mentions=ads_mentions,
+                    clusters=clusters,
+                    output_path=publication_export_path,
+                )
+                source_export_qc = export_source_mirrored_outputs(
+                    clusters=clusters,
+                    publications_path=dataset_info["publications_path"],
+                    references_path=dataset_info["references_path"],
+                    publications_output_path=publications_disambig_path,
+                    references_output_path=references_disambig_path if dataset_info["references_present"] else None,
+                )
+                write_json(source_export_qc, source_export_qc_path)
+                pair_scores = read_parquet(pair_scores_shared_path_used)
+                cluster_qc = build_cluster_qc(
+                    pair_scores=pair_scores,
+                    clusters=clusters,
+                    threshold=float(model_info["best_threshold"]),
+                )
+                write_json(cluster_qc, cluster_qc_path)
+            else:
+                cluster_qc = _load_json(cluster_qc_path)
+                source_export_qc = _load_json(source_export_qc_path)
+            cfg_payload = cluster_cfg_used_existing or {}
+            if uid_mode_meta:
+                cfg_payload["uid_resolution"] = uid_mode_meta
+                write_json(cfg_payload, cluster_cfg_used_path)
             eps_meta = dict(cfg_payload.get("eps_resolution", {}) or {})
             cluster_runtime_meta = dict(cfg_payload.get("cluster_runtime", {}) or {})
             cluster_backend_effective = str(
@@ -3306,6 +3393,8 @@ def _run_infer_ads_impl(args):
             context_payload["cpu_workers_effective"] = int(
                 cluster_runtime_meta.get("cpu_workers_effective", cpu_workers_effective)
             )
+            if uid_mode_meta:
+                context_payload.update(uid_mode_meta)
             write_json(context_payload, metrics_dir / "00_context.json")
             ui.skip(f"Reused clustering outputs ({len(clusters)} mentions).")
         else:
@@ -3347,10 +3436,11 @@ def _run_infer_ads_impl(args):
                 backend=cluster_backend_requested,
                 return_meta=True,
             )
-            clusters = _apply_uid_scope_to_clusters(
+            clusters, uid_mode_meta = _apply_uid_mode_to_clusters(
                 clusters=clusters,
                 uid_scope=uid_scope,
                 uid_namespace=uid_namespace,
+                uid_registry_path=uid_registry_path,
             )
             save_parquet(clusters, clusters_path, index=False)
             cluster_backend_effective = str(
@@ -3360,24 +3450,26 @@ def _run_infer_ads_impl(args):
             context_payload["cpu_workers_effective"] = int(
                 cluster_runtime_meta.get("cpu_workers_effective", cpu_workers_effective)
             )
+            if uid_mode_meta:
+                context_payload.update(uid_mode_meta)
             write_json(context_payload, metrics_dir / "00_context.json")
 
-            write_json(
-                {
-                    "run_id": run_id,
-                    "run_stage": stage,
-                    "pipeline_scope": "infer",
-                    "infer_stage": infer_stage,
-                    "model_run_id": model_info["model_run_id"],
-                    "uid_scope": uid_scope,
-                    "uid_namespace": uid_namespace,
-                    "best_threshold": float(model_info["best_threshold"]),
-                    "eps_resolution": eps_meta,
-                    "cluster_config_used": cluster_cfg_used,
-                    "cluster_runtime": cluster_runtime_meta,
-                },
-                cluster_cfg_used_path,
-            )
+            cluster_used_payload = {
+                "run_id": run_id,
+                "run_stage": stage,
+                "pipeline_scope": "infer",
+                "infer_stage": infer_stage,
+                "model_run_id": model_info["model_run_id"],
+                "uid_scope": uid_scope,
+                "uid_namespace": uid_namespace,
+                "best_threshold": float(model_info["best_threshold"]),
+                "eps_resolution": eps_meta,
+                "cluster_config_used": cluster_cfg_used,
+                "cluster_runtime": cluster_runtime_meta,
+            }
+            if uid_mode_meta:
+                cluster_used_payload["uid_resolution"] = uid_mode_meta
+            write_json(cluster_used_payload, cluster_cfg_used_path)
             _ = build_publication_author_mapping(
                 mentions=ads_mentions,
                 clusters=clusters,
@@ -3416,7 +3508,13 @@ def _run_infer_ads_impl(args):
             extras={"command": "run-infer-ads"},
         )
 
-        if stage_metrics_path.exists() and go_no_go_path.exists() and not args.force:
+        stage_report_cache_allowed = uid_scope != "registry"
+        if (
+            stage_metrics_path.exists()
+            and go_no_go_path.exists()
+            and not args.force
+            and stage_report_cache_allowed
+        ):
             stage_metrics = _load_json(stage_metrics_path)
             go = _load_json(go_no_go_path)
             ui.skip(f"Reused stage reports (GO={go.get('go')}).")
@@ -3927,7 +4025,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cpu-min-pairs-per-worker", type=int, default=None)
     sp.add_argument("--cpu-target-ram-fraction", type=float, default=None)
     sp.add_argument("--cluster-backend", choices=["auto", "sklearn_cpu", "cuml_gpu"], default=None)
-    sp.add_argument("--uid-scope", choices=["dataset", "local"], default="dataset")
+    sp.add_argument("--uid-scope", choices=["dataset", "local", "registry"], default="dataset")
     sp.add_argument("--uid-namespace", default=None)
     sp.add_argument("--baseline-run-id", default=None)
     sp.add_argument("--force", action="store_true")

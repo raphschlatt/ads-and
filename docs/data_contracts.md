@@ -132,8 +132,9 @@ optional compare:
 - `pipeline_scope: infer` (required)
 - `dataset_id`
 - UID scope metadata:
-  - `uid_scope` (`dataset` or `local`)
-  - `uid_namespace` (required when `uid_scope=dataset`)
+  - `uid_scope` (`dataset`, `local`, or `registry`)
+  - `uid_namespace` (required when `uid_scope=dataset|registry`)
+  - `uid_registry_path` (present when `uid_scope=registry`)
 - model source (`model_run_id` or `model_bundle_dir`)
 - resolved checkpoint/threshold/eps/precision
 - CPU runtime controls and resolution:

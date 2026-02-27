@@ -217,6 +217,25 @@ def test_run_infer_ads_parser_boolean_overrides():
     assert args.uid_namespace == "ignored_in_local"
 
 
+def test_run_infer_ads_parser_accepts_registry_uid_scope():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-ads",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-run-id",
+            "full_2026abc",
+            "--uid-scope",
+            "registry",
+            "--uid-namespace",
+            "stable_ads",
+        ]
+    )
+    assert args.uid_scope == "registry"
+    assert args.uid_namespace == "stable_ads"
+
+
 def test_run_infer_ads_parser_requires_exactly_one_model_source():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
