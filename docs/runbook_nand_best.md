@@ -179,3 +179,12 @@ Expected outputs:
 - `98_active_baseline.json`
 
 Current status: `dbscan_paper_eps_buckets_v1.yaml`, `dbscan_paper_eps_buckets_v2.yaml`, `dbscan_paper_eps_buckets_v3.yaml` remain experiment-only and are not promoted.
+
+## Blocking/Rescue Experiment Status (Rollback)
+
+- Blocking/Rescue LSPO experiments were executed and reviewed, but not promoted.
+- Rollback decision log (metrics, deltas, gates, provenance, archive path):
+  - `docs/experiments/2026-02-27_blocking_rescue_lspo_rollback.md`
+- Active policy remains:
+  - baseline clustering report + EPS gate workflow only
+  - no blocking/rescue experiment flags in active pipeline path
