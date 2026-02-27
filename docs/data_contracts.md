@@ -42,6 +42,7 @@ optional:
 - `mention_id`
 - `block_key`
 - `author_uid`
+- optional `author_uid_local` (local block UID before namespace)
 
 `publication_authors.parquet`:
 
@@ -50,6 +51,7 @@ optional:
 - `mention_id`
 - `author_uid`
 - `source_type`
+- optional `author_uid_local` (local block UID before namespace)
 
 ## Train Artifacts (`run-train-stage`)
 
@@ -129,6 +131,9 @@ optional compare:
 
 - `pipeline_scope: infer` (required)
 - `dataset_id`
+- UID scope metadata:
+  - `uid_scope` (`dataset` or `local`)
+  - `uid_namespace` (required when `uid_scope=dataset`)
 - model source (`model_run_id` or `model_bundle_dir`)
 - resolved checkpoint/threshold/eps/precision
 - CPU runtime controls and resolution:

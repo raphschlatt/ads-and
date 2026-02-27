@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from src import cli
+from src.infer_ads_api import InferAdsRequest, run_infer_ads
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:
@@ -208,6 +209,8 @@ def _run_infer_ads(
     model_run_id: str | None = None,
     model_bundle: str | None = None,
     infer_stage: str | None = None,
+    uid_scope: str | None = None,
+    uid_namespace: str | None = None,
 ) -> None:
     argv = [
         "run-infer-ads",
@@ -223,6 +226,10 @@ def _run_infer_ads(
     ]
     if infer_stage is not None:
         argv.extend(["--infer-stage", infer_stage])
+    if uid_scope is not None:
+        argv.extend(["--uid-scope", uid_scope])
+    if uid_namespace is not None:
+        argv.extend(["--uid-namespace", uid_namespace])
     if model_run_id is not None:
         argv.extend(["--model-run-id", model_run_id])
     if model_bundle is not None:
@@ -271,6 +278,8 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     assert context["cpu_sharding_mode"] == "auto"
     assert context["cluster_backend_requested"] == "auto"
     assert context["cluster_backend_effective"] in {"auto", "sklearn_cpu"}
+    assert context["uid_scope"] == "dataset"
+    assert context["uid_namespace"] == "my_ads_2026"
 
     summary = json.loads((metrics_dir / "01_input_summary.json").read_text(encoding="utf-8"))
     assert summary["references_present"] is False
@@ -294,7 +303,16 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     clusters = pd.read_parquet(cluster_path)
     export = pd.read_parquet(export_path)
     assert {"mention_id", "block_key", "author_uid"}.issubset(clusters.columns)
-    assert {"bibcode", "author_idx", "mention_id", "source_type", "author_uid"}.issubset(export.columns)
+    assert {"mention_id", "author_uid", "author_uid_local"}.issubset(clusters.columns)
+    assert {"bibcode", "author_idx", "mention_id", "source_type", "author_uid", "author_uid_local"}.issubset(
+        export.columns
+    )
+    assert clusters["author_uid"].astype(str).str.startswith("my_ads_2026::").all()
+    assert (clusters["author_uid_local"].astype(str) == clusters["block_key"].astype(str) + "::0").all()
+
+    first_row = json.loads(pubs_out.read_text(encoding="utf-8").splitlines()[0])
+    assert "AuthorUID" in first_row
+    assert all(uid is None or str(uid).startswith("my_ads_2026::") for uid in first_row["AuthorUID"])
 
 
 def test_cli_run_infer_ads_resume_reuses_artifacts(monkeypatch, tmp_path: Path):
@@ -424,3 +442,75 @@ def test_cli_run_infer_ads_supports_model_bundle(monkeypatch, tmp_path: Path):
     assert context["model_source_type"] == "bundle"
     assert context["model_bundle_dir"] == str(bundle_manifest.parent.resolve())
     assert context["selected_eps"] == 0.42
+    assert context["uid_scope"] == "dataset"
+    assert context["uid_namespace"] == "my_ads_2026"
+
+
+def test_cli_run_infer_ads_uid_scope_local_keeps_local_ids(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id = "infer_ads_uid_local"
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id,
+        uid_scope="local",
+    )
+
+    cluster_path = tmp_path / "artifacts" / "clusters" / run_id / "ads_clusters_infer_ads.parquet"
+    clusters = pd.read_parquet(cluster_path)
+    assert {"author_uid", "author_uid_local"}.issubset(clusters.columns)
+    assert (clusters["author_uid"].astype(str) == clusters["author_uid_local"].astype(str)).all()
+    assert (~clusters["author_uid"].astype(str).str.startswith("my_ads_2026::")).all()
+
+
+def test_cli_and_api_infer_ads_parity(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026"
+    model_run_id = "full_2026abc"
+    _write_dataset(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id_cli = "infer_ads_cli_parity"
+    run_id_api = "infer_ads_api_parity"
+
+    _run_infer_ads(
+        parser,
+        cfg,
+        dataset_id=dataset_id,
+        model_run_id=model_run_id,
+        run_id=run_id_cli,
+    )
+
+    api_result = run_infer_ads(
+        InferAdsRequest(
+            dataset_id=dataset_id,
+            model_run_id=model_run_id,
+            paths_config=str(cfg["paths"]),
+            cluster_config=str(cfg["cluster"]),
+            run_id=run_id_api,
+            progress=False,
+        )
+    )
+
+    cli_metrics_dir = cfg["metrics_dir"] / run_id_cli
+    api_metrics_dir = cfg["metrics_dir"] / run_id_api
+    cli_stage = json.loads((cli_metrics_dir / "05_stage_metrics_infer_ads.json").read_text(encoding="utf-8"))
+    api_stage = json.loads((api_metrics_dir / "05_stage_metrics_infer_ads.json").read_text(encoding="utf-8"))
+
+    assert api_result.run_id == run_id_api
+    assert api_result.metrics_dir == api_metrics_dir
+    assert cli_stage["metric_scope"] == api_stage["metric_scope"] == "infer"
+    assert cli_stage["infer_stage"] == api_stage["infer_stage"] == "full"
+    assert cli_stage["counts"]["ads_mentions"] == api_stage["counts"]["ads_mentions"]
+    assert cli_stage["counts"]["ads_cluster_assignments"] == api_stage["counts"]["ads_cluster_assignments"]

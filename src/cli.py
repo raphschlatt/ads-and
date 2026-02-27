@@ -80,6 +80,7 @@ INFER_SUBSET_CACHE_VERSION = "v1"
 _RUN_STAGE_DEPRECATION_SHOWN = False
 _CLUSTER_OVERRIDE_EPS_FIELDS = ("eps", "selected_eps", "eps_mode")
 _REPORT_TAG_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_UID_SCOPE_VALUES = {"dataset", "local"}
 
 
 def _load_run_cfg(path: str | Path) -> dict:
@@ -1064,6 +1065,65 @@ def _sanitize_report_tag(tag: str | None) -> str | None:
             "Invalid report_tag. Allowed characters are: a-z, A-Z, 0-9, '.', '_' and '-'."
         )
     return value
+
+
+def _resolve_uid_scope(uid_scope: str | None) -> str:
+    scope = str(uid_scope or "dataset").strip().lower()
+    if scope not in _UID_SCOPE_VALUES:
+        raise ValueError(
+            f"Invalid uid_scope={uid_scope!r}; expected one of {sorted(_UID_SCOPE_VALUES)}."
+        )
+    return scope
+
+
+def _resolve_uid_namespace(
+    *,
+    uid_scope: str,
+    uid_namespace: str | None,
+    dataset_tag: str,
+) -> str | None:
+    if uid_scope == "local":
+        return None
+
+    value = str(dataset_tag if uid_namespace is None else uid_namespace).strip()
+    if value == "":
+        raise ValueError("uid_namespace must be non-empty when uid_scope='dataset'.")
+    if "::" in value:
+        raise ValueError("uid_namespace must not contain '::'.")
+    if _REPORT_TAG_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "Invalid uid_namespace. Allowed characters are: a-z, A-Z, 0-9, '.', '_' and '-'."
+        )
+    return value
+
+
+def _apply_uid_scope_to_clusters(
+    *,
+    clusters: pd.DataFrame,
+    uid_scope: str,
+    uid_namespace: str | None,
+) -> pd.DataFrame:
+    if "author_uid" not in clusters.columns:
+        raise ValueError("clusters missing required column: author_uid")
+
+    out = clusters.copy()
+    author_uid = out["author_uid"].astype(str)
+    if "author_uid_local" in out.columns:
+        local_uid = out["author_uid_local"].astype(str)
+    else:
+        local_uid = author_uid.copy()
+        if uid_scope == "dataset" and uid_namespace:
+            prefix = f"{uid_namespace}::"
+            local_uid = local_uid.where(~local_uid.str.startswith(prefix), local_uid.str[len(prefix) :])
+    out["author_uid_local"] = local_uid
+
+    if uid_scope == "dataset":
+        if uid_namespace is None:
+            raise ValueError("uid_namespace is required when uid_scope='dataset'.")
+        out["author_uid"] = out["author_uid_local"].map(lambda value: f"{uid_namespace}::{value}")
+    else:
+        out["author_uid"] = out["author_uid_local"].astype(str)
+    return out
 
 
 def _resolve_report_paths(metrics_dir: Path, report_tag: str | None) -> dict[str, Path]:
@@ -2496,7 +2556,7 @@ def cmd_run_stage(args):
     return cmd_run_train_stage(args)
 
 
-def cmd_run_infer_ads(args):
+def _run_infer_ads_impl(args):
     ui = CliUI(total_steps=8, progress=args.progress)
 
     try:
@@ -2628,6 +2688,12 @@ def cmd_run_infer_ads(args):
 
         dataset_tag = str(dataset_info["dataset_tag"])
         dataset_source_fp = str(dataset_info["dataset_source_fp"])
+        uid_scope = _resolve_uid_scope(getattr(args, "uid_scope", "dataset"))
+        uid_namespace = _resolve_uid_namespace(
+            uid_scope=uid_scope,
+            uid_namespace=getattr(args, "uid_namespace", None),
+            dataset_tag=dataset_tag,
+        )
         subset_identity = _compute_infer_subset_identity(
             dataset_source_fp=dataset_source_fp,
             infer_stage=infer_stage,
@@ -2672,6 +2738,8 @@ def cmd_run_infer_ads(args):
             "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
             "references_present": bool(dataset_info["references_present"]),
             "dataset_source_fp": dataset_source_fp,
+            "uid_scope": uid_scope,
+            "uid_namespace": uid_namespace,
             "subset_tag": subset_tag,
             "model_run_id": model_info["model_run_id"],
             "model_source_type": str(model_info.get("model_source_type", "run_id")),
@@ -2854,6 +2922,8 @@ def cmd_run_infer_ads(args):
                 "references_path": str(dataset_info["references_path"]) if dataset_info["references_path"] is not None else None,
                 "references_present": bool(dataset_info["references_present"]),
                 "dataset_source_fp": dataset_source_fp,
+                "uid_scope": uid_scope,
+                "uid_namespace": uid_namespace,
                 "ads_mentions_path": str(ads_mentions_path),
                 "ads_mentions_full_path": str(ads_mentions_full_path),
                 "ads_mentions_full": int(len(ads_mentions_full)),
@@ -3219,6 +3289,11 @@ def cmd_run_infer_ads(args):
         cluster_runtime_meta: dict[str, Any] = {}
         if cluster_cache_hit:
             clusters = read_parquet(clusters_path)
+            clusters = _apply_uid_scope_to_clusters(
+                clusters=clusters,
+                uid_scope=uid_scope,
+                uid_namespace=uid_namespace,
+            )
             cluster_qc = _load_json(cluster_qc_path)
             source_export_qc = _load_json(source_export_qc_path)
             cfg_payload = _load_json(cluster_cfg_used_path) or {}
@@ -3263,7 +3338,7 @@ def cmd_run_infer_ads(args):
                 mentions=ads_mentions,
                 pair_scores=pair_scores,
                 cluster_config=cluster_cfg_used,
-                output_path=clusters_path,
+                output_path=None,
                 show_progress=args.progress,
                 num_workers=int(cpu_workers_effective),
                 sharding_mode=cpu_sharding_mode,
@@ -3272,6 +3347,12 @@ def cmd_run_infer_ads(args):
                 backend=cluster_backend_requested,
                 return_meta=True,
             )
+            clusters = _apply_uid_scope_to_clusters(
+                clusters=clusters,
+                uid_scope=uid_scope,
+                uid_namespace=uid_namespace,
+            )
+            save_parquet(clusters, clusters_path, index=False)
             cluster_backend_effective = str(
                 cluster_runtime_meta.get("cluster_backend_effective", cluster_backend_requested)
             )
@@ -3288,6 +3369,8 @@ def cmd_run_infer_ads(args):
                     "pipeline_scope": "infer",
                     "infer_stage": infer_stage,
                     "model_run_id": model_info["model_run_id"],
+                    "uid_scope": uid_scope,
+                    "uid_namespace": uid_namespace,
                     "best_threshold": float(model_info["best_threshold"]),
                     "eps_resolution": eps_meta,
                     "cluster_config_used": cluster_cfg_used,
@@ -3390,12 +3473,29 @@ def cmd_run_infer_ads(args):
         ui.info(f"Stage metrics: {stage_metrics_path}")
         ui.info(f"Go/No-Go report: {go_no_go_path}")
         ui.info(f"Run complete: {run_id}")
+        return {
+            "run_id": run_id,
+            "go": bool(go.get("go")) if isinstance(go, dict) and "go" in go else None,
+            "metrics_dir": str(metrics_dir),
+            "clusters_path": str(clusters_path),
+            "publication_authors_path": str(publication_export_path),
+            "publications_disambiguated_path": str(publications_disambig_path),
+            "references_disambiguated_path": (
+                str(references_disambig_path) if dataset_info["references_present"] else None
+            ),
+            "stage_metrics_path": str(stage_metrics_path),
+            "go_no_go_path": str(go_no_go_path),
+        }
 
     except Exception as exc:
         ui.fail(str(exc))
         raise
     finally:
         ui.close()
+
+
+def cmd_run_infer_ads(args):
+    return _run_infer_ads_impl(args)
 
 
 def cmd_run_cluster_test_report(args):
@@ -3827,6 +3927,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cpu-min-pairs-per-worker", type=int, default=None)
     sp.add_argument("--cpu-target-ram-fraction", type=float, default=None)
     sp.add_argument("--cluster-backend", choices=["auto", "sklearn_cpu", "cuml_gpu"], default=None)
+    sp.add_argument("--uid-scope", choices=["dataset", "local"], default="dataset")
+    sp.add_argument("--uid-namespace", default=None)
     sp.add_argument("--baseline-run-id", default=None)
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--progress", dest="progress", action="store_true")

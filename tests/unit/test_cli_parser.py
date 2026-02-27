@@ -138,6 +138,8 @@ def test_run_infer_ads_parser_defaults_with_model_run_id():
     assert args.cpu_min_pairs_per_worker is None
     assert args.cpu_target_ram_fraction is None
     assert args.cluster_backend is None
+    assert args.uid_scope == "dataset"
+    assert args.uid_namespace is None
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_infer_ads
@@ -191,6 +193,10 @@ def test_run_infer_ads_parser_boolean_overrides():
             "0.7",
             "--cluster-backend",
             "sklearn_cpu",
+            "--uid-scope",
+            "local",
+            "--uid-namespace",
+            "ignored_in_local",
         ]
     )
 
@@ -207,6 +213,8 @@ def test_run_infer_ads_parser_boolean_overrides():
     assert args.cpu_min_pairs_per_worker == 2000000
     assert args.cpu_target_ram_fraction == 0.7
     assert args.cluster_backend == "sklearn_cpu"
+    assert args.uid_scope == "local"
+    assert args.uid_namespace == "ignored_in_local"
 
 
 def test_run_infer_ads_parser_requires_exactly_one_model_source():

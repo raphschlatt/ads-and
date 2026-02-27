@@ -54,6 +54,7 @@ stages:
     min_neg_val: 0
     min_neg_test: 0
     cluster_quality_severity: blocker
+    singleton_ratio_severity: warning
     eps_range_limited_severity: warning
 
 train:
@@ -98,4 +99,5 @@ infer:
       min_neg_val: 0
       min_neg_test: 0
       cluster_quality_severity: blocker
+      singleton_ratio_severity: warning
       eps_range_limited_severity: warning

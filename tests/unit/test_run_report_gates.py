@@ -231,3 +231,39 @@ def test_go_no_go_blocks_when_memory_not_feasible():
     go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
     assert go["go"] is False
     assert "memory_feasible" in go["blockers"]
+
+
+def test_go_no_go_accepts_bundle_manifest_threshold_status():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["metric_scope"] = "infer"
+    metrics["threshold_selection_status"] = "bundle_manifest"
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    checks = {c["name"]: c for c in go["checks"]}
+    assert checks["threshold_selection_status"]["passed"] is True
+
+
+def test_go_no_go_infer_singleton_ratio_can_be_warning_only():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["metric_scope"] = "infer"
+    metrics["singleton_ratio"] = 0.95
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+        "singleton_ratio_severity": "warning",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    assert go["go"] is True
+    assert "singleton_ratio" not in go["blockers"]
+    assert "singleton_ratio" in go["warnings"]

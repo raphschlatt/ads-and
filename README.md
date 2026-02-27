@@ -117,7 +117,8 @@ python3 -m src.cli run-infer-ads \
   --cpu-workers auto \
   --cpu-min-pairs-per-worker 1000000 \
   --cpu-target-ram-fraction 0.6 \
-  --cluster-backend auto
+  --cluster-backend auto \
+  --uid-scope dataset
 ```
 
 Infer ADS with model bundle:
@@ -133,7 +134,25 @@ python3 -m src.cli run-infer-ads \
   --cpu-workers auto \
   --cpu-min-pairs-per-worker 1000000 \
   --cpu-target-ram-fraction 0.6 \
-  --cluster-backend auto
+  --cluster-backend auto \
+  --uid-scope dataset
+```
+
+Infer ADS programmatically (same core path as CLI):
+
+```python
+from src.infer_ads_api import InferAdsRequest, run_infer_ads
+
+result = run_infer_ads(
+    InferAdsRequest(
+        dataset_id="my_ads_2026",
+        model_run_id="full_2026...",
+        infer_stage="full",
+        uid_scope="dataset",
+        progress=False,
+    )
+)
+print(result.run_id, result.go, result.publications_disambiguated_path)
 ```
 
 Benchmark CPU-heavy infer stages (pair-building + clustering):
@@ -172,6 +191,12 @@ Default policy is GPU-first for clustering: `--cluster-backend auto` tries `cuml
   - `auto` (default/recommended): use cuML DBSCAN when available and compatible, else CPU sklearn fallback.
   - `sklearn_cpu`: force paper-reference CPU backend.
   - `cuml_gpu`: request GPU DBSCAN; runtime falls back to CPU on incompatibility/failure.
+- `--uid-scope {dataset,local}`:
+  - `dataset` (default): writes dataset-namespaced global IDs (`<dataset-tag>::<local_uid>`).
+  - `local`: keeps legacy local IDs (`<block_key>::<cluster_label>`).
+- `--uid-namespace <str>`:
+  - optional override for dataset namespace when `--uid-scope dataset`.
+  - defaults to normalized dataset tag from `--dataset-id`.
 
 ## Runtime Modes
 
@@ -296,7 +321,8 @@ Source-mirrored infer exports (`artifacts/exports/<run_id>/`):
 Mapping rule:
 
 - `mention_id` is stable from normalized mentions.
-- `author_uid` is added by clustering.
+- `author_uid` is added by clustering and is dataset-namespaced by default.
+- `author_uid_local` is additionally exported in parquet outputs for traceability.
 - Join key is always `mention_id`.
 - In source-mirrored JSON outputs, original rows are preserved and `AuthorUID` is appended parallel to `Author`.
 

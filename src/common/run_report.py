@@ -59,6 +59,7 @@ def _default_gate_config() -> Dict:
                 "min_neg_val": 0,
                 "min_neg_test": 0,
                 "cluster_quality_severity": "blocker",
+                "singleton_ratio_severity": "warning",
                 "eps_range_limited_severity": "warning",
             },
         },
@@ -113,6 +114,10 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         stage_gates.get("split_high_sim_rate_probe_max", cluster_defaults.get("split_high_sim_rate_probe_max", 1.0))
     )
     cluster_quality_severity = _normalize_severity(stage_gates.get("cluster_quality_severity", "warning"), default="warning")
+    singleton_ratio_severity = _normalize_severity(
+        stage_gates.get("singleton_ratio_severity", cluster_quality_severity),
+        default=cluster_quality_severity,
+    )
     lspo_block_size_p95_min = stage_gates.get("lspo_block_size_p95_min")
     lspo_pairs_min = stage_gates.get("lspo_pairs_min")
     lspo_block_size_p95_severity = _normalize_severity(
@@ -224,6 +229,7 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
         "fallback_no_labels",
         "fallback_no_positives",
         "fallback_no_negatives",
+        "bundle_manifest",
     }
     add_check(
         "threshold_selection_status",
@@ -303,7 +309,7 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
             "singleton_ratio",
             singleton_ratio <= singleton_ratio_max,
             f"Observed singleton_ratio={singleton_ratio:.4f}, required<={singleton_ratio_max:.4f}",
-            severity=cluster_quality_severity,
+            severity=singleton_ratio_severity,
         )
 
     split_high_sim_rate_probe = stage_metrics.get("split_high_sim_rate_probe")
