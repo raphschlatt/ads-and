@@ -559,6 +559,17 @@ def test_cli_run_infer_ads_uid_scope_registry_is_stable_across_runs(monkeypatch,
     assert len(merged) == len(clusters_a)
     assert (merged["author_uid_a"].astype(str) == merged["author_uid_b"].astype(str)).all()
     assert merged["author_uid_a"].astype(str).str.startswith("stable_ads::au").all()
+    local_to_global_a = clusters_a.groupby("author_uid_local")["author_uid"].nunique()
+    local_to_global_b = clusters_b.groupby("author_uid_local")["author_uid"].nunique()
+    assert int(local_to_global_a.max()) == 1
+    assert int(local_to_global_b.max()) == 1
+
+    stage_a = json.loads((tmp_path / "artifacts" / "metrics" / run_id_a / "05_stage_metrics_infer_ads.json").read_text())
+    stage_b = json.loads((tmp_path / "artifacts" / "metrics" / run_id_b / "05_stage_metrics_infer_ads.json").read_text())
+    assert stage_a["uid_local_to_global_valid"] is True
+    assert stage_b["uid_local_to_global_valid"] is True
+    assert stage_a["uid_local_to_global_max_nunique"] == 1
+    assert stage_b["uid_local_to_global_max_nunique"] == 1
 
 
 def test_cli_run_infer_ads_uid_scope_registry_rebuilds_stage_reports_on_resume(monkeypatch, tmp_path: Path):

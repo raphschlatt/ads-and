@@ -186,6 +186,7 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     if is_train_scope:
         add_check("mention_coverage", True, "not applicable for train scope")
         add_check("uid_uniqueness_max", True, "not applicable for train scope")
+        add_check("uid_local_to_global_valid", True, "not applicable for train scope")
     else:
         mention_coverage = stage_metrics.get("mention_coverage")
         add_check(
@@ -199,6 +200,21 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
             uid_uniqueness_max_observed is not None and int(uid_uniqueness_max_observed) <= uid_uniqueness_max,
             f"Observed max={uid_uniqueness_max_observed}, required<={uid_uniqueness_max}",
         )
+        uid_local_to_global_valid = stage_metrics.get("uid_local_to_global_valid")
+        uid_local_to_global_max_nunique = stage_metrics.get("uid_local_to_global_max_nunique")
+        if uid_local_to_global_valid is None:
+            add_check("uid_local_to_global_valid", True, "not available")
+        else:
+            add_check(
+                "uid_local_to_global_valid",
+                bool(uid_local_to_global_valid),
+                (
+                    "Observed uid_local_to_global_valid="
+                    f"{bool(uid_local_to_global_valid)} "
+                    f"(max_nunique={uid_local_to_global_max_nunique})"
+                ),
+                severity="blocker",
+            )
 
     val_counts = stage_metrics.get("val_class_counts", {}) or {}
     test_counts = stage_metrics.get("test_class_counts", {}) or {}

@@ -83,8 +83,8 @@ def test_build_pairs_qc_and_cluster_qc():
 
     clusters = pd.DataFrame(
         [
-            {"mention_id": "ads0::0", "block_key": "ads.blk0", "author_uid": "ads.blk0::0"},
-            {"mention_id": "ads1::0", "block_key": "ads.blk0", "author_uid": "ads.blk0::1"},
+            {"mention_id": "ads0::0", "block_key": "ads.blk0", "author_uid": "ads.blk0::0", "author_uid_local": "L0"},
+            {"mention_id": "ads1::0", "block_key": "ads.blk0", "author_uid": "ads.blk0::1", "author_uid_local": "L1"},
         ]
     )
     pair_scores = pd.DataFrame(
@@ -115,6 +115,16 @@ def test_build_pairs_qc_and_cluster_qc():
     assert cluster_qc["pair_score_range_ok"] is True
     assert cluster_qc["negative_distance_count"] == 0
     assert cluster_qc["cosine_out_of_range_count"] == 0
+
+    cluster_qc_local = build_cluster_qc(
+        pair_scores=pair_scores,
+        clusters=clusters,
+        threshold=0.80,
+        cluster_uid_col="author_uid_local",
+    )
+    assert cluster_qc_local["cluster_count"] == 2
+    assert cluster_qc_local["split_high_sim_count"] == 1
+    assert cluster_qc_local["split_high_sim_rate_probe"] == 1.0
 
 
 def test_build_train_metrics_and_compare(tmp_path: Path):
@@ -248,10 +258,10 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     ads_mentions = _mentions("ads", 4, with_orcid=False)
     clusters = pd.DataFrame(
         [
-            {"mention_id": "ads0::0", "block_key": "ads.blk0", "author_uid": "ads.blk0::0"},
-            {"mention_id": "ads1::0", "block_key": "ads.blk0", "author_uid": "ads.blk0::0"},
-            {"mention_id": "ads2::0", "block_key": "ads.blk1", "author_uid": "ads.blk1::0"},
-            {"mention_id": "ads3::0", "block_key": "ads.blk1", "author_uid": "ads.blk1::1"},
+            {"mention_id": "ads0::0", "block_key": "ads.blk0", "author_uid": "g0", "author_uid_local": "l0"},
+            {"mention_id": "ads1::0", "block_key": "ads.blk0", "author_uid": "g0", "author_uid_local": "l1"},
+            {"mention_id": "ads2::0", "block_key": "ads.blk1", "author_uid": "g1", "author_uid_local": "l2"},
+            {"mention_id": "ads3::0", "block_key": "ads.blk1", "author_uid": "g2", "author_uid_local": "l3"},
         ]
     )
     cluster_qc = {
@@ -295,9 +305,13 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
         precision_mode="fp32",
     )
     assert stage_metrics["metric_scope"] == "infer"
-    assert stage_metrics["counts"]["ads_clusters"] == 3
+    assert stage_metrics["counts"]["ads_clusters"] == 4
+    assert stage_metrics["counts"]["ads_clusters_global_uid"] == 3
     assert stage_metrics["counts"]["ads_cluster_assignments"] == 4
     assert stage_metrics["counts"]["ads_blocks"] == 2
+    assert stage_metrics["uid_local_to_global_valid"] is True
+    assert stage_metrics["uid_local_to_global_max_nunique"] == 1
+    assert stage_metrics["uid_global_to_local_max_nunique"] == 2
     assert stage_metrics["pair_score_range_ok"] is True
     assert stage_metrics["split_high_sim_rate_probe"] == 0.13
     assert stage_metrics["lspo_pairwise_f1"] is None
@@ -328,8 +342,8 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     assert payload["compare_scope"] == "infer"
     assert payload["go_current"] is True
     assert payload["ads_clusters_baseline"] == 2
-    assert payload["ads_clusters_current"] == 3
-    assert payload["ads_clusters_delta"] == 1.0
+    assert payload["ads_clusters_current"] == 4
+    assert payload["ads_clusters_delta"] == 2.0
     assert round(float(payload["split_high_sim_rate_probe_delta"]), 6) == -0.07
 
 

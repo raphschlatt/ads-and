@@ -267,3 +267,38 @@ def test_go_no_go_infer_singleton_ratio_can_be_warning_only():
     assert go["go"] is True
     assert "singleton_ratio" not in go["blockers"]
     assert "singleton_ratio" in go["warnings"]
+
+
+def test_go_no_go_blocks_when_uid_local_to_global_invalid():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["metric_scope"] = "infer"
+    metrics["uid_local_to_global_valid"] = False
+    metrics["uid_local_to_global_max_nunique"] = 3
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    assert go["go"] is False
+    assert "uid_local_to_global_valid" in go["blockers"]
+
+
+def test_go_no_go_passes_when_uid_local_to_global_valid():
+    metrics = _base_metrics()
+    metrics["stage"] = "infer_ads"
+    metrics["metric_scope"] = "infer"
+    metrics["uid_local_to_global_valid"] = True
+    metrics["uid_local_to_global_max_nunique"] = 1
+    gate_cfg = _gate_cfg()
+    gate_cfg["stages"]["infer_ads"] = {
+        "f1_min": 0.0,
+        "min_neg_val": 0,
+        "min_neg_test": 0,
+        "cluster_quality_severity": "blocker",
+    }
+    go = evaluate_go_no_go(metrics, gate_config=gate_cfg)
+    assert "uid_local_to_global_valid" not in go["blockers"]

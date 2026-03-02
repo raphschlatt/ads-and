@@ -1168,6 +1168,11 @@ def _apply_uid_mode_to_clusters(
         "uid_registry_mentions_total": int(assign_meta.mentions_total),
         "uid_registry_mentions_previously_mapped": int(assign_meta.mentions_previously_mapped),
         "uid_registry_mentions_newly_mapped": int(assign_meta.mentions_newly_mapped),
+        "uid_local_to_global_max_nunique": int(assign_meta.local_to_global_max_nunique),
+        "uid_global_to_local_max_nunique": int(assign_meta.global_to_local_max_nunique),
+        "uid_local_to_global_violations": int(assign_meta.local_to_global_violations),
+        "uid_global_to_local_violations": int(assign_meta.global_to_local_violations),
+        "uid_local_to_global_valid": bool(assign_meta.local_to_global_valid),
     }
 
 
@@ -3347,6 +3352,7 @@ def _run_infer_ads_impl(args):
         eps_meta: dict[str, Any] = {}
         cluster_runtime_meta: dict[str, Any] = {}
         uid_mode_meta: dict[str, Any] | None = None
+        cluster_qc_uid_col = "author_uid_local" if uid_scope == "registry" else "author_uid"
         if cluster_cache_hit:
             clusters = read_parquet(clusters_path)
             clusters, uid_mode_meta = _apply_uid_mode_to_clusters(
@@ -3375,6 +3381,7 @@ def _run_infer_ads_impl(args):
                     pair_scores=pair_scores,
                     clusters=clusters,
                     threshold=float(model_info["best_threshold"]),
+                    cluster_uid_col=cluster_qc_uid_col,
                 )
                 write_json(cluster_qc, cluster_qc_path)
             else:
@@ -3487,6 +3494,7 @@ def _run_infer_ads_impl(args):
                 pair_scores=pair_scores,
                 clusters=clusters,
                 threshold=float(model_info["best_threshold"]),
+                cluster_uid_col=cluster_qc_uid_col,
             )
             write_json(cluster_qc, cluster_qc_path)
             ui.done(f"Clustered {len(clusters)} ADS mentions.")

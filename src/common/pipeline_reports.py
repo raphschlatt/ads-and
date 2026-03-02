@@ -142,11 +142,14 @@ def build_cluster_qc(
     threshold: float,
     probe_threshold: float = 0.35,
     chunk_rows: int = 200_000,
+    cluster_uid_col: str = "author_uid",
 ) -> dict[str, Any]:
-    cluster_size = clusters.groupby(["block_key", "author_uid"]).size().rename("size").reset_index()
+    if cluster_uid_col not in clusters.columns:
+        raise ValueError(f"clusters missing required UID column for QC: {cluster_uid_col!r}")
+    cluster_size = clusters.groupby(["block_key", cluster_uid_col]).size().rename("size").reset_index()
     singleton_ratio = float((cluster_size["size"] == 1).mean()) if len(cluster_size) else 0.0
 
-    mention_to_uid = clusters.set_index("mention_id")["author_uid"].astype(str).to_dict()
+    mention_to_uid = clusters.set_index("mention_id")[cluster_uid_col].astype(str).to_dict()
 
     cosine_min = None
     cosine_max = None
@@ -411,10 +414,25 @@ def build_infer_stage_metrics(
         if len(ads_mentions) and "mention_id" in ads_mentions.columns and "mention_id" in clusters.columns
         else 0.0
     )
-    ads_clusters_unique = (
+    ads_clusters_global_unique = (
         int(clusters["author_uid"].nunique()) if len(clusters) and "author_uid" in clusters.columns else 0
     )
+    ads_clusters_local_unique = (
+        int(clusters["author_uid_local"].nunique())
+        if len(clusters) and "author_uid_local" in clusters.columns
+        else ads_clusters_global_unique
+    )
     ads_blocks = int(clusters["block_key"].nunique()) if len(clusters) and "block_key" in clusters.columns else 0
+
+    uid_local_to_global_max_nunique: int | None = None
+    uid_global_to_local_max_nunique: int | None = None
+    uid_local_to_global_valid: bool | None = None
+    if len(clusters) and "author_uid_local" in clusters.columns and "author_uid" in clusters.columns:
+        local_to_global = clusters.groupby("author_uid_local")["author_uid"].nunique()
+        global_to_local = clusters.groupby("author_uid")["author_uid_local"].nunique()
+        uid_local_to_global_max_nunique = int(local_to_global.max()) if len(local_to_global) else 0
+        uid_global_to_local_max_nunique = int(global_to_local.max()) if len(global_to_local) else 0
+        uid_local_to_global_valid = bool(uid_local_to_global_max_nunique <= 1)
 
     return {
         "run_id": str(run_id),
@@ -424,6 +442,9 @@ def build_infer_stage_metrics(
         "determinism_valid": _determinism_valid(determinism_paths),
         "uid_uniqueness_valid": bool(uid_uniqueness_max <= 1),
         "uid_uniqueness_max": int(uid_uniqueness_max),
+        "uid_local_to_global_max_nunique": uid_local_to_global_max_nunique,
+        "uid_global_to_local_max_nunique": uid_global_to_local_max_nunique,
+        "uid_local_to_global_valid": uid_local_to_global_valid,
         "mention_coverage": float(mention_coverage),
         "run_id_consistent": _run_id_consistent(run_id, consistency_files),
         "lspo_pairwise_f1": None,
@@ -463,7 +484,8 @@ def build_infer_stage_metrics(
             "lspo_mentions": 0,
             "lspo_blocks": 0,
             "ads_mentions": int(len(ads_mentions)),
-            "ads_clusters": ads_clusters_unique,
+            "ads_clusters": ads_clusters_local_unique,
+            "ads_clusters_global_uid": ads_clusters_global_unique,
             "ads_cluster_assignments": int(len(clusters)),
             "ads_blocks": ads_blocks,
         },

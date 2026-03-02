@@ -22,6 +22,11 @@ class UidRegistryAssignmentMeta:
     mentions_newly_mapped: int
     registry_size_after: int
     next_id_after: int
+    local_to_global_max_nunique: int
+    global_to_local_max_nunique: int
+    local_to_global_violations: int
+    global_to_local_violations: int
+    local_to_global_valid: bool
 
 
 def _resolve_alias(uid: str, aliases: dict[str, str]) -> str:
@@ -92,6 +97,9 @@ def assign_registry_uids(
         raise ValueError(f"clusters missing required columns: {missing}")
 
     out = clusters.copy()
+    out["mention_id"] = out["mention_id"].astype(str)
+    if out["mention_id"].duplicated().any():
+        raise ValueError("clusters contains duplicate mention_id; expected one row per mention_id.")
     if "author_uid_local" not in out.columns:
         out["author_uid_local"] = out["author_uid"].astype(str)
     else:
@@ -108,7 +116,7 @@ def assign_registry_uids(
     clusters_merged_conflicts = 0
     mentions_previously_mapped = 0
     mentions_newly_mapped = 0
-    assigned_uids: list[str] = []
+    mention_to_assigned_uid: dict[str, str] = {}
 
     for _, grp in out.groupby("author_uid_local", sort=False):
         mention_ids = grp["mention_id"].astype(str).tolist()
@@ -138,9 +146,24 @@ def assign_registry_uids(
             else:
                 mentions_newly_mapped += 1
             mention_to_uid[mid] = str(assigned_uid)
-        assigned_uids.extend([str(assigned_uid)] * len(mention_ids))
+            mention_to_assigned_uid[mid] = str(assigned_uid)
 
-    out["author_uid"] = assigned_uids
+    out["author_uid"] = out["mention_id"].map(mention_to_assigned_uid)
+    if out["author_uid"].isna().any():
+        missing_mentions = out.loc[out["author_uid"].isna(), "mention_id"].astype(str).head(5).tolist()
+        raise RuntimeError(
+            "Registry UID assignment produced null author_uid values for mention_ids: "
+            f"{missing_mentions}"
+        )
+    out["author_uid"] = out["author_uid"].astype(str)
+
+    local_to_global = out.groupby("author_uid_local")["author_uid"].nunique()
+    global_to_local = out.groupby("author_uid")["author_uid_local"].nunique()
+    local_to_global_max_nunique = int(local_to_global.max()) if len(local_to_global) else 0
+    global_to_local_max_nunique = int(global_to_local.max()) if len(global_to_local) else 0
+    local_to_global_violations = int((local_to_global > 1).sum()) if len(local_to_global) else 0
+    global_to_local_violations = int((global_to_local > 1).sum()) if len(global_to_local) else 0
+    local_to_global_valid = bool(local_to_global_max_nunique <= 1)
 
     registry_out = {
         "schema_version": UID_REGISTRY_SCHEMA_VERSION,
@@ -160,5 +183,10 @@ def assign_registry_uids(
         mentions_newly_mapped=int(mentions_newly_mapped),
         registry_size_after=int(len(mention_to_uid)),
         next_id_after=int(next_id),
+        local_to_global_max_nunique=int(local_to_global_max_nunique),
+        global_to_local_max_nunique=int(global_to_local_max_nunique),
+        local_to_global_violations=int(local_to_global_violations),
+        global_to_local_violations=int(global_to_local_violations),
+        local_to_global_valid=bool(local_to_global_valid),
     )
     return out, registry_out, meta

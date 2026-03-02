@@ -25,6 +25,9 @@ def test_uid_registry_assigns_and_reuses_ids(tmp_path: Path):
     assert first_uid.startswith("ads_prod::au")
     assert meta1.clusters_new == 1
     assert meta1.clusters_reused == 0
+    assert meta1.local_to_global_valid is True
+    assert meta1.local_to_global_max_nunique == 1
+    assert meta1.local_to_global_violations == 0
 
     registry_loaded = load_uid_registry(registry_path, namespace="ads_prod")
     out2, reg2, meta2 = assign_registry_uids(clusters=clusters, registry=registry_loaded, uid_namespace="ads_prod")
@@ -33,6 +36,9 @@ def test_uid_registry_assigns_and_reuses_ids(tmp_path: Path):
     assert meta2.clusters_reused == 1
     assert meta2.clusters_new == 0
     assert reg2["next_id"] == reg1["next_id"]
+    assert meta2.local_to_global_valid is True
+    assert meta2.local_to_global_max_nunique == 1
+    assert meta2.local_to_global_violations == 0
 
 
 def test_uid_registry_merges_conflicting_known_ids():
@@ -57,3 +63,30 @@ def test_uid_registry_merges_conflicting_known_ids():
     assert out["author_uid"].iloc[0] == "ads_prod::au000000001"
     assert meta.clusters_merged_conflicts == 1
     assert reg_out["aliases"]["ads_prod::au000000002"] == "ads_prod::au000000001"
+    assert meta.local_to_global_valid is True
+    assert meta.local_to_global_max_nunique == 1
+    assert meta.local_to_global_violations == 0
+
+
+def test_uid_registry_interleaved_rows_keep_local_to_global_consistent():
+    clusters = pd.DataFrame(
+        [
+            {"mention_id": "a::0", "block_key": "a", "author_uid": "a::0", "author_uid_local": "a::0"},
+            {"mention_id": "b::0", "block_key": "b", "author_uid": "b::0", "author_uid_local": "b::0"},
+            {"mention_id": "a::1", "block_key": "a", "author_uid": "a::0", "author_uid_local": "a::0"},
+            {"mention_id": "b::1", "block_key": "b", "author_uid": "b::0", "author_uid_local": "b::0"},
+        ]
+    )
+    registry = {
+        "schema_version": "v1",
+        "uid_namespace": "ads_prod",
+        "next_id": 1,
+        "mention_to_uid": {},
+        "aliases": {},
+    }
+    out, _, meta = assign_registry_uids(clusters=clusters, registry=registry, uid_namespace="ads_prod")
+    local_to_global = out.groupby("author_uid_local")["author_uid"].nunique()
+    assert int(local_to_global.max()) == 1
+    assert meta.local_to_global_valid is True
+    assert meta.local_to_global_max_nunique == 1
+    assert meta.local_to_global_violations == 0
