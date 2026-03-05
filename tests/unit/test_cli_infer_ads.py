@@ -45,6 +45,46 @@ def test_resolve_ads_dataset_files_references_present(tmp_path: Path):
     assert str(resolved["publications_path"]).endswith("publications.json")
 
 
+def test_resolve_ads_dataset_files_parquet_candidates(tmp_path: Path):
+    base_dir = tmp_path / "data" / "raw" / "ads"
+    ds_dir = base_dir / "my_ads_2026"
+    ds_dir.mkdir(parents=True, exist_ok=True)
+
+    pubs = pd.DataFrame(
+        [
+            {
+                "Bibcode": "b1",
+                "Author": ["Doe J"],
+                "Title_en": "t",
+                "Abstract_en": "a",
+                "Year": 2020,
+                "Affiliation": "x",
+            }
+        ]
+    )
+    refs = pd.DataFrame(
+        [
+            {
+                "Bibcode": "r1",
+                "Author": ["Doe J"],
+                "Title_en": "t",
+                "Abstract_en": "a",
+                "Year": 2020,
+                "Affiliation": "x",
+            }
+        ]
+    )
+    pubs.to_parquet(ds_dir / "publ_final.parquet", index=False)
+    refs.to_parquet(ds_dir / "refs_final.parquet", index=False)
+    data_cfg = {"raw_ads_publications": str(base_dir / "legacy.jsonl")}
+
+    resolved = cli._resolve_ads_dataset_files(data_cfg, "my_ads_2026")
+    assert resolved["references_present"] is True
+    assert str(resolved["publications_path"]).endswith("publ_final.parquet")
+    assert str(resolved["references_path"]).endswith("refs_final.parquet")
+    assert resolved["dataset_source_fp"]
+
+
 def test_resolve_ads_dataset_files_rejects_traversal(tmp_path: Path):
     base_dir = tmp_path / "data" / "raw" / "ads"
     base_dir.mkdir(parents=True, exist_ok=True)

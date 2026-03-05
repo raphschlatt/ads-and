@@ -114,6 +114,48 @@ def _write_dataset(tmp_path: Path, dataset_id: str, with_references: bool = True
     return ds_dir
 
 
+def _write_dataset_parquet(tmp_path: Path, dataset_id: str, with_references: bool = True) -> Path:
+    ds_dir = tmp_path / "data" / "raw" / "ads" / dataset_id
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    pubs = pd.DataFrame(
+        [
+            {
+                "Bibcode": "bib1",
+                "Author": ["Doe J", "Doe J."],
+                "Title_en": "Paper 1",
+                "Abstract_en": "Abstract 1",
+                "Year": 2020,
+                "Affiliation": "Inst A",
+            },
+            {
+                "Bibcode": "bib2",
+                "Author": ["Doe J"],
+                "Title_en": "Paper 2",
+                "Abstract_en": "Abstract 2",
+                "Year": 2021,
+                "Affiliation": "Inst B",
+            },
+        ]
+    )
+    pubs.to_parquet(ds_dir / "publ_final.parquet", index=False)
+
+    if with_references:
+        refs = pd.DataFrame(
+            [
+                {
+                    "Bibcode": "bib3",
+                    "Author": ["Doe J"],
+                    "Title_en": "Paper 3",
+                    "Abstract_en": "Abstract 3",
+                    "Year": 2022,
+                    "Affiliation": "Inst C",
+                }
+            ]
+        )
+        refs.to_parquet(ds_dir / "refs_final.parquet", index=False)
+    return ds_dir
+
+
 def _write_model_run_artifacts(tmp_path: Path, cfg: dict[str, Path], model_run_id: str) -> None:
     metrics_dir = cfg["metrics_dir"] / model_run_id
     metrics_dir.mkdir(parents=True, exist_ok=True)
@@ -313,6 +355,31 @@ def test_cli_run_infer_ads_writes_artifacts(monkeypatch, tmp_path: Path):
     first_row = json.loads(pubs_out.read_text(encoding="utf-8").splitlines()[0])
     assert "AuthorUID" in first_row
     assert all(uid is None or str(uid).startswith("my_ads_2026::") for uid in first_row["AuthorUID"])
+
+
+def test_cli_run_infer_ads_with_parquet_io(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    dataset_id = "my_ads_2026_parquet"
+    model_run_id = "full_2026abc"
+    _write_dataset_parquet(tmp_path, dataset_id=dataset_id, with_references=True)
+    _write_model_run_artifacts(tmp_path, cfg, model_run_id=model_run_id)
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    run_id = "infer_ads_parquet"
+    _run_infer_ads(parser, cfg, dataset_id=dataset_id, model_run_id=model_run_id, run_id=run_id)
+
+    pubs_out = tmp_path / "artifacts" / "exports" / run_id / "publ_final.parquet"
+    refs_out = tmp_path / "artifacts" / "exports" / run_id / "refs_final.parquet"
+    assert pubs_out.exists()
+    assert refs_out.exists()
+
+    pubs_df = pd.read_parquet(pubs_out)
+    refs_df = pd.read_parquet(refs_out)
+    assert "AuthorUID" in pubs_df.columns
+    assert "AuthorUID" in refs_df.columns
+    assert all(hasattr(v, "__iter__") and not isinstance(v, (str, bytes)) for v in pubs_df["AuthorUID"].tolist())
+    assert all(hasattr(v, "__iter__") and not isinstance(v, (str, bytes)) for v in refs_df["AuthorUID"].tolist())
 
 
 def test_cli_run_infer_ads_resume_reuses_artifacts(monkeypatch, tmp_path: Path):

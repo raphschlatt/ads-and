@@ -340,7 +340,8 @@ def _resolve_ads_dataset_files(data_cfg: dict[str, Any], dataset_id: str) -> dic
     if not dataset_dir.exists() or not dataset_dir.is_dir():
         raise FileNotFoundError(
             f"Dataset folder not found: {dataset_dir}. "
-            f"Expected data/raw/ads/<dataset-id>/ with publications.jsonl or publications.json."
+            "Expected data/raw/ads/<dataset-id>/ with publications.{jsonl,json,parquet} "
+            "or publ_final.parquet."
         )
 
     try:
@@ -348,15 +349,26 @@ def _resolve_ads_dataset_files(data_cfg: dict[str, Any], dataset_id: str) -> dic
     except Exception as exc:
         raise ValueError(f"Dataset path escapes ADS raw base directory: {dataset_dir}") from exc
 
-    pub_candidates = [dataset_dir / "publications.jsonl", dataset_dir / "publications.json"]
-    ref_candidates = [dataset_dir / "references.jsonl", dataset_dir / "references.json"]
+    pub_candidates = [
+        dataset_dir / "publications.parquet",
+        dataset_dir / "publ_final.parquet",
+        dataset_dir / "publs.parquet",
+        dataset_dir / "publications.jsonl",
+        dataset_dir / "publications.json",
+    ]
+    ref_candidates = [
+        dataset_dir / "references.parquet",
+        dataset_dir / "refs_final.parquet",
+        dataset_dir / "refs.parquet",
+        dataset_dir / "references.jsonl",
+        dataset_dir / "references.json",
+    ]
     publications_path = next((p for p in pub_candidates if p.exists()), None)
     references_path = next((p for p in ref_candidates if p.exists()), None)
 
     if publications_path is None:
         raise FileNotFoundError(
-            "Missing publications file. Expected one of: "
-            f"{pub_candidates[0]} or {pub_candidates[1]}"
+            "Missing publications file. Expected one of: " + ", ".join(str(p) for p in pub_candidates)
         )
 
     dataset_source_fp = stable_hash(
@@ -473,6 +485,17 @@ def _resolve_infer_run_cfg(
 
 def _infer_mentions_meta_path(interim_dir: Path, dataset_tag: str) -> Path:
     return Path(interim_dir) / f"ads_mentions_{dataset_tag}.meta.json"
+
+
+def _resolve_source_export_output_path(
+    *,
+    source_input_path: Path,
+    exports_dir: Path,
+    default_jsonl_name: str,
+) -> Path:
+    if source_input_path.suffix.lower() == ".parquet":
+        return exports_dir / source_input_path.name
+    return exports_dir / default_jsonl_name
 
 
 def _compute_infer_subset_identity(
@@ -2767,8 +2790,18 @@ def _run_infer_ads_impl(args):
         pair_scores_path = pair_score_dir / "ads_pair_scores_infer_ads.parquet"
         clusters_path = cluster_dir / "ads_clusters_infer_ads.parquet"
         publication_export_path = cluster_dir / "publication_authors_infer_ads.parquet"
-        publications_disambig_path = exports_dir / "publications.disambiguated.jsonl"
-        references_disambig_path = exports_dir / "references.disambiguated.jsonl"
+        publications_disambig_path = _resolve_source_export_output_path(
+            source_input_path=Path(str(dataset_info["publications_path"])),
+            exports_dir=exports_dir,
+            default_jsonl_name="publications.disambiguated.jsonl",
+        )
+        references_disambig_path = _resolve_source_export_output_path(
+            source_input_path=Path(str(dataset_info["references_path"]))
+            if dataset_info["references_path"] is not None
+            else Path("references.jsonl"),
+            exports_dir=exports_dir,
+            default_jsonl_name="references.disambiguated.jsonl",
+        )
 
         input_summary_path = metrics_dir / "01_input_summary.json"
         preflight_path = metrics_dir / "02_preflight_infer.json"

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import re
-from typing import Iterable, List
+from typing import List
 
 import pandas as pd
 
@@ -24,7 +25,7 @@ def parse_year(value) -> int | None:
 def split_author_field(author_field) -> List[str]:
     if author_field is None:
         return []
-    if isinstance(author_field, list):
+    if isinstance(author_field, Iterable) and not isinstance(author_field, (str, bytes, dict)):
         return [str(a).strip() for a in author_field if str(a).strip()]
 
     text = str(author_field).strip()

@@ -23,6 +23,14 @@ def _iter_jsonl(path: Path) -> Iterator[Dict]:
                 continue
 
 
+def _iter_parquet_records(path: Path) -> Iterator[Dict]:
+    df = pd.read_parquet(path)
+    for row in df.itertuples(index=False):
+        payload = row._asdict()
+        if isinstance(payload, dict):
+            yield payload
+
+
 def _iter_json_records(path: Path) -> Iterator[Dict]:
     # Fast-path for JSONL (including misnamed *.json files that are line-delimited JSON).
     if path.suffix.lower() == ".jsonl":
@@ -73,6 +81,13 @@ def _iter_json_records(path: Path) -> Iterator[Dict]:
     yield from _iter_jsonl(path)
 
 
+def _iter_ads_records(path: Path) -> Iterator[Dict]:
+    if path.suffix.lower() == ".parquet":
+        yield from _iter_parquet_records(path)
+        return
+    yield from _iter_json_records(path)
+
+
 def _pick_text(record: Dict, keys: Iterable[str]) -> str:
     for key in keys:
         value = record.get(key)
@@ -88,7 +103,11 @@ def _normalize_ads_record(record: Dict, source_type: str) -> Dict | None:
     if not bibcode:
         return None
 
-    author_raw = record.get("Author") or record.get("author") or []
+    author_raw = record.get("Author")
+    if author_raw is None:
+        author_raw = record.get("author")
+    if author_raw is None:
+        author_raw = []
     authors = split_author_field(author_raw)
 
     emb = record.get("embedding")
@@ -114,7 +133,7 @@ def load_ads_records(path: str | Path, source_type: str) -> pd.DataFrame:
         raise FileNotFoundError(f"ADS input file not found: {path}")
 
     rows: List[Dict] = []
-    for rec in _iter_json_records(p):
+    for rec in _iter_ads_records(p):
         norm = _normalize_ads_record(rec, source_type=source_type)
         if norm is not None:
             rows.append(norm)

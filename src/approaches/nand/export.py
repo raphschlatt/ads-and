@@ -105,7 +105,39 @@ def _source_export_stats() -> dict[str, Any]:
     }
 
 
-def _export_source_file(
+def _compute_author_uids(
+    *,
+    record: dict[str, Any],
+    mention_to_uid: dict[str, Any],
+    stats: dict[str, Any],
+) -> list[str | None]:
+    bibcode = _resolve_bibcode(record)
+    author_raw = record.get("Author")
+    if author_raw is None:
+        author_raw = record.get("author")
+    if author_raw is None:
+        author_raw = []
+    authors = split_author_field(author_raw)
+    author_uids: list[str | None] = []
+    for idx, _author in enumerate(authors):
+        mention_id = f"{bibcode}::{idx}" if bibcode else ""
+        uid = mention_to_uid.get(mention_id)
+        author_uids.append(None if uid is None else str(uid))
+        stats["authors_total"] += 1
+        if uid is None:
+            stats["authors_unmapped"] += 1
+        else:
+            stats["authors_mapped"] += 1
+    return author_uids
+
+
+def _finalize_source_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    authors_total = int(stats["authors_total"])
+    stats["coverage_rate"] = float(stats["authors_mapped"] / max(1, authors_total))
+    return stats
+
+
+def _export_source_file_json(
     *,
     input_path: Path,
     output_path: Path,
@@ -116,26 +148,38 @@ def _export_source_file(
     with output_path.open("w", encoding="utf-8") as out_f:
         for record in _iter_json_records(input_path):
             stats["rows_total"] += 1
-            bibcode = _resolve_bibcode(record)
-            authors = split_author_field(record.get("Author") or record.get("author") or [])
-            author_uids: list[str | None] = []
-            for idx, _author in enumerate(authors):
-                mention_id = f"{bibcode}::{idx}" if bibcode else ""
-                uid = mention_to_uid.get(mention_id)
-                author_uids.append(None if uid is None else str(uid))
-                stats["authors_total"] += 1
-                if uid is None:
-                    stats["authors_unmapped"] += 1
-                else:
-                    stats["authors_mapped"] += 1
+            author_uids = _compute_author_uids(record=record, mention_to_uid=mention_to_uid, stats=stats)
 
             out_row = dict(record)
             out_row["AuthorUID"] = author_uids
             out_f.write(json.dumps(out_row, ensure_ascii=False) + "\n")
 
-    authors_total = int(stats["authors_total"])
-    stats["coverage_rate"] = float(stats["authors_mapped"] / max(1, authors_total))
-    return stats
+    return _finalize_source_stats(stats)
+
+
+def _export_source_file_parquet(
+    *,
+    input_path: Path,
+    output_path: Path,
+    mention_to_uid: dict[str, Any],
+) -> dict[str, Any]:
+    stats = _source_export_stats()
+    df = pd.read_parquet(input_path)
+    author_uid_rows: list[list[str | None]] = []
+    for row in df.itertuples(index=False):
+        stats["rows_total"] += 1
+        record = row._asdict()
+        author_uid_rows.append(_compute_author_uids(record=record, mention_to_uid=mention_to_uid, stats=stats))
+
+    out = df.copy()
+    out["AuthorUID"] = author_uid_rows
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_parquet(out, output_path, index=False)
+    return _finalize_source_stats(stats)
+
+
+def _is_parquet_path(path: Path) -> bool:
+    return path.suffix.lower() == ".parquet"
 
 
 def export_source_mirrored_outputs(
@@ -152,22 +196,36 @@ def export_source_mirrored_outputs(
     }
     pubs_in = Path(publications_path)
     pubs_out = Path(publications_output_path)
-    pubs_stats = _export_source_file(
-        input_path=pubs_in,
-        output_path=pubs_out,
-        mention_to_uid=mention_to_uid,
-    )
+    if _is_parquet_path(pubs_in):
+        pubs_stats = _export_source_file_parquet(
+            input_path=pubs_in,
+            output_path=pubs_out,
+            mention_to_uid=mention_to_uid,
+        )
+    else:
+        pubs_stats = _export_source_file_json(
+            input_path=pubs_in,
+            output_path=pubs_out,
+            mention_to_uid=mention_to_uid,
+        )
 
     refs_stats = _source_export_stats()
     refs_present = references_path is not None and references_output_path is not None
     if refs_present:
         refs_in = Path(str(references_path))
         refs_out = Path(str(references_output_path))
-        refs_stats = _export_source_file(
-            input_path=refs_in,
-            output_path=refs_out,
-            mention_to_uid=mention_to_uid,
-        )
+        if _is_parquet_path(refs_in):
+            refs_stats = _export_source_file_parquet(
+                input_path=refs_in,
+                output_path=refs_out,
+                mention_to_uid=mention_to_uid,
+            )
+        else:
+            refs_stats = _export_source_file_json(
+                input_path=refs_in,
+                output_path=refs_out,
+                mention_to_uid=mention_to_uid,
+            )
 
     total_authors = int(pubs_stats["authors_total"] + refs_stats["authors_total"])
     total_mapped = int(pubs_stats["authors_mapped"] + refs_stats["authors_mapped"])
