@@ -20,6 +20,7 @@ from author_name_disambiguation.approaches.nand.export import (
 )
 from author_name_disambiguation.approaches.nand.infer_pairs import score_pairs_with_checkpoint
 from author_name_disambiguation.common.cli_ui import get_active_ui
+from author_name_disambiguation.common.cpu_runtime import compute_ram_budget_bytes, normalize_workers_request
 from author_name_disambiguation.common.io_schema import PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
 from author_name_disambiguation.common.package_resources import load_yaml_like, load_yaml_resource
 from author_name_disambiguation.common.pipeline_reports import (
@@ -378,6 +379,19 @@ def _yes_no(value: bool) -> str:
     return "yes" if bool(value) else "no"
 
 
+def _format_ram_budget(value: int | None) -> str:
+    if value is None:
+        return "n/a"
+    gib = float(value) / float(1024**3)
+    if gib >= 10.0:
+        return f"{gib:.0f}GiB"
+    return f"{gib:.1f}GiB"
+
+
+def _format_worker_request(value: object) -> str:
+    return "auto" if value is None else str(value)
+
+
 def _probe_bootstrap_runtime(requested_device: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "requested_device": str(requested_device or "auto"),
@@ -553,7 +567,16 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
     score_chunked_threshold = int(infer_overrides.get("score_chunked_threshold", 500_000))
     pair_chunk_rows = int(infer_overrides.get("pair_chunk_rows", 200_000))
-    cluster_backend = "auto" if request.cluster_backend is None else str(request.cluster_backend)
+    cpu_workers = normalize_workers_request(infer_overrides.get("cpu_workers"))
+    cpu_sharding_mode = str(infer_overrides.get("cpu_sharding_mode", "auto")).strip().lower()
+    cpu_min_pairs_per_worker = int(infer_overrides.get("cpu_min_pairs_per_worker", 1_000_000))
+    cpu_target_ram_fraction = float(infer_overrides.get("cpu_target_ram_fraction", 0.6))
+    cpu_ram_budget_bytes = compute_ram_budget_bytes(target_fraction=cpu_target_ram_fraction)
+    cluster_backend = (
+        str(infer_overrides.get("cluster_backend", "auto"))
+        if request.cluster_backend is None
+        else str(request.cluster_backend)
+    )
     max_ram_fraction = 0.80
 
     context_path = output_root / "00_context.json"
@@ -585,6 +608,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "device": str(request.device),
         "precision_mode": str(request.precision_mode),
         "cluster_backend": str(cluster_backend),
+        "cpu_runtime_policy": {
+            "cpu_workers": _format_worker_request(cpu_workers),
+            "cpu_sharding_mode": cpu_sharding_mode,
+            "cpu_min_pairs_per_worker": int(cpu_min_pairs_per_worker),
+            "cpu_target_ram_fraction": float(cpu_target_ram_fraction),
+            "cpu_ram_budget_bytes": None if cpu_ram_budget_bytes is None else int(cpu_ram_budget_bytes),
+        },
     }
     write_json(context_payload, context_path)
 
@@ -776,6 +806,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])} | "
         f"score_batch_size={_format_count(score_batch_size)}"
     )
+    _ui_info(
+        f"cpu_stage=pair_building | cpu_workers={_format_worker_request(cpu_workers)} | "
+        f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
+    )
     pairs_path = dirs["processed"] / "pairs.parquet"
     pairs, pair_meta = build_pairs_within_blocks(
         mentions=mentions,
@@ -790,10 +824,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         chunk_rows=pair_chunk_rows,
         return_pairs=True,
         return_meta=True,
-        num_workers=1,
-        sharding_mode="off",
-        min_pairs_per_worker=1,
-        ram_budget_bytes=None,
+        num_workers=cpu_workers,
+        sharding_mode=cpu_sharding_mode,
+        min_pairs_per_worker=cpu_min_pairs_per_worker,
+        ram_budget_bytes=cpu_ram_budget_bytes,
     )
     if pairs is None:
         pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
@@ -860,11 +894,16 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     preflight["runtime"] = {
         "specter": text_runtime_meta,
+        "pair_building": pair_meta,
         "pair_scoring": pair_score_runtime_meta,
     }
     write_json(preflight, preflight_path)
     _ui_done(
-        f"pair_count={_format_count(len(pairs))} | score_count={_format_count(len(pair_scores))} | "
+        f"pair_count={_format_count(len(pairs))} | "
+        f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', len(pairs))))} | "
+        f"workers={_format_worker_request(pair_meta.get('cpu_workers_effective'))} | "
+        f"sharding={_yes_no(bool(pair_meta.get('cpu_sharding_enabled')))} | "
+        f"score_count={_format_count(len(pair_scores))} | "
         f"device={pair_score_runtime_meta.get('resolved_device') or 'n/a'} | "
         f"precision={pair_score_runtime_meta.get('effective_precision_mode') or str(request.precision_mode)} "
         f"in {_format_elapsed(perf_counter() - pair_inference_started_at)}"
@@ -872,7 +911,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     clustering_started_at = perf_counter()
     _ui_start("Clustering")
-    _ui_info(f"backend={cluster_backend}")
+    _ui_info(
+        f"backend={cluster_backend} | cpu_workers={_format_worker_request(cpu_workers)} | "
+        f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
+    )
     cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
     cluster_cfg_used["eps_mode"] = "fixed"
     cluster_cfg_used["selected_eps"] = float(model_info["selected_eps"])
@@ -884,10 +926,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         cluster_config=cluster_cfg_used,
         output_path=None,
         show_progress=bool(request.progress),
-        num_workers=1,
-        sharding_mode="off",
-        min_pairs_per_worker=1,
-        ram_budget_bytes=None,
+        num_workers=cpu_workers,
+        sharding_mode=cpu_sharding_mode,
+        min_pairs_per_worker=cpu_min_pairs_per_worker,
+        ram_budget_bytes=cpu_ram_budget_bytes,
         backend=cluster_backend,
         return_meta=True,
     )
@@ -898,10 +940,19 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_namespace=uid_namespace,
         uid_registry_path=uid_registry_path,
     )
+    preflight["runtime"] = {
+        "specter": text_runtime_meta,
+        "pair_building": pair_meta,
+        "pair_scoring": pair_score_runtime_meta,
+        "clustering": cluster_runtime_meta,
+    }
+    write_json(preflight, preflight_path)
     _ui_done(
         f"clusters={_format_count(int(clusters['author_uid'].nunique()))} | "
         f"mentions={_format_count(len(clusters))} | "
-        f"backend={cluster_runtime_meta.get('backend_effective')} "
+        f"backend={cluster_runtime_meta.get('cluster_backend_effective') or cluster_runtime_meta.get('backend_effective')} | "
+        f"workers={_format_worker_request(cluster_runtime_meta.get('cpu_workers_effective'))} | "
+        f"sharding={_yes_no(bool(cluster_runtime_meta.get('cpu_sharding_enabled')))} "
         f"in {_format_elapsed(perf_counter() - clustering_started_at)}"
     )
 
@@ -962,7 +1013,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "cluster_runtime": cluster_runtime_meta,
         "runtime": {
             "specter": text_runtime_meta,
+            "pair_building": pair_meta,
             "pair_scoring": pair_score_runtime_meta,
+            "clustering": cluster_runtime_meta,
         },
         "precomputed_embeddings": precomputed_embeddings,
         "uid_resolution": uid_mode_meta,
@@ -970,7 +1023,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     write_json(cluster_used_payload, cluster_cfg_used_path)
     context_payload["runtime"] = {
         "specter": text_runtime_meta,
+        "pair_building": pair_meta,
         "pair_scoring": pair_score_runtime_meta,
+        "clustering": cluster_runtime_meta,
     }
     context_payload["precomputed_embeddings"] = precomputed_embeddings
     write_json(context_payload, context_path)
@@ -1020,7 +1075,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         source_export_qc=source_export_qc,
         runtime={
             "specter": text_runtime_meta,
+            "pair_building": pair_meta,
             "pair_scoring": pair_score_runtime_meta,
+            "clustering": cluster_runtime_meta,
         },
         precomputed_embeddings=precomputed_embeddings,
     )

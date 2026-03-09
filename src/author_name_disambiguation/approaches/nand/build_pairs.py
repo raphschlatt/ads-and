@@ -6,12 +6,12 @@ import tempfile
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
 
-from author_name_disambiguation.common.cli_ui import iter_progress
+from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     detect_cpu_limit,
@@ -346,6 +346,7 @@ def _execute_pair_blocks(
     output_path: str | Path | None,
     chunk_rows: int,
     return_pairs: bool,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> tuple[pd.DataFrame | None, Dict[str, Any]]:
     output = Path(output_path) if output_path is not None else None
     if output is not None:
@@ -361,19 +362,12 @@ def _execute_pair_blocks(
     pairs_written = 0
     writer_holder: dict[str, Any] = {"writer": None, "schema": None}
 
-    iterator = iter_progress(
-        blocks,
-        total=len(blocks),
-        label="Pair blocks",
-        enabled=show_progress,
-        unit="block",
-    )
-
-    for block_key, block in iterator:
+    for block_key, block in blocks:
         n = len(block)
         if n < 2:
             continue
 
+        pair_weight = _block_weight(n, max_pairs_per_block=max_pairs_per_block)
         rng = np.random.default_rng(_seed_for_block(seed, str(block_key)))
         for i, j in _iter_pair_indices(n=n, max_pairs_per_block=max_pairs_per_block, rng=rng):
             r1 = block.iloc[i]
@@ -421,6 +415,8 @@ def _execute_pair_blocks(
                     writer_holder=writer_holder,
                     return_rows=keep_rows,
                 )
+        if progress_callback is not None and pair_weight > 0:
+            progress_callback(int(pair_weight))
 
     pairs_written += _flush_pair_buffer(
         buffer_rows=buffer_rows,
@@ -645,107 +641,123 @@ def build_pairs_within_blocks(
 
     sequential_fallback = (not sharding_on) or workers_effective <= 1 or len(parallel_entries) <= 1
 
-    if sequential_fallback:
-        blocks = [(str(e["block_key"]), e["block"]) for e in block_entries]
-        pairs, pair_meta = _execute_pair_blocks(
-            blocks=blocks,
-            max_pairs_per_block=max_pairs_per_block,
-            seed=seed,
-            require_same_split=require_same_split,
-            labeled_only=labeled_only,
-            exclude_same_bibcode=exclude_same_bibcode,
-            show_progress=show_progress,
-            output_path=output,
-            chunk_rows=chunk_rows,
-            return_pairs=return_pairs,
-        )
-    else:
-        shard_count = int(min(workers_effective, len(parallel_entries)))
-        shards = _partition_block_entries(parallel_entries, num_shards=shard_count)
-        collect_in_memory = output is None and return_pairs
+    with loop_progress(
+        total=total_pairs_est,
+        label="Pair candidates",
+        enabled=show_progress,
+        unit="pair",
+    ) as tracker:
+        progress_update = tracker.update if show_progress else None
 
-        with tempfile.TemporaryDirectory(prefix="pair_shards_") as tmpdir:
-            tmp_root = Path(tmpdir)
-            shard_paths: list[Path] = []
-            shard_metas: list[dict[str, Any]] = []
-            shard_rows: list[dict[str, Any]] = []
+        if sequential_fallback:
+            blocks = [(str(e["block_key"]), e["block"]) for e in block_entries]
+            pairs, pair_meta = _execute_pair_blocks(
+                blocks=blocks,
+                max_pairs_per_block=max_pairs_per_block,
+                seed=seed,
+                require_same_split=require_same_split,
+                labeled_only=labeled_only,
+                exclude_same_bibcode=exclude_same_bibcode,
+                show_progress=False,
+                output_path=output,
+                chunk_rows=chunk_rows,
+                return_pairs=return_pairs,
+                progress_callback=progress_update,
+            )
+        else:
+            shard_count = int(min(workers_effective, len(parallel_entries)))
+            progress_shard_count = int(min(len(parallel_entries), max(shard_count, shard_count * 8)))
+            shards = _partition_block_entries(parallel_entries, num_shards=progress_shard_count)
+            collect_in_memory = output is None and return_pairs
 
-            if oversize_entries:
-                oversize_blocks = [(str(e["block_key"]), e["block"]) for e in oversize_entries]
-                oversize_out = None if collect_in_memory else tmp_root / "pairs_oversize.parquet"
-                _pairs_oversize, oversize_meta = _execute_pair_blocks(
-                    blocks=oversize_blocks,
-                    max_pairs_per_block=max_pairs_per_block,
-                    seed=seed,
-                    require_same_split=require_same_split,
-                    labeled_only=labeled_only,
-                    exclude_same_bibcode=exclude_same_bibcode,
-                    show_progress=False,
-                    output_path=oversize_out,
-                    chunk_rows=chunk_rows,
-                    return_pairs=collect_in_memory,
-                )
-                if oversize_out is not None:
-                    shard_paths.append(oversize_out)
-                if collect_in_memory and _pairs_oversize is not None and len(_pairs_oversize) > 0:
-                    shard_rows.extend(_pairs_oversize.to_dict(orient="records"))
-                shard_metas.append(oversize_meta)
+            with tempfile.TemporaryDirectory(prefix="pair_shards_") as tmpdir:
+                tmp_root = Path(tmpdir)
+                shard_paths: list[Path] = []
+                shard_metas: list[dict[str, Any]] = []
+                shard_rows: list[dict[str, Any]] = []
 
-            ctx = mp.get_context("spawn")
-            futures = []
-            with ProcessPoolExecutor(max_workers=shard_count, mp_context=ctx) as pool:
-                for shard_idx, shard_blocks in enumerate(shards):
-                    shard_out = None if collect_in_memory else tmp_root / f"pairs_shard_{shard_idx:04d}.parquet"
-                    if shard_out is not None:
-                        shard_paths.append(shard_out)
-                    payload = {
-                        "blocks": shard_blocks,
-                        "max_pairs_per_block": max_pairs_per_block,
-                        "seed": int(seed),
-                        "require_same_split": bool(require_same_split),
-                        "labeled_only": bool(labeled_only),
-                        "exclude_same_bibcode": bool(exclude_same_bibcode),
-                        "chunk_rows": int(chunk_rows),
-                        "output_path": None if shard_out is None else str(shard_out),
-                        "return_pairs": bool(collect_in_memory),
-                    }
-                    futures.append(pool.submit(_pair_worker, payload))
+                if oversize_entries:
+                    oversize_blocks = [(str(e["block_key"]), e["block"]) for e in oversize_entries]
+                    oversize_out = None if collect_in_memory else tmp_root / "pairs_oversize.parquet"
+                    _pairs_oversize, oversize_meta = _execute_pair_blocks(
+                        blocks=oversize_blocks,
+                        max_pairs_per_block=max_pairs_per_block,
+                        seed=seed,
+                        require_same_split=require_same_split,
+                        labeled_only=labeled_only,
+                        exclude_same_bibcode=exclude_same_bibcode,
+                        show_progress=False,
+                        output_path=oversize_out,
+                        chunk_rows=chunk_rows,
+                        return_pairs=collect_in_memory,
+                        progress_callback=progress_update,
+                    )
+                    if oversize_out is not None:
+                        shard_paths.append(oversize_out)
+                    if collect_in_memory and _pairs_oversize is not None and len(_pairs_oversize) > 0:
+                        shard_rows.extend(_pairs_oversize.to_dict(orient="records"))
+                    shard_metas.append(oversize_meta)
 
-                for fut in as_completed(futures):
-                    result = dict(fut.result())
-                    shard_metas.append(dict(result.get("meta", {})))
-                    if collect_in_memory:
-                        shard_rows.extend(result.get("rows", []))
+                ctx = mp.get_context("spawn")
+                futures = {}
+                with ProcessPoolExecutor(max_workers=shard_count, mp_context=ctx) as pool:
+                    for shard_idx, shard_blocks in enumerate(shards):
+                        shard_out = None if collect_in_memory else tmp_root / f"pairs_shard_{shard_idx:04d}.parquet"
+                        if shard_out is not None:
+                            shard_paths.append(shard_out)
+                        payload = {
+                            "blocks": shard_blocks,
+                            "max_pairs_per_block": max_pairs_per_block,
+                            "seed": int(seed),
+                            "require_same_split": bool(require_same_split),
+                            "labeled_only": bool(labeled_only),
+                            "exclude_same_bibcode": bool(exclude_same_bibcode),
+                            "chunk_rows": int(chunk_rows),
+                            "output_path": None if shard_out is None else str(shard_out),
+                            "return_pairs": bool(collect_in_memory),
+                        }
+                        shard_weight = int(
+                            sum(_block_weight(len(block), max_pairs_per_block=max_pairs_per_block) for _, block in shard_blocks)
+                        )
+                        futures[pool.submit(_pair_worker, payload)] = shard_weight
 
-            if collect_in_memory:
-                pairs = pd.DataFrame(shard_rows)
-                merged_rows = int(len(pairs))
-                final_output = output
-            else:
-                if output is not None:
+                    for fut in as_completed(futures):
+                        result = dict(fut.result())
+                        shard_metas.append(dict(result.get("meta", {})))
+                        if collect_in_memory:
+                            shard_rows.extend(result.get("rows", []))
+                        if progress_update is not None:
+                            progress_update(int(futures[fut]))
+
+                if collect_in_memory:
+                    pairs = pd.DataFrame(shard_rows)
+                    merged_rows = int(len(pairs))
                     final_output = output
                 else:
-                    final_output = tmp_root / "pairs_merged.parquet"
-                merged_rows = _merge_parquet_shards(shard_paths=shard_paths, output_path=final_output)
+                    if output is not None:
+                        final_output = output
+                    else:
+                        final_output = tmp_root / "pairs_merged.parquet"
+                    merged_rows = _merge_parquet_shards(shard_paths=shard_paths, output_path=final_output)
 
-            same_publication_pairs_skipped = int(
-                sum(int(m.get("same_publication_pairs_skipped", 0)) for m in shard_metas)
-            )
-            pair_meta = {
-                "same_publication_pairs_skipped": same_publication_pairs_skipped,
-                "pairs_written": int(merged_rows),
-                "chunk_rows": int(chunk_rows),
-                "output_path": None if final_output is None else str(final_output),
-            }
+                same_publication_pairs_skipped = int(
+                    sum(int(m.get("same_publication_pairs_skipped", 0)) for m in shard_metas)
+                )
+                pair_meta = {
+                    "same_publication_pairs_skipped": same_publication_pairs_skipped,
+                    "pairs_written": int(merged_rows),
+                    "chunk_rows": int(chunk_rows),
+                    "output_path": None if final_output is None else str(final_output),
+                }
 
-            if collect_in_memory:
-                pass
-            elif output is None and not return_pairs:
-                pairs = None
-            elif return_pairs:
-                pairs = pd.read_parquet(final_output)
-            else:
-                pairs = None
+                if collect_in_memory:
+                    pass
+                elif output is None and not return_pairs:
+                    pairs = None
+                elif return_pairs:
+                    pairs = pd.read_parquet(final_output)
+                else:
+                    pairs = None
 
     meta: Dict[str, Any] = {
         "exclude_same_bibcode": bool(exclude_same_bibcode),
@@ -755,7 +767,7 @@ def build_pairs_within_blocks(
         "chunk_rows": int(chunk_rows),
         "output_path": str(output) if output is not None else None,
         "cpu_sharding_mode": str(sharding_mode),
-        "cpu_sharding_enabled": bool(sharding_on),
+        "cpu_sharding_enabled": bool((not sequential_fallback) and sharding_on),
         "cpu_workers_requested": requested_repr,
         "cpu_workers_effective": int(workers_effective),
         "cpu_limit_detected": int(cpu_info["cpu_limit"]),

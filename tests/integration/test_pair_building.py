@@ -1,5 +1,8 @@
+from contextlib import contextmanager
+
 import pandas as pd
 
+from author_name_disambiguation.approaches.nand import build_pairs as build_pairs_module
 from author_name_disambiguation.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks
 
 
@@ -137,3 +140,48 @@ def test_pair_builder_sharding_is_deterministic_across_worker_counts():
     rhs = pairs_4[key_cols].sort_values(key_cols).reset_index(drop=True)
     pd.testing.assert_frame_equal(lhs, rhs)
     assert meta_1["pairs_written"] == meta_4["pairs_written"]
+
+
+def test_pair_builder_progress_tracks_pair_weights(monkeypatch):
+    updates: list[int] = []
+
+    @contextmanager
+    def _fake_loop_progress(**kwargs):
+        assert kwargs["label"] == "Pair candidates"
+        assert kwargs["unit"] == "pair"
+        assert kwargs["total"] == 7
+
+        class _Tracker:
+            def update(self, n=1):
+                updates.append(int(n))
+
+        yield _Tracker()
+
+    monkeypatch.setattr(build_pairs_module, "loop_progress", _fake_loop_progress)
+
+    df = pd.DataFrame(
+        [
+            {"mention_id": "a1", "bibcode": "a1", "author_idx": 0, "author_raw": "A", "title": "t", "abstract": "a", "year": 2001, "source_type": "ads", "block_key": "blk.a", "split": "inference"},
+            {"mention_id": "a2", "bibcode": "a2", "author_idx": 0, "author_raw": "A", "title": "t", "abstract": "a", "year": 2002, "source_type": "ads", "block_key": "blk.a", "split": "inference"},
+            {"mention_id": "b1", "bibcode": "b1", "author_idx": 0, "author_raw": "B", "title": "t", "abstract": "a", "year": 2001, "source_type": "ads", "block_key": "blk.b", "split": "inference"},
+            {"mention_id": "b2", "bibcode": "b2", "author_idx": 0, "author_raw": "B", "title": "t", "abstract": "a", "year": 2002, "source_type": "ads", "block_key": "blk.b", "split": "inference"},
+            {"mention_id": "b3", "bibcode": "b3", "author_idx": 0, "author_raw": "B", "title": "t", "abstract": "a", "year": 2003, "source_type": "ads", "block_key": "blk.b", "split": "inference"},
+            {"mention_id": "b4", "bibcode": "b4", "author_idx": 0, "author_raw": "B", "title": "t", "abstract": "a", "year": 2004, "source_type": "ads", "block_key": "blk.b", "split": "inference"},
+        ]
+    )
+
+    pairs, meta = build_pairs_within_blocks(
+        df,
+        require_same_split=False,
+        labeled_only=False,
+        balance_train=False,
+        exclude_same_bibcode=False,
+        show_progress=True,
+        num_workers=1,
+        sharding_mode="off",
+        return_meta=True,
+    )
+
+    assert len(pairs) == 7
+    assert updates == [1, 6]
+    assert meta["total_pairs_est"] == 7

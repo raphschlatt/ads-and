@@ -93,6 +93,8 @@ def _write_bundle(tmp_path: Path) -> Path:
 
 
 def _apply_fast_mocks(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
     def _chars(mentions, output_path, force_recompute=False, **_kwargs):
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,7 +183,44 @@ def _apply_fast_mocks(monkeypatch) -> None:
         }
         return (out, meta) if _kwargs.get("return_runtime_meta") else out
 
+    def _pairs(mentions, output_path=None, **_kwargs):
+        seen["pair_kwargs"] = dict(_kwargs)
+        rows = []
+        for block_key, grp in mentions.groupby("block_key", sort=False):
+            if len(grp) < 2:
+                continue
+            base = grp.iloc[0]
+            other = grp.iloc[1]
+            rows.append(
+                {
+                    "pair_id": f"{base['mention_id']}__{other['mention_id']}",
+                    "mention_id_1": str(base["mention_id"]),
+                    "mention_id_2": str(other["mention_id"]),
+                    "block_key": str(block_key),
+                    "split": str(base.get("split", "inference")),
+                    "label": None,
+                }
+            )
+        out = pd.DataFrame(rows)
+        meta = {
+            "same_publication_pairs_skipped": 0,
+            "pairs_written": int(len(out)),
+            "chunk_rows": int(_kwargs.get("chunk_rows", 0)),
+            "output_path": None if output_path is None else str(output_path),
+            "cpu_sharding_mode": str(_kwargs.get("sharding_mode", "auto")),
+            "cpu_sharding_enabled": str(_kwargs.get("sharding_mode", "auto")) != "off",
+            "cpu_workers_requested": "auto" if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+            "cpu_workers_effective": 4 if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+            "cpu_limit_detected": 8,
+            "cpu_limit_source": "test",
+            "cpu_min_pairs_per_worker": int(_kwargs.get("min_pairs_per_worker", 1)),
+            "ram_budget_bytes": int(_kwargs["ram_budget_bytes"]) if _kwargs.get("ram_budget_bytes") is not None else None,
+            "total_pairs_est": int(len(out)),
+        }
+        return (out, meta) if _kwargs.get("return_meta") else out
+
     def _cluster(mentions, pair_scores, output_path=None, **_kwargs):
+        seen["cluster_kwargs"] = dict(_kwargs)
         out = mentions[["mention_id", "block_key"]].copy()
         out["author_uid"] = [
             "blk.a.0",
@@ -194,19 +233,30 @@ def _apply_fast_mocks(monkeypatch) -> None:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             out.to_parquet(output_path, index=False)
         if bool(_kwargs.get("return_meta")):
-            return out, {"cluster_backend_effective": "sklearn_cpu", "cpu_workers_effective": 1}
+            return out, {
+                "cluster_backend_requested": str(_kwargs.get("backend", "auto")),
+                "cluster_backend_effective": "sklearn_cpu",
+                "cpu_sharding_mode": str(_kwargs.get("sharding_mode", "auto")),
+                "cpu_sharding_enabled": str(_kwargs.get("sharding_mode", "auto")) != "off",
+                "cpu_workers_requested": "auto" if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+                "cpu_workers_effective": 4 if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+                "ram_budget_bytes": int(_kwargs["ram_budget_bytes"]) if _kwargs.get("ram_budget_bytes") is not None else None,
+                "total_pairs_est": int(len(pair_scores)),
+            }
         return out
 
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_chars2vec_embeddings", _chars)
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_specter_embeddings", _text)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _pairs)
     monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score)
     monkeypatch.setattr("author_name_disambiguation.source_inference.cluster_blockwise_dbscan", _cluster)
+    return seen
 
 
 def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, capsys):
     publications_path, references_path = _write_dataset(tmp_path, with_references=True)
     bundle_dir = _write_bundle(tmp_path)
-    _apply_fast_mocks(monkeypatch)
+    seen = _apply_fast_mocks(monkeypatch)
     monkeypatch.setattr(
         "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
         lambda _device: {
@@ -266,8 +316,13 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "author_display_name" in entities.columns
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
     assert context["runtime"]["specter"]["fallback_reason"] == "torch_cuda_unavailable"
+    assert context["runtime"]["pair_building"]["cpu_workers_effective"] == 4
+    assert context["runtime"]["clustering"]["cpu_workers_effective"] == 4
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
+    assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
+    assert preflight["runtime"]["clustering"]["cpu_sharding_enabled"] is True
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
+    assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
     assert "START Bootstrap" in captured.err
     assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err
@@ -277,11 +332,25 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "DONE 5 names embedded in " in captured.err
     assert "START Text embeddings" in captured.err
     assert "DONE 5 texts embedded in " in captured.err
+    assert "cpu_stage=pair_building | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
+    assert "pair_count=" in captured.err
+    assert "pairs_est=" in captured.err
+    assert "workers=4 | sharding=yes | score_count=" in captured.err
+    assert "backend=auto | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
+    assert "backend=sklearn_cpu | workers=4 | sharding=yes" in captured.err
     assert "START Export and reports" in captured.err
     assert "Run complete | run_id=" in captured.err
     assert "\r" not in captured.err
     payload_stdout = json.loads(captured.out)
     assert payload_stdout["run_id"] == payload["run_id"]
+    assert seen["pair_kwargs"]["num_workers"] is None
+    assert seen["pair_kwargs"]["sharding_mode"] == "auto"
+    assert seen["pair_kwargs"]["min_pairs_per_worker"] == 1_000_000
+    assert int(seen["pair_kwargs"]["ram_budget_bytes"]) > 0
+    assert seen["cluster_kwargs"]["num_workers"] is None
+    assert seen["cluster_kwargs"]["sharding_mode"] == "auto"
+    assert seen["cluster_kwargs"]["min_pairs_per_worker"] == 1_000_000
+    assert int(seen["cluster_kwargs"]["ram_budget_bytes"]) > 0
 
 
 def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):

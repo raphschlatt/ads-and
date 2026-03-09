@@ -232,7 +232,17 @@ def _apply_fast_mocks(monkeypatch) -> None:
                 }
             )
         out = pd.DataFrame(rows)
-        meta = {"same_publication_pairs_skipped": 0}
+        meta = {
+            "same_publication_pairs_skipped": 0,
+            "pairs_written": int(len(out)),
+            "cpu_sharding_mode": str(_kwargs.get("sharding_mode", "auto")),
+            "cpu_sharding_enabled": str(_kwargs.get("sharding_mode", "auto")) != "off",
+            "cpu_workers_requested": "auto" if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+            "cpu_workers_effective": 4 if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+            "cpu_min_pairs_per_worker": int(_kwargs.get("min_pairs_per_worker", 1)),
+            "ram_budget_bytes": int(_kwargs["ram_budget_bytes"]) if _kwargs.get("ram_budget_bytes") is not None else None,
+            "total_pairs_est": int(len(out)),
+        }
         return (out, meta) if return_meta else out
 
     def _train(seeds, run_id, output_dir, metrics_output=None, **_kwargs):
@@ -281,7 +291,11 @@ def _apply_fast_mocks(monkeypatch) -> None:
             return out, {
                 "cluster_backend_requested": str(_kwargs.get("backend", "auto")),
                 "cluster_backend_effective": "sklearn_cpu",
-                "cpu_workers_effective": int(_kwargs.get("num_workers", 1)),
+                "cpu_sharding_mode": str(_kwargs.get("sharding_mode", "auto")),
+                "cpu_sharding_enabled": str(_kwargs.get("sharding_mode", "auto")) != "off",
+                "cpu_workers_requested": "auto" if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+                "cpu_workers_effective": 4 if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
+                "ram_budget_bytes": int(_kwargs["ram_budget_bytes"]) if _kwargs.get("ram_budget_bytes") is not None else None,
             }
         return out
 
