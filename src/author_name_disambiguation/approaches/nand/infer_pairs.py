@@ -12,6 +12,7 @@ from author_name_disambiguation.approaches.nand.modeling import create_encoder
 from author_name_disambiguation.approaches.nand.train import build_feature_matrix as _legacy_build_feature_matrix
 from author_name_disambiguation.common.io_schema import PAIR_SCORE_REQUIRED_COLUMNS, validate_columns, save_parquet
 from author_name_disambiguation.common.numeric_safety import clamp_cosine_sim, compute_safe_distance_from_cosine
+from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 
 # Backward-compatible export for tests/legacy monkeypatch points.
 build_feature_matrix = _legacy_build_feature_matrix
@@ -30,22 +31,8 @@ def _build_mention_index(mentions: pd.DataFrame) -> Dict[str, int]:
 
 
 def _resolve_device(torch, device: str) -> str:
-    if device != "auto":
-        return device
-    if not torch.cuda.is_available():
-        return "cpu"
-    try:
-        # A real CUDA allocation catches cases where is_available() is true
-        # but CUDA init still fails in this process/session.
-        _ = torch.cuda.current_device()
-        _ = torch.empty(1, device="cuda")
-        return "cuda"
-    except Exception as exc:  # pragma: no cover
-        warnings.warn(
-            f"CUDA appears unavailable in this session ({exc!r}); falling back to CPU.",
-            RuntimeWarning,
-        )
-        return "cpu"
+    resolved, _ = resolve_torch_device(torch, device, runtime_label="Pair scoring")
+    return resolved
 
 
 def _resolve_effective_precision_mode(torch, precision_mode: str, device: str) -> str:
@@ -97,10 +84,11 @@ def score_pairs_with_checkpoint(
     show_progress: bool = False,
     chunk_rows: int | None = None,
     return_scores: bool = True,
-) -> pd.DataFrame:
+    return_runtime_meta: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
     torch = _require_torch()
     requested_device = device
-    device = _resolve_device(torch, device)
+    device, runtime_meta = resolve_torch_device(torch, device, runtime_label="Pair scoring")
 
     checkpoint = load_checkpoint(checkpoint_path=checkpoint_path, device=device)
     model = create_encoder(checkpoint["model_config"])
@@ -108,17 +96,19 @@ def score_pairs_with_checkpoint(
     try:
         model.to(device)
     except Exception as exc:
-        if requested_device == "auto" and str(device).startswith("cuda"):
-            warnings.warn(
-                f"Moving model to CUDA failed ({exc!r}); falling back to CPU.",
-                RuntimeWarning,
+        if str(requested_device).strip().lower() == "auto" and str(device).startswith("cuda"):
+            device, runtime_meta = apply_auto_cuda_move_fallback(
+                requested_device=requested_device,
+                runtime_label="Pair scoring",
+                runtime_meta=runtime_meta,
+                exc=exc,
             )
-            device = "cpu"
             model.to(device)
         else:
             raise
     model.eval()
     effective_precision_mode = _resolve_effective_precision_mode(torch=torch, precision_mode=precision_mode, device=device)
+    runtime_meta["effective_precision_mode"] = effective_precision_mode
 
     mindex = _build_mention_index(mentions)
 
@@ -238,13 +228,15 @@ def score_pairs_with_checkpoint(
 
         if return_scores:
             if not out_rows:
-                return pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+                empty = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+                return (empty, runtime_meta) if return_runtime_meta else empty
             out = pd.concat(out_rows, ignore_index=True)
             validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
-            return out
-        return pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+            return (out, runtime_meta) if return_runtime_meta else out
+        empty = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+        return (empty, runtime_meta) if return_runtime_meta else empty
 
     out = _score_pairs_frame(pairs)
     if output_path is not None:
         save_parquet(out, output_path, index=False)
-    return out
+    return (out, runtime_meta) if return_runtime_meta else out

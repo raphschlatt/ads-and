@@ -32,6 +32,39 @@ author-name-disambiguation run-infer-sources \
 - `--uid-scope dataset|local|registry`
 - `--uid-namespace <name>`
 
+## GPU Notes
+
+- `--device auto` may fall back to CPU if PyTorch cannot use CUDA in the current venv/session.
+- The fallback is reported in `00_context.json`, `02_preflight_infer.json`, and `05_stage_metrics_infer_sources.json`.
+- TensorFlow logging a visible GPU does not prove that SPECTER is on GPU; SPECTER and pair scoring use PyTorch.
+- On the shared A100 host, prefer repairing the existing `/home/ubuntu/.venv` with `uv pip` instead of creating a separate conda env:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --index-url https://download.pytorch.org/whl/cu126 \
+  --reinstall "torch==2.10.0+cu126"
+```
+
+- Verify PyTorch directly before large runs:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("torch.version.cuda", torch.version.cuda)
+print("torch.cuda.is_available", torch.cuda.is_available())
+print("torch.cuda.device_count", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("torch.cuda.get_device_name(0)", torch.cuda.get_device_name(0))
+PY
+```
+
+- Do not trust TensorFlow-only GPU logs as proof of SPECTER acceleration.
+- If `torch.cuda.is_available` is `False`, fix the venv before launching a full run.
+
 ## Output Contract
 
 Each successful run writes:
@@ -54,3 +87,4 @@ The source-mirrored outputs preserve all input fields and add:
 - The public inference path does not accept `model_run_id`.
 - The package does not expect repo-relative workspace discovery at runtime.
 - Packaged defaults are used when `cluster_config` and `gates_config` are omitted.
+- Aborted runs should be cleaned per `output_root`; no shared cache cleanup is done automatically.

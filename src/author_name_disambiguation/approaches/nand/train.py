@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from author_name_disambiguation.approaches.nand.modeling import create_encoder, info_nce_loss
+from author_name_disambiguation.common.torch_runtime import resolve_torch_device
 
 
 def _require_torch():
@@ -23,20 +24,8 @@ def _require_torch():
 
 
 def _resolve_device(torch, device: str) -> str:
-    if device != "auto":
-        return device
-    if not torch.cuda.is_available():
-        return "cpu"
-    try:
-        _ = torch.cuda.current_device()
-        _ = torch.empty(1, device="cuda")
-        return "cuda"
-    except Exception as exc:  # pragma: no cover
-        warnings.warn(
-            f"CUDA appears unavailable in this session ({exc!r}); falling back to CPU.",
-            RuntimeWarning,
-        )
-        return "cpu"
+    resolved, _ = resolve_torch_device(torch, device, runtime_label="NAND training")
+    return resolved
 
 
 def _resolve_effective_precision_mode(torch, precision_mode: str, device: str) -> str:

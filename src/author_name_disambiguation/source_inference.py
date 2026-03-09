@@ -4,7 +4,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -31,7 +31,7 @@ from author_name_disambiguation.common.subset_builder import build_stage_subset
 from author_name_disambiguation.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
 from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
-from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
+from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings, summarize_precomputed_embeddings
 
 if TYPE_CHECKING:
     from author_name_disambiguation.infer_sources import InferSourcesRequest, InferSourcesResult
@@ -66,6 +66,40 @@ def _write_consistency(output_path: Path, *, run_id: str, stage: str, extras: di
     if extras:
         payload.update(extras)
     return write_json(payload, output_path)
+
+
+def _summarize_precomputed_frame(frame: pd.DataFrame) -> dict[str, Any]:
+    values = frame["precomputed_embedding"].tolist() if "precomputed_embedding" in frame.columns else None
+    return summarize_precomputed_embeddings(values, total_count=int(len(frame)))
+
+
+def _default_runtime_meta(*, requested_device: str, effective_precision_mode: str | None = None) -> dict[str, Any]:
+    return {
+        "requested_device": str(requested_device),
+        "resolved_device": None,
+        "fallback_reason": None,
+        "torch_version": None,
+        "torch_cuda_version": None,
+        "torch_cuda_available": None,
+        "cuda_probe_error": None,
+        "model_to_cuda_error": None,
+        "effective_precision_mode": effective_precision_mode,
+    }
+
+
+def _normalize_runtime_meta(
+    meta: Mapping[str, Any] | None,
+    *,
+    requested_device: str,
+    effective_precision_mode: str | None = None,
+    skipped: bool = False,
+) -> dict[str, Any]:
+    out = _default_runtime_meta(requested_device=requested_device, effective_precision_mode=effective_precision_mode)
+    if meta:
+        out.update(dict(meta))
+    if skipped:
+        out["skipped"] = True
+    return out
 
 
 def _validate_request(request: InferSourcesRequest) -> None:
@@ -410,28 +444,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         _write_consistency(output_root / "00_run_consistency.json", run_id=run_id, stage="infer_sources"),
     ]
 
-    write_json(
-        {
-            "run_id": run_id,
-            "run_stage": "infer_sources",
-            "pipeline_scope": "infer",
-            "dataset_id": str(request.dataset_id),
-            "publications_path": str(Path(request.publications_path).expanduser().resolve()),
-            "references_path": None if request.references_path is None else str(Path(request.references_path).expanduser().resolve()),
-            "output_root": str(output_root),
-            "infer_stage": infer_stage,
-            "uid_scope": uid_scope,
-            "uid_namespace": uid_namespace,
-            "model_bundle": str(Path(request.model_bundle).expanduser().resolve()),
-            "source_model_run_id": model_info["source_model_run_id"],
-            "selected_eps": float(model_info["selected_eps"]),
-            "best_threshold": float(model_info["best_threshold"]),
-            "device": str(request.device),
-            "precision_mode": str(request.precision_mode),
-            "cluster_backend": str(cluster_backend),
-        },
-        context_path,
-    )
+    context_payload = {
+        "run_id": run_id,
+        "run_stage": "infer_sources",
+        "pipeline_scope": "infer",
+        "dataset_id": str(request.dataset_id),
+        "publications_path": str(Path(request.publications_path).expanduser().resolve()),
+        "references_path": None if request.references_path is None else str(Path(request.references_path).expanduser().resolve()),
+        "output_root": str(output_root),
+        "infer_stage": infer_stage,
+        "uid_scope": uid_scope,
+        "uid_namespace": uid_namespace,
+        "model_bundle": str(Path(request.model_bundle).expanduser().resolve()),
+        "source_model_run_id": model_info["source_model_run_id"],
+        "selected_eps": float(model_info["selected_eps"]),
+        "best_threshold": float(model_info["best_threshold"]),
+        "device": str(request.device),
+        "precision_mode": str(request.precision_mode),
+        "cluster_backend": str(cluster_backend),
+    }
+    write_json(context_payload, context_path)
 
     prepared = prepare_ads_source_data(
         publications_path=request.publications_path,
@@ -455,6 +487,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         )
     save_parquet(mentions, dirs["interim"] / "mentions.parquet", index=False)
 
+    precomputed_embeddings = {
+        "publications": _summarize_precomputed_frame(publications),
+        "references": _summarize_precomputed_frame(references),
+        "canonical_records": _summarize_precomputed_frame(canonical_records),
+        "mentions_full": _summarize_precomputed_frame(full_mentions),
+        "mentions": _summarize_precomputed_frame(mentions),
+    }
+
     write_json(
         {
             "run_id": run_id,
@@ -468,6 +508,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "ads_mentions": int(len(mentions)),
             "infer_stage": infer_stage,
             "subset_ratio": float(len(mentions) / max(1, len(full_mentions))),
+            "precomputed_embeddings": precomputed_embeddings,
         },
         input_summary_path,
     )
@@ -489,6 +530,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     preflight["run_id"] = run_id
     preflight["run_stage"] = "infer_sources"
     preflight["infer_stage"] = infer_stage
+    preflight["precomputed_embeddings"] = precomputed_embeddings
     write_json(preflight, preflight_path)
     consistency_paths.append(
         _write_consistency(
@@ -508,7 +550,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         use_stub_if_missing=False,
         quiet_libraries=True,
     )
-    text = get_or_create_specter_embeddings(
+    text_result = get_or_create_specter_embeddings(
         mentions=mentions,
         output_path=text_path,
         force_recompute=bool(request.force),
@@ -524,11 +566,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         show_progress=bool(request.progress),
         quiet_libraries=True,
         reuse_model=True,
+        return_meta=True,
+    )
+    if isinstance(text_result, tuple) and len(text_result) == 2:
+        text, text_runtime_meta_raw = text_result
+    else:
+        text = text_result
+        text_runtime_meta_raw = None
+    text_runtime_meta = _normalize_runtime_meta(
+        text_runtime_meta_raw,
+        requested_device=str(request.device),
     )
     if not isinstance(chars, np.ndarray):
         chars = np.load(chars_path, mmap_mode="r")
     if not isinstance(text, np.ndarray):
         text = np.load(text_path, mmap_mode="r")
+
+    preflight["runtime"] = {
+        "specter": text_runtime_meta,
+    }
+    write_json(preflight, preflight_path)
 
     pairs_path = dirs["processed"] / "pairs.parquet"
     pairs, pair_meta = build_pairs_within_blocks(
@@ -576,9 +633,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     if len(pairs) == 0:
         pair_scores = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
         save_parquet(pair_scores, pair_scores_path, index=False)
+        pair_score_runtime_meta = _normalize_runtime_meta(
+            None,
+            requested_device=str(request.device),
+            effective_precision_mode=str(request.precision_mode),
+            skipped=True,
+        )
     else:
         pairs_input: pd.DataFrame | str | Path = pairs_path if len(pairs) > score_chunked_threshold else pairs
-        pair_scores = score_pairs_with_checkpoint(
+        pair_scores_result = score_pairs_with_checkpoint(
             mentions=mentions,
             pairs=pairs_input,
             chars2vec=chars,
@@ -591,9 +654,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             show_progress=bool(request.progress),
             chunk_rows=score_chunk_rows,
             return_scores=not isinstance(pairs_input, Path),
+            return_runtime_meta=True,
+        )
+        if isinstance(pair_scores_result, tuple) and len(pair_scores_result) == 2:
+            pair_scores, pair_score_runtime_meta_raw = pair_scores_result
+        else:
+            pair_scores = pair_scores_result
+            pair_score_runtime_meta_raw = None
+        pair_score_runtime_meta = _normalize_runtime_meta(
+            pair_score_runtime_meta_raw,
+            requested_device=str(request.device),
+            effective_precision_mode=str(request.precision_mode),
         )
         if not isinstance(pair_scores, pd.DataFrame):
             pair_scores = read_parquet(pair_scores_path)
+
+    preflight["runtime"] = {
+        "specter": text_runtime_meta,
+        "pair_scoring": pair_score_runtime_meta,
+    }
+    write_json(preflight, preflight_path)
 
     cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
     cluster_cfg_used["eps_mode"] = "fixed"
@@ -671,9 +751,20 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "eps_resolution": eps_meta,
         "cluster_config_used": cluster_cfg_used,
         "cluster_runtime": cluster_runtime_meta,
+        "runtime": {
+            "specter": text_runtime_meta,
+            "pair_scoring": pair_score_runtime_meta,
+        },
+        "precomputed_embeddings": precomputed_embeddings,
         "uid_resolution": uid_mode_meta,
     }
     write_json(cluster_used_payload, cluster_cfg_used_path)
+    context_payload["runtime"] = {
+        "specter": text_runtime_meta,
+        "pair_scoring": pair_score_runtime_meta,
+    }
+    context_payload["precomputed_embeddings"] = precomputed_embeddings
+    write_json(context_payload, context_path)
     consistency_paths.append(
         _write_consistency(
             output_root / "04_run_consistency.json",
@@ -718,6 +809,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         memory_feasible=preflight.get("memory_feasible"),
         pair_upper_bound=preflight.get("pair_upper_bound"),
         source_export_qc=source_export_qc,
+        runtime={
+            "specter": text_runtime_meta,
+            "pair_scoring": pair_score_runtime_meta,
+        },
+        precomputed_embeddings=precomputed_embeddings,
     )
     write_json(stage_metrics, result_paths["stage_metrics"])
     consistency_paths.append(

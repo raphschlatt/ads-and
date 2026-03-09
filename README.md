@@ -21,6 +21,32 @@ The public Python API is inference-only:
 python -m pip install -e .[dev]
 ```
 
+For GPU-backed SPECTER and NAND inference, install a CUDA-enabled PyTorch build explicitly.
+TensorFlow seeing a GPU is not sufficient because the SPECTER and pair-scoring paths use PyTorch.
+In this repo, prefer `uv pip` against the existing project venv instead of introducing a separate conda env.
+
+Verified repair command for the shared `/home/ubuntu/.venv` on the A100 host:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --index-url https://download.pytorch.org/whl/cu126 \
+  --reinstall "torch==2.10.0+cu126"
+python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("torch.version.cuda", torch.version.cuda)
+print("torch.cuda.is_available", torch.cuda.is_available())
+print("torch.cuda.device_count", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("torch.cuda.get_device_name(0)", torch.cuda.get_device_name(0))
+PY
+```
+
+Do not start a large infer run unless that check prints `torch.cuda.is_available True`.
+`run-infer-sources --device auto` now reports the fallback reason in the logs and JSON reports when PyTorch cannot use CUDA.
+
 For optional local research tooling:
 
 ```bash
@@ -101,7 +127,7 @@ Input fields per source record:
 - required: `Title_en` or `Title`
 - required: `Abstract_en` or `Abstract`
 - optional: `Affiliation`
-- optional: `embedding` or `precomputed_embedding`
+- optional: `embedding` or `precomputed_embedding` as a 768-dim text embedding
 
 Inference outputs under `output_root`:
 

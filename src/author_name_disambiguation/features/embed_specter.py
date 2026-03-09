@@ -10,7 +10,11 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
+from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
+
 _SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
+_SPECTER_DIM = 768
 
 
 def _hash_stub_embedding(text: str, dim: int = 768) -> np.ndarray:
@@ -30,38 +34,47 @@ def _to_text(title: str, abstract: str) -> str:
     return title or abstract
 
 
-def _has_valid_precomputed(values: Iterable) -> bool:
-    for item in values:
-        if isinstance(item, list) and len(item) == 768:
-            return True
-    return False
-
-
-def _stack_precomputed(values: Iterable, texts: list[str]) -> np.ndarray:
-    out = []
-    for idx, item in enumerate(values):
-        if isinstance(item, list) and len(item) == 768:
-            out.append(np.asarray(item, dtype=np.float32))
-        else:
-            out.append(_hash_stub_embedding(texts[idx], dim=768))
-    return np.vstack(out).astype(np.float32)
+def _coerce_precomputed_embedding(item: Any, dim: int = _SPECTER_DIM) -> np.ndarray | None:
+    if item is None or isinstance(item, (str, bytes, dict)):
+        return None
+    try:
+        arr = np.asarray(item, dtype=np.float32)
+    except Exception:
+        return None
+    if arr.ndim != 1 or arr.shape[0] != dim:
+        return None
+    return arr
 
 
 def _resolve_device(torch, device: str) -> str:
-    if device != "auto":
-        return device
-    if not torch.cuda.is_available():
-        return "cpu"
-    try:
-        _ = torch.cuda.current_device()
-        _ = torch.empty(1, device="cuda")
-        return "cuda"
-    except Exception as exc:  # pragma: no cover
-        warnings.warn(
-            f"CUDA appears unavailable in this session ({exc!r}); falling back to CPU.",
-            RuntimeWarning,
-        )
-        return "cpu"
+    resolved, _ = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
+    return resolved
+
+
+def summarize_precomputed_embeddings(
+    values: Iterable | None,
+    *,
+    total_count: int,
+    dim: int = _SPECTER_DIM,
+) -> dict[str, Any]:
+    if values is None:
+        return {
+            "column_present": False,
+            "precomputed_embedding_count": 0,
+            "recomputed_embedding_count": int(total_count),
+            "used_precomputed_embeddings": False,
+        }
+    items = list(values)
+    count = 0
+    for item in items:
+        if _coerce_precomputed_embedding(item, dim=dim) is not None:
+            count += 1
+    return {
+        "column_present": True,
+        "precomputed_embedding_count": int(count),
+        "recomputed_embedding_count": int(max(0, total_count - count)),
+        "used_precomputed_embeddings": bool(count > 0),
+    }
 
 
 def _configure_hf_noise(quiet_libraries: bool) -> None:
@@ -169,15 +182,62 @@ def generate_specter_embeddings(
     show_progress: bool = False,
     quiet_libraries: bool = False,
     reuse_model: bool = True,
-) -> np.ndarray:
+    return_meta: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     titles = mentions["title"].fillna("").astype(str).tolist()
     abstracts = mentions["abstract"].fillna("").astype(str).tolist()
     texts = [_to_text(t, a) for t, a in zip(titles, abstracts)]
 
-    if prefer_precomputed and "precomputed_embedding" in mentions.columns:
-        pre = mentions["precomputed_embedding"].tolist()
-        if _has_valid_precomputed(pre):
-            return _stack_precomputed(pre, texts)
+    precomputed_values = mentions["precomputed_embedding"].tolist() if "precomputed_embedding" in mentions.columns else None
+    precomputed_summary = summarize_precomputed_embeddings(
+        precomputed_values if prefer_precomputed else None,
+        total_count=len(texts),
+        dim=_SPECTER_DIM,
+    )
+    precomputed_vectors = (
+        [_coerce_precomputed_embedding(item, dim=_SPECTER_DIM) for item in list(precomputed_values or [])]
+        if prefer_precomputed and precomputed_values is not None
+        else []
+    )
+    valid_indices = [idx for idx, item in enumerate(precomputed_vectors) if item is not None]
+    valid_index_set = set(valid_indices)
+    missing_indices = [idx for idx in range(len(texts)) if idx not in valid_index_set]
+
+    if len(texts) == 0:
+        empty = np.zeros((0, _SPECTER_DIM), dtype=np.float32)
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "empty",
+            "requested_device": str(device),
+            "resolved_device": None,
+            "fallback_reason": None,
+            "torch_version": None,
+            "torch_cuda_version": None,
+            "torch_cuda_available": None,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": None,
+            **precomputed_summary,
+        }
+        return (empty, meta) if return_meta else empty
+
+    if precomputed_summary["precomputed_embedding_count"] == len(texts):
+        emb = np.vstack([item for item in precomputed_vectors if item is not None]).astype(np.float32)
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "precomputed_only",
+            "requested_device": str(device),
+            "resolved_device": None,
+            "fallback_reason": None,
+            "torch_version": None,
+            "torch_cuda_version": None,
+            "torch_cuda_available": None,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": None,
+            **precomputed_summary,
+        }
+        return (emb, meta) if return_meta else emb
 
     try:
         import torch
@@ -186,12 +246,34 @@ def generate_specter_embeddings(
             raise RuntimeError(
                 "SPECTER embedding generation requires `torch` and `transformers`, or precomputed 768-dim embeddings."
             ) from exc
-        return np.vstack([_hash_stub_embedding(t, dim=768) for t in texts]).astype(np.float32)
+        out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
+        for idx, item in enumerate(precomputed_vectors):
+            if item is not None:
+                out[idx] = item
+        for idx in missing_indices:
+            out[idx] = _hash_stub_embedding(texts[idx], dim=_SPECTER_DIM)
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "precomputed_plus_stub"
+            if precomputed_summary["precomputed_embedding_count"]
+            else "stub_only",
+            "requested_device": str(device),
+            "resolved_device": None,
+            "fallback_reason": "torch_missing_stub_fallback",
+            "torch_version": None,
+            "torch_cuda_version": None,
+            "torch_cuda_available": None,
+            "cuda_probe_error": repr(exc),
+            "model_to_cuda_error": None,
+            "effective_precision_mode": None,
+            **precomputed_summary,
+        }
+        return (out, meta) if return_meta else out
 
     _configure_hf_noise(quiet_libraries)
 
     requested_device = device
-    device = _resolve_device(torch, device)
+    device, runtime_meta = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
 
     tokenizer, model = _load_specter_components(
         model_name=model_name,
@@ -203,30 +285,37 @@ def generate_specter_embeddings(
     try:
         model.to(device)
     except Exception as exc:
-        if requested_device == "auto" and str(device).startswith("cuda"):
-            warnings.warn(
-                f"Moving SPECTER model to CUDA failed ({exc!r}); falling back to CPU.",
-                RuntimeWarning,
+        if str(requested_device).strip().lower() == "auto" and str(device).startswith("cuda"):
+            device, runtime_meta = apply_auto_cuda_move_fallback(
+                requested_device=requested_device,
+                runtime_label="SPECTER embeddings",
+                runtime_meta=runtime_meta,
+                exc=exc,
             )
-            device = "cpu"
             model.to(device)
         else:
             raise
     model.eval()
 
-    vectors: list[np.ndarray] = []
-    starts = range(0, len(texts), batch_size)
+    out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
+    for idx, item in enumerate(precomputed_vectors):
+        if item is not None:
+            out[idx] = item
+
+    vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
+    starts = range(0, len(vectors_for_indices), batch_size)
     if show_progress:
         try:
             from tqdm.auto import tqdm
 
-            total = (len(texts) + batch_size - 1) // batch_size
+            total = (len(vectors_for_indices) + batch_size - 1) // batch_size
             starts = tqdm(starts, total=total, desc="SPECTER batches", leave=False)
         except Exception:
             pass
     with torch.no_grad():
         for start in starts:
-            chunk = texts[start : start + batch_size]
+            batch_indices = vectors_for_indices[start : start + batch_size]
+            chunk = [texts[idx] for idx in batch_indices]
             enc = tokenizer(
                 chunk,
                 padding=True,
@@ -235,11 +324,19 @@ def generate_specter_embeddings(
                 return_tensors="pt",
             )
             enc = {k: v.to(device) for k, v in enc.items()}
-            out = model(**enc)
-            cls = out.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
-            vectors.append(cls)
+            batch_out = model(**enc)
+            cls = batch_out.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
+            out[np.asarray(batch_indices, dtype=np.int64)] = cls
 
-    return np.vstack(vectors).astype(np.float32)
+    meta = {
+        **runtime_meta,
+        "cache_hit": False,
+        "generation_mode": "precomputed_plus_model"
+        if precomputed_summary["precomputed_embedding_count"]
+        else "model_only",
+        **precomputed_summary,
+    }
+    return (out.astype(np.float32), meta) if return_meta else out.astype(np.float32)
 
 
 def get_or_create_specter_embeddings(
@@ -258,12 +355,39 @@ def get_or_create_specter_embeddings(
     show_progress: bool = False,
     quiet_libraries: bool = False,
     reuse_model: bool = True,
-) -> np.ndarray:
+    return_meta: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     output = Path(output_path)
+    precomputed_values = mentions["precomputed_embedding"].tolist() if "precomputed_embedding" in mentions.columns else None
+    precomputed_summary = summarize_precomputed_embeddings(
+        precomputed_values if prefer_precomputed else None,
+        total_count=int(len(mentions)),
+        dim=_SPECTER_DIM,
+    )
     if output.exists() and not force_recompute:
-        return np.load(output)
+        cached = load_validated_npy(
+            output,
+            validator=lambda arr: arr.ndim == 2 and arr.shape == (len(mentions), _SPECTER_DIM),
+            description="SPECTER embedding cache",
+        )
+        if cached is not None:
+            meta = {
+                "cache_hit": True,
+                "generation_mode": "cache",
+                "requested_device": str(device),
+                "resolved_device": None,
+                "fallback_reason": None,
+                "torch_version": None,
+                "torch_cuda_version": None,
+                "torch_cuda_available": None,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+                **precomputed_summary,
+            }
+            return (cached, meta) if return_meta else cached
 
-    emb = generate_specter_embeddings(
+    emb_result = generate_specter_embeddings(
         mentions=mentions,
         model_name=model_name,
         text_backend=text_backend,
@@ -277,8 +401,8 @@ def get_or_create_specter_embeddings(
         show_progress=show_progress,
         quiet_libraries=quiet_libraries,
         reuse_model=reuse_model,
+        return_meta=True,
     )
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output, emb)
-    return emb
+    emb, meta = emb_result
+    atomic_save_npy(output, emb)
+    return (emb, meta) if return_meta else emb

@@ -16,7 +16,7 @@ Optionale Felder:
 
 - `Affiliation`
 - `embedding`
-- `precomputed_embedding`
+- `precomputed_embedding` als 768-dim Text-Embedding
 
 ## Public Infer Outputs
 

@@ -106,10 +106,45 @@ def _apply_fast_mocks(monkeypatch) -> None:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
-            return np.load(path)
+            arr = np.load(path)
+            meta = {
+                "cache_hit": True,
+                "generation_mode": "cache",
+                "requested_device": str(_kwargs.get("device", "auto")),
+                "resolved_device": None,
+                "fallback_reason": None,
+                "torch_version": None,
+                "torch_cuda_version": None,
+                "torch_cuda_available": None,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+                "column_present": False,
+                "precomputed_embedding_count": 0,
+                "recomputed_embedding_count": len(mentions),
+                "used_precomputed_embeddings": False,
+            }
+            return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 768), dtype=np.float32)
         np.save(path, arr)
-        return arr
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "model_only",
+            "requested_device": str(_kwargs.get("device", "auto")),
+            "resolved_device": "cpu",
+            "fallback_reason": "torch_cuda_unavailable",
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": None,
+            "column_present": False,
+            "precomputed_embedding_count": 0,
+            "recomputed_embedding_count": len(mentions),
+            "used_precomputed_embeddings": False,
+        }
+        return (arr, meta) if _kwargs.get("return_meta") else arr
 
     def _score(mentions, pairs, output_path=None, **_kwargs):
         if isinstance(pairs, (str, Path)):
@@ -122,7 +157,18 @@ def _apply_fast_mocks(monkeypatch) -> None:
         if output_path is not None:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             out.to_parquet(output_path, index=False)
-        return out
+        meta = {
+            "requested_device": str(_kwargs.get("device", "auto")),
+            "resolved_device": "cpu",
+            "fallback_reason": "torch_cuda_unavailable",
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": str(_kwargs.get("precision_mode", "fp32")),
+        }
+        return (out, meta) if _kwargs.get("return_runtime_meta") else out
 
     def _cluster(mentions, pair_scores, output_path=None, **_kwargs):
         out = mentions[["mention_id", "block_key"]].copy()
@@ -179,6 +225,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path):
     assert (output_root / "05_go_no_go_infer_sources.json").exists()
     assert (output_root / "publications_disambiguated.parquet").exists()
     assert (output_root / "references_disambiguated.parquet").exists()
+    context = json.loads((output_root / "00_context.json").read_text(encoding="utf-8"))
+    preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
+    stage_metrics = json.loads((output_root / "05_stage_metrics_infer_sources.json").read_text(encoding="utf-8"))
 
     pubs_df = pd.read_parquet(output_root / "publications_disambiguated.parquet")
     refs_df = pd.read_parquet(output_root / "references_disambiguated.parquet")
@@ -192,6 +241,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path):
     assert refs_df.loc[0, "AuthorUID"][1].startswith("my_ads_2026::blk.r.1")
     assert "author_display_name" in entities.columns
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
+    assert context["runtime"]["specter"]["fallback_reason"] == "torch_cuda_unavailable"
+    assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
+    assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
+    assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
 
 
 def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):

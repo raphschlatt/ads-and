@@ -52,7 +52,8 @@ def test_resolve_device_auto_falls_back_to_cpu_on_cuda_init_error():
 
 def test_resolve_device_auto_falls_back_to_cpu_when_cuda_unavailable():
     torch_like = _FakeTorchResolve(cuda_available=False)
-    assert infer_pairs._resolve_device(torch_like, "auto") == "cpu"
+    with pytest.warns(RuntimeWarning, match="falling back to CPU"):
+        assert infer_pairs._resolve_device(torch_like, "auto") == "cpu"
 
 
 def test_load_checkpoint_always_deserializes_on_cpu(monkeypatch):
@@ -100,7 +101,24 @@ def _empty_pairs() -> pd.DataFrame:
 def test_score_pairs_auto_falls_back_to_cpu_when_model_to_cuda_fails(monkeypatch):
     model = _FakeModel()
 
-    monkeypatch.setattr(infer_pairs, "_resolve_device", lambda _torch, device: "cuda" if device == "auto" else device)
+    monkeypatch.setattr(
+        infer_pairs,
+        "resolve_torch_device",
+        lambda _torch, device, runtime_label: (
+            "cuda" if device == "auto" else device,
+            {
+                "requested_device": str(device),
+                "resolved_device": "cuda" if device == "auto" else str(device),
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": "12.1",
+                "torch_cuda_available": True,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+            },
+        ),
+    )
     monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
     monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: model)
     monkeypatch.setattr(
@@ -130,7 +148,24 @@ def test_score_pairs_auto_falls_back_to_cpu_when_model_to_cuda_fails(monkeypatch
 def test_score_pairs_explicit_cuda_raises_when_model_to_cuda_fails(monkeypatch):
     model = _FakeModel()
 
-    monkeypatch.setattr(infer_pairs, "_resolve_device", lambda _torch, device: device)
+    monkeypatch.setattr(
+        infer_pairs,
+        "resolve_torch_device",
+        lambda _torch, device, runtime_label: (
+            str(device),
+            {
+                "requested_device": str(device),
+                "resolved_device": str(device),
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": "12.1",
+                "torch_cuda_available": True,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+            },
+        ),
+    )
     monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
     monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: model)
     monkeypatch.setattr(
@@ -219,7 +254,24 @@ class _IdentityModel:
 
 def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
     monkeypatch.setattr(infer_pairs, "_require_torch", lambda: _FakeTorchScore())
-    monkeypatch.setattr(infer_pairs, "_resolve_device", lambda _torch, _device: "cpu")
+    monkeypatch.setattr(
+        infer_pairs,
+        "resolve_torch_device",
+        lambda _torch, _device, runtime_label: (
+            "cpu",
+            {
+                "requested_device": str(_device),
+                "resolved_device": "cpu",
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": None,
+                "torch_cuda_available": False,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+            },
+        ),
+    )
     monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
     monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: _IdentityModel())
     monkeypatch.setattr(

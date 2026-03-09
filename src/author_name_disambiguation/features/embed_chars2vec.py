@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
+
 
 def _hash_stub_embedding(text: str, dim: int = 50) -> np.ndarray:
     # Deterministic fallback for smoke tests when chars2vec is unavailable.
@@ -58,10 +60,16 @@ def get_or_create_chars2vec_embeddings(
     quiet_libraries: bool = False,
 ) -> np.ndarray:
     output = Path(output_path)
-    if output.exists() and not force_recompute:
-        return np.load(output)
-
     names = mentions["author_raw"].fillna("").astype(str).tolist()
+    if output.exists() and not force_recompute:
+        cached = load_validated_npy(
+            output,
+            validator=lambda arr: arr.ndim == 2 and arr.shape == (len(names), 50),
+            description="chars2vec embedding cache",
+        )
+        if cached is not None:
+            return cached
+
     emb = generate_chars2vec_embeddings(
         names=names,
         model_name=model_name,
@@ -69,6 +77,5 @@ def get_or_create_chars2vec_embeddings(
         quiet_libraries=quiet_libraries,
     )
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output, emb)
+    atomic_save_npy(output, emb)
     return emb

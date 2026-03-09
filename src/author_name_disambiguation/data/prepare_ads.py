@@ -35,6 +35,26 @@ def _iter_json_records(path: Path):
             yield payload
         return
 
+    # Preserve compatibility with existing ADS drops that contain JSONL content
+    # but still use a .json suffix.
+    with path.open("r", encoding="utf-8") as handle:
+        first = ""
+        second = ""
+        for line in handle:
+            text = line.strip()
+            if not text:
+                continue
+            if not first:
+                first = text
+                continue
+            second = text
+            break
+    if first.startswith("{") and second.startswith("{"):
+        for row_idx, payload in enumerate(_iter_jsonl(path)):
+            payload["_source_row_idx"] = int(row_idx)
+            yield payload
+        return
+
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if isinstance(payload, list):
@@ -105,28 +125,20 @@ def _pick_embedding(record: dict[str, Any]) -> list[float] | None:
     return None
 
 
-def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str, Any]:
+def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str, Any] | None:
     source_row_idx = int(record.get("_source_row_idx", 0))
     bibcode = str(record.get("Bibcode") or record.get("bibcode") or "").strip()
     if not bibcode:
-        raise ValueError(f"{source_type}[{source_row_idx}] is missing Bibcode.")
+        return None
 
     author_raw = record.get("Author", record.get("author"))
     authors = split_author_field(author_raw)
     if not authors:
-        raise ValueError(f"{source_type}[{source_row_idx}] is missing Author.")
+        return None
 
     title = _pick_text(record, ["Title_en", "Title", "title"])
-    if not title:
-        raise ValueError(f"{source_type}[{source_row_idx}] is missing Title_en/Title.")
-
     abstract = _pick_text(record, ["Abstract_en", "Abstract", "abstract"])
-    if not abstract:
-        raise ValueError(f"{source_type}[{source_row_idx}] is missing Abstract_en/Abstract.")
-
     year = parse_year(record.get("Year") or record.get("year"))
-    if year is None:
-        raise ValueError(f"{source_type}[{source_row_idx}] is missing or has invalid Year.")
 
     return {
         "bibcode": bibcode,
@@ -148,7 +160,9 @@ def load_ads_records(path: str | Path, source_type: str) -> pd.DataFrame:
 
     rows: list[dict[str, Any]] = []
     for record in _iter_ads_records(resolved):
-        rows.append(_normalize_ads_record(record, source_type=source_type))
+        normalized = _normalize_ads_record(record, source_type=source_type)
+        if normalized is not None:
+            rows.append(normalized)
 
     return pd.DataFrame(
         rows,

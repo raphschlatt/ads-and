@@ -51,7 +51,8 @@ def test_embed_specter_resolve_device_auto_falls_back_on_probe_error():
 
 def test_train_resolve_device_auto_falls_back_when_cuda_unavailable():
     torch_like = _FakeTorch(cuda_available=False)
-    assert train._resolve_device(torch_like, "auto") == "cpu"
+    with pytest.warns(RuntimeWarning, match="falling back to CPU"):
+        assert train._resolve_device(torch_like, "auto") == "cpu"
 
 
 def test_train_resolve_device_explicit_cuda_is_strict():
