@@ -11,6 +11,7 @@ import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from author_name_disambiguation.approaches.nand.modeling import create_encoder, info_nce_loss
+from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.torch_runtime import resolve_torch_device
 
 
@@ -189,15 +190,14 @@ def _score_pairs(
     sims = []
 
     model.eval()
-    starts = range(0, len(pair_idx_1), batch_size)
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-
-            total = (len(pair_idx_1) + batch_size - 1) // batch_size
-            starts = tqdm(starts, total=total, desc="Score pairs", leave=False)
-        except Exception:
-            pass
+    total = (len(pair_idx_1) + batch_size - 1) // batch_size
+    starts = iter_progress(
+        range(0, len(pair_idx_1), batch_size),
+        total=total,
+        label="Score pairs",
+        enabled=show_progress,
+        unit="batch",
+    )
 
     with torch.no_grad():
         for start in starts:
@@ -306,14 +306,13 @@ def train_nand_seed(
     train_history: List[float] = []
     val_history: List[float] = []
 
-    epochs = range(max_epochs)
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-
-            epochs = tqdm(epochs, total=max_epochs, desc=f"Train seed {seed}", leave=False)
-        except Exception:
-            pass
+    epochs = iter_progress(
+        range(max_epochs),
+        total=max_epochs,
+        label=f"Train seed {seed}",
+        enabled=show_progress,
+        unit="epoch",
+    )
 
     for _epoch in epochs:
         model.train()
@@ -482,14 +481,13 @@ def train_nand_across_seeds(
     show_progress: bool = False,
 ) -> Dict[str, Any]:
     runs = []
-    seed_iter = seeds
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-
-            seed_iter = tqdm(seeds, total=len(seeds), desc="Seeds", leave=False)
-        except Exception:
-            pass
+    seed_iter = iter_progress(
+        seeds,
+        total=len(seeds),
+        label="Seeds",
+        enabled=show_progress,
+        unit="seed",
+    )
 
     for seed in seed_iter:
         result = train_nand_seed(

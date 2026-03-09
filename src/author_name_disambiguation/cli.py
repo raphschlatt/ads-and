@@ -116,11 +116,11 @@ def _configure_library_noise(quiet_libraries: bool) -> None:
     if not quiet_libraries:
         return
 
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-    os.environ.setdefault("ABSL_LOG_LEVEL", "3")
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+    os.environ["ABSL_LOG_LEVEL"] = "3"
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
     warnings.filterwarnings(
         "ignore",
@@ -1284,6 +1284,7 @@ def cmd_run_train_stage(args):
             force_recompute=args.force,
             use_stub_if_missing=args.use_stub_embeddings,
             quiet_libraries=args.quiet_libs,
+            show_progress=bool(args.progress),
         )
         lspo_text = get_or_create_specter_embeddings(
             mentions=lspo_subset,
@@ -1641,43 +1642,52 @@ def cmd_run_train_stage(args):
 
 
 def cmd_run_infer_sources(args):
-    from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
+    ui = CliUI(total_steps=8, progress=args.progress)
+    try:
+        ui.info("Initializing run-infer-sources CLI.")
+        from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
 
-    result = run_infer_sources(
-        InferSourcesRequest(
-            publications_path=args.publications_path,
-            references_path=args.references_path,
-            output_root=args.output_root,
-            dataset_id=args.dataset_id,
-            model_bundle=args.model_bundle,
-            uid_scope=args.uid_scope,
-            uid_namespace=args.uid_namespace,
-            infer_stage=args.infer_stage,
-            cluster_config=args.cluster_config,
-            gates_config=args.gates_config,
-            device=args.device,
-            precision_mode=args.precision_mode,
-            cluster_backend=args.cluster_backend,
-            force=bool(args.force),
-            progress=bool(args.progress),
+        result = run_infer_sources(
+            InferSourcesRequest(
+                publications_path=args.publications_path,
+                references_path=args.references_path,
+                output_root=args.output_root,
+                dataset_id=args.dataset_id,
+                model_bundle=args.model_bundle,
+                uid_scope=args.uid_scope,
+                uid_namespace=args.uid_namespace,
+                infer_stage=args.infer_stage,
+                cluster_config=args.cluster_config,
+                gates_config=args.gates_config,
+                device=args.device,
+                precision_mode=args.precision_mode,
+                cluster_backend=args.cluster_backend,
+                force=bool(args.force),
+                progress=bool(args.progress),
+            )
         )
-    )
-    payload = {
-        "run_id": result.run_id,
-        "go": result.go,
-        "output_root": str(result.output_root),
-        "publications_disambiguated_path": str(result.publications_disambiguated_path),
-        "references_disambiguated_path": (
-            None if result.references_disambiguated_path is None else str(result.references_disambiguated_path)
-        ),
-        "source_author_assignments_path": str(result.source_author_assignments_path),
-        "author_entities_path": str(result.author_entities_path),
-        "mention_clusters_path": str(result.mention_clusters_path),
-        "stage_metrics_path": str(result.stage_metrics_path),
-        "go_no_go_path": str(result.go_no_go_path),
-    }
-    print(json.dumps(payload, indent=2))
-    return payload
+        payload = {
+            "run_id": result.run_id,
+            "go": result.go,
+            "output_root": str(result.output_root),
+            "publications_disambiguated_path": str(result.publications_disambiguated_path),
+            "references_disambiguated_path": (
+                None if result.references_disambiguated_path is None else str(result.references_disambiguated_path)
+            ),
+            "source_author_assignments_path": str(result.source_author_assignments_path),
+            "author_entities_path": str(result.author_entities_path),
+            "mention_clusters_path": str(result.mention_clusters_path),
+            "stage_metrics_path": str(result.stage_metrics_path),
+            "go_no_go_path": str(result.go_no_go_path),
+        }
+        ui.info(f"Run complete: {result.run_id}")
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
 
 
 def cmd_run_cluster_test_report(args):
@@ -1879,6 +1889,7 @@ def cmd_run_cluster_test_report(args):
             force_recompute=bool(args.force),
             use_stub_if_missing=False,
             quiet_libraries=bool(args.quiet_libs),
+            show_progress=bool(args.progress),
         )
         lspo_text = get_or_create_specter_embeddings(
             mentions=lspo_subset,
@@ -2140,6 +2151,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    _configure_library_noise(bool(getattr(args, "quiet_libs", False)))
     args.func(args)
 
 

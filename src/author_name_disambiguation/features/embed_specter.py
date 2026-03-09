@@ -10,6 +10,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 
@@ -303,15 +304,14 @@ def generate_specter_embeddings(
             out[idx] = item
 
     vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
-    starts = range(0, len(vectors_for_indices), batch_size)
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-
-            total = (len(vectors_for_indices) + batch_size - 1) // batch_size
-            starts = tqdm(starts, total=total, desc="SPECTER batches", leave=False)
-        except Exception:
-            pass
+    total = (len(vectors_for_indices) + batch_size - 1) // batch_size
+    starts = iter_progress(
+        range(0, len(vectors_for_indices), batch_size),
+        total=total,
+        label="SPECTER batches",
+        enabled=show_progress,
+        unit="batch",
+    )
     with torch.no_grad():
         for start in starts:
             batch_indices = vectors_for_indices[start : start + batch_size]

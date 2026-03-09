@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
 
+from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     detect_cpu_limit,
@@ -646,14 +647,13 @@ def _cluster_entries_sequential(
     rows: list[dict[str, str]] = []
     sanitize_rows: list[dict[str, int]] = []
 
-    iterator = entries
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-
-            iterator = tqdm(entries, total=len(entries), desc="Cluster blocks", leave=False)
-        except Exception:
-            pass
+    iterator = iter_progress(
+        entries,
+        total=len(entries),
+        label="Cluster blocks",
+        enabled=show_progress,
+        unit="block",
+    )
 
     for entry in iterator:
         block_rows, sanitize = _cluster_single_block(

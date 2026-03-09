@@ -97,10 +97,21 @@ def _apply_fast_mocks(monkeypatch) -> None:
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
-            return np.load(path)
+            arr = np.load(path)
+            meta = {
+                "cache_hit": True,
+                "generation_mode": "cache",
+                "name_count": int(len(mentions)),
+            }
+            return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 50), dtype=np.float32)
         np.save(path, arr)
-        return arr
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "chars2vec",
+            "name_count": int(len(mentions)),
+        }
+        return (arr, meta) if _kwargs.get("return_meta") else arr
 
     def _text(mentions, output_path, force_recompute=False, **_kwargs):
         path = Path(output_path)
@@ -192,7 +203,7 @@ def _apply_fast_mocks(monkeypatch) -> None:
     monkeypatch.setattr("author_name_disambiguation.source_inference.cluster_blockwise_dbscan", _cluster)
 
 
-def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path):
+def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, capsys):
     publications_path, references_path = _write_dataset(tmp_path, with_references=True)
     bundle_dir = _write_bundle(tmp_path)
     _apply_fast_mocks(monkeypatch)
@@ -212,10 +223,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path):
             "my_ads_2026",
             "--model-bundle",
             str(bundle_dir),
-            "--no-progress",
         ]
     )
     payload = args.func(args)
+    captured = capsys.readouterr()
 
     assert payload["run_id"]
     assert (output_root / "mention_clusters.parquet").exists()
@@ -245,6 +256,12 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path):
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
+    assert "START Bootstrap and context" in captured.err
+    assert "START SPECTER embeddings" in captured.err
+    assert "START Export and reports" in captured.err
+    assert "\r" not in captured.err
+    payload_stdout = json.loads(captured.out)
+    assert payload_stdout["run_id"] == payload["run_id"]
 
 
 def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):

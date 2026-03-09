@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     detect_cpu_limit,
@@ -360,14 +361,13 @@ def _execute_pair_blocks(
     pairs_written = 0
     writer_holder: dict[str, Any] = {"writer": None, "schema": None}
 
-    iterator = blocks
-    if show_progress:
-        try:
-            from tqdm.auto import tqdm
-
-            iterator = tqdm(blocks, total=len(blocks), desc="Pair blocks", leave=False)
-        except Exception:
-            pass
+    iterator = iter_progress(
+        blocks,
+        total=len(blocks),
+        label="Pair blocks",
+        enabled=show_progress,
+        unit="block",
+    )
 
     for block_key, block in iterator:
         n = len(block)

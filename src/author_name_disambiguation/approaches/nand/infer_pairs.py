@@ -10,6 +10,7 @@ import pandas as pd
 
 from author_name_disambiguation.approaches.nand.modeling import create_encoder
 from author_name_disambiguation.approaches.nand.train import build_feature_matrix as _legacy_build_feature_matrix
+from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.io_schema import PAIR_SCORE_REQUIRED_COLUMNS, validate_columns, save_parquet
 from author_name_disambiguation.common.numeric_safety import clamp_cosine_sim, compute_safe_distance_from_cosine
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
@@ -122,15 +123,14 @@ def score_pairs_with_checkpoint(
         idx2_valid = idx2[valid_mask].astype(int)
 
         sims = []
-        starts = range(0, len(p), batch_size)
-        if show_progress:
-            try:
-                from tqdm.auto import tqdm
-
-                total = (len(p) + batch_size - 1) // batch_size
-                starts = tqdm(starts, total=total, desc="Score batches", leave=False)
-            except Exception:
-                pass
+        total = (len(p) + batch_size - 1) // batch_size
+        starts = iter_progress(
+            range(0, len(p), batch_size),
+            total=total,
+            label="Score batches",
+            enabled=show_progress,
+            unit="batch",
+        )
 
         with torch.no_grad():
             for start in starts:

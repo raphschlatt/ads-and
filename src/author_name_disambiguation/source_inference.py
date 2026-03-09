@@ -18,6 +18,7 @@ from author_name_disambiguation.approaches.nand.export import (
     export_source_mirrored_outputs,
 )
 from author_name_disambiguation.approaches.nand.infer_pairs import score_pairs_with_checkpoint
+from author_name_disambiguation.common.cli_ui import get_active_ui
 from author_name_disambiguation.common.io_schema import PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
 from author_name_disambiguation.common.package_resources import load_yaml_like, load_yaml_resource
 from author_name_disambiguation.common.pipeline_reports import (
@@ -359,6 +360,29 @@ def _required_outputs_exist(output_root: Path, references_present: bool) -> bool
 def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     from author_name_disambiguation.infer_sources import InferSourcesResult
 
+    ui = get_active_ui()
+
+    def _ui_start(label: str) -> None:
+        if ui is not None:
+            ui.start(label)
+
+    def _ui_info(message: str) -> None:
+        if ui is not None:
+            ui.info(message)
+
+    def _ui_done(message: str) -> None:
+        if ui is not None:
+            ui.done(message)
+
+    def _ui_skip(message: str) -> None:
+        if ui is not None:
+            ui.skip(message)
+
+    _ui_start("Bootstrap and context")
+    _ui_info(
+        f"dataset={str(request.dataset_id)} | infer_stage={str(request.infer_stage)} | "
+        f"output_root={Path(request.output_root).expanduser().resolve()}"
+    )
     _validate_request(request)
 
     infer_stage = str(request.infer_stage).strip().lower()
@@ -373,6 +397,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     dirs = _build_output_dirs(output_root)
     run_id = _default_run_id("infer_sources")
     references_present = request.references_path is not None
+    _ui_done(f"run_id={run_id} | uid_scope={uid_scope} | references_present={bool(references_present)}")
 
     result_paths = {
         "publications_disambiguated": _resolve_source_output_path(
@@ -396,6 +421,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
         go_payload = _load_json(result_paths["go_no_go"])
+        _ui_start("Bundle and inputs")
+        _ui_skip("Reused existing infer outputs.")
         return InferSourcesResult(
             run_id=run_id,
             go=go_payload.get("go"),
@@ -409,6 +436,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             go_no_go_path=result_paths["go_no_go"],
         )
 
+    _ui_start("Bundle and inputs")
     cluster_cfg = load_yaml_like(
         request.cluster_config,
         default_resource="resources/clustering/default.yaml",
@@ -473,6 +501,12 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     references = prepared["references"]
     canonical_records = prepared["canonical_records"]
     full_mentions = prepared["mentions"]
+    _ui_done(
+        "loaded "
+        f"publications={len(publications)} references={len(references)} canonical_records={len(canonical_records)}"
+    )
+
+    _ui_start("Mentions and preflight")
     save_parquet(full_mentions, dirs["interim"] / "mentions_full.parquet", index=False)
 
     if infer_stage == "full":
@@ -540,16 +574,36 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             extras={"pair_upper_bound": int(preflight["pair_upper_bound"])},
         )
     )
+    _ui_done(
+        f"ads_mentions={len(mentions)} | pair_upper_bound={int(preflight['pair_upper_bound'])} | "
+        f"precomputed_text={int(precomputed_embeddings['mentions']['precomputed_embedding_count'])}"
+    )
 
+    _ui_start("Chars2Vec embeddings")
     chars_path = dirs["embeddings"] / "chars2vec.npy"
     text_path = dirs["embeddings"] / "specter.npy"
-    chars = get_or_create_chars2vec_embeddings(
+    chars_result = get_or_create_chars2vec_embeddings(
         mentions=mentions,
         output_path=chars_path,
         force_recompute=bool(request.force),
         use_stub_if_missing=False,
         quiet_libraries=True,
+        show_progress=bool(request.progress),
+        return_meta=True,
     )
+    if isinstance(chars_result, tuple) and len(chars_result) == 2:
+        chars, chars_meta = chars_result
+    else:
+        chars = chars_result
+        chars_meta = {"cache_hit": False, "generation_mode": "unknown"}
+    if not isinstance(chars, np.ndarray):
+        chars = np.load(chars_path, mmap_mode="r")
+    _ui_done(
+        f"mode={chars_meta.get('generation_mode')} | cache_hit={chars_meta.get('cache_hit')} | "
+        f"shape={tuple(chars.shape)}"
+    )
+
+    _ui_start("SPECTER embeddings")
     text_result = get_or_create_specter_embeddings(
         mentions=mentions,
         output_path=text_path,
@@ -577,16 +631,20 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         text_runtime_meta_raw,
         requested_device=str(request.device),
     )
-    if not isinstance(chars, np.ndarray):
-        chars = np.load(chars_path, mmap_mode="r")
     if not isinstance(text, np.ndarray):
         text = np.load(text_path, mmap_mode="r")
+    _ui_done(
+        f"mode={text_runtime_meta.get('generation_mode')} | cache_hit={text_runtime_meta.get('cache_hit')} | "
+        f"device={text_runtime_meta.get('resolved_device')} | "
+        f"recomputed={text_runtime_meta.get('recomputed_embedding_count')}"
+    )
 
     preflight["runtime"] = {
         "specter": text_runtime_meta,
     }
     write_json(preflight, preflight_path)
 
+    _ui_start("Pair inference")
     pairs_path = dirs["processed"] / "pairs.parquet"
     pairs, pair_meta = build_pairs_within_blocks(
         mentions=mentions,
@@ -674,7 +732,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "pair_scoring": pair_score_runtime_meta,
     }
     write_json(preflight, preflight_path)
+    _ui_done(
+        f"pairs={len(pairs)} | scores={len(pair_scores)} | "
+        f"device={pair_score_runtime_meta.get('resolved_device')} | "
+        f"precision={pair_score_runtime_meta.get('effective_precision_mode')}"
+    )
 
+    _ui_start("Clustering")
     cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
     cluster_cfg_used["eps_mode"] = "fixed"
     cluster_cfg_used["selected_eps"] = float(model_info["selected_eps"])
@@ -700,7 +764,12 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_namespace=uid_namespace,
         uid_registry_path=uid_registry_path,
     )
+    _ui_done(
+        f"mentions={len(clusters)} | authors={int(clusters['author_uid'].nunique())} | "
+        f"backend={cluster_runtime_meta.get('backend_effective')}"
+    )
 
+    _ui_start("Export and reports")
     assignments = build_source_author_assignments(
         publications=publications,
         references=references,
@@ -826,6 +895,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
     write_go_no_go_report(go, result_paths["go_no_go"])
+    _ui_done(f"GO={go.get('go')} | blockers={len(go.get('blockers', []))}")
 
     return InferSourcesResult(
         run_id=run_id,
