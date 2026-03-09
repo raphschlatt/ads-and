@@ -7,7 +7,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
-from src.common.io_schema import MENTION_REQUIRED_COLUMNS, validate_columns, save_parquet
+from author_name_disambiguation.common.io_schema import MENTION_REQUIRED_COLUMNS, validate_columns, save_parquet
 
 
 @dataclass

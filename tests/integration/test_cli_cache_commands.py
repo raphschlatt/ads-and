@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src import cli
-from src.common.cache_ops import hash_file
+from author_name_disambiguation import cli
+from author_name_disambiguation.common.cache_ops import hash_file
 
 
 def _write_yaml(path: Path, payload: dict) -> Path:

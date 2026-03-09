@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.approaches.nand.train import _compute_best_threshold
+from author_name_disambiguation.approaches.nand.train import _compute_best_threshold
 
 
 def test_threshold_fallback_no_positives():

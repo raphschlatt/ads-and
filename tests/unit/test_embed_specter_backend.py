@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.features import embed_specter
+from author_name_disambiguation.features import embed_specter
 
 
 class _FakeTokenizer:

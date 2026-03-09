@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.common.config import (
+from author_name_disambiguation.common.config import (
     read_latest_run_context,
     resolve_run_id,
     write_latest_run_context,

@@ -1,4 +1,4 @@
-from src.data.build_blocks import create_block_key
+from author_name_disambiguation.data.build_blocks import create_block_key
 
 
 def test_create_block_key_comma_format():

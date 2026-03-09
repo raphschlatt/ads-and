@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-from src.approaches.nand.modeling import create_encoder, info_nce_loss
+from author_name_disambiguation.approaches.nand.modeling import create_encoder, info_nce_loss
 
 
 def _require_torch():

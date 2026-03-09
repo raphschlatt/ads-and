@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks
+from author_name_disambiguation.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks
 
 
 def test_pair_builder_with_labels_and_splits():

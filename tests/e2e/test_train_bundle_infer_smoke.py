@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src import cli
+from author_name_disambiguation import cli
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:
@@ -300,6 +300,11 @@ def _apply_fast_mocks(monkeypatch) -> None:
     monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _score)
     monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
     monkeypatch.setattr(cli, "build_publication_author_mapping", _export)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_chars2vec_embeddings", _chars)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_specter_embeddings", _text)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _pairs)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.cluster_blockwise_dbscan", _cluster)
 
 
 def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
@@ -367,33 +372,35 @@ def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
     assert (bundle_dir / "checkpoint.pt").exists()
 
     infer_run_id = "infer_fixture"
+    publications_path = tmp_path / "data" / "raw" / "ads" / "ads_fixture" / "publications.jsonl"
+    output_root = tmp_path / "artifacts" / "exports" / infer_run_id
     infer_args = parser.parse_args(
         [
-            "run-infer-ads",
+            "run-infer-sources",
+            "--publications-path",
+            str(publications_path),
+            "--output-root",
+            str(output_root),
             "--dataset-id",
             "ads_fixture",
             "--model-bundle",
             str(bundle_dir),
-            "--paths-config",
-            str(cfg["paths"]),
             "--cluster-config",
             str(cfg["cluster"]),
             "--gates-config",
             str(cfg["gates"]),
-            "--run-id",
-            infer_run_id,
             "--no-progress",
         ]
     )
     infer_args.func(infer_args)
 
-    metrics_dir = tmp_path / "artifacts" / "metrics" / infer_run_id
-    clusters_path = tmp_path / "artifacts" / "clusters" / infer_run_id / "ads_clusters_infer_ads.parquet"
-    export_path = tmp_path / "artifacts" / "clusters" / infer_run_id / "publication_authors_infer_ads.parquet"
-    mentions_path = tmp_path / "data" / "interim" / "ads_mentions_ads_fixture.parquet"
+    metrics_dir = output_root
+    clusters_path = output_root / "mention_clusters.parquet"
+    export_path = output_root / "source_author_assignments.parquet"
+    mentions_path = output_root / "interim" / "mentions_full.parquet"
 
-    assert (metrics_dir / "05_stage_metrics_infer_ads.json").exists()
-    assert (metrics_dir / "05_go_no_go_infer_ads.json").exists()
+    assert (metrics_dir / "05_stage_metrics_infer_sources.json").exists()
+    assert (metrics_dir / "05_go_no_go_infer_sources.json").exists()
     assert clusters_path.exists()
     assert export_path.exists()
     assert mentions_path.exists()

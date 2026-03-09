@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.pipeline_reports import (
+from author_name_disambiguation.common.pipeline_reports import (
     build_cluster_qc,
     build_infer_stage_metrics,
     build_pairs_qc,

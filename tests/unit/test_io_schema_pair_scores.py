@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.common.io_schema import validate_pair_score_ranges
+from author_name_disambiguation.common.io_schema import validate_pair_score_ranges
 
 
 def test_validate_pair_score_ranges_reports_out_of_range_values():

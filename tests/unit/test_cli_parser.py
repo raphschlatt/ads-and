@@ -1,6 +1,6 @@
 import pytest
 
-from src import cli
+from author_name_disambiguation import cli
 
 
 def test_run_train_stage_parser_defaults():
@@ -107,154 +107,107 @@ def test_score_parser_precision_default():
     assert args.precision_mode == "fp32"
 
 
-def test_run_infer_ads_parser_defaults_with_model_run_id():
+def test_run_infer_sources_parser_defaults():
     parser = cli.build_parser()
     args = parser.parse_args(
         [
-            "run-infer-ads",
-            "--dataset-id",
-            "my_ads_2026",
-            "--model-run-id",
-            "full_2026abc",
-        ]
-    )
-
-    assert args.command == "run-infer-ads"
-    assert args.dataset_id == "my_ads_2026"
-    assert args.model_run_id == "full_2026abc"
-    assert args.model_bundle is None
-    assert args.paths_config == "configs/paths.local.yaml"
-    assert args.cluster_config == "configs/clustering/dbscan_paper.yaml"
-    assert args.gates_config == "configs/gates.yaml"
-    assert args.infer_stage == "full"
-    assert args.infer_run_config is None
-    assert args.device == "auto"
-    assert args.precision_mode == "fp32"
-    assert args.score_batch_size is None
-    assert args.memory_policy == "fail"
-    assert args.max_ram_fraction == 0.80
-    assert args.cpu_sharding is None
-    assert args.cpu_workers is None
-    assert args.cpu_min_pairs_per_worker is None
-    assert args.cpu_target_ram_fraction is None
-    assert args.cluster_backend is None
-    assert args.uid_scope == "dataset"
-    assert args.uid_namespace is None
-    assert args.progress is True
-    assert args.quiet_libs is True
-    assert args.func is cli.cmd_run_infer_ads
-
-
-def test_run_infer_ads_parser_defaults_with_model_bundle():
-    parser = cli.build_parser()
-    args = parser.parse_args(
-        [
-            "run-infer-ads",
+            "run-infer-sources",
+            "--publications-path",
+            "publications.parquet",
+            "--output-root",
+            "out",
             "--dataset-id",
             "my_ads_2026",
             "--model-bundle",
             "/tmp/bundle",
         ]
     )
-    assert args.model_run_id is None
+
+    assert args.command == "run-infer-sources"
+    assert args.publications_path == "publications.parquet"
+    assert args.references_path is None
+    assert args.output_root == "out"
+    assert args.dataset_id == "my_ads_2026"
     assert args.model_bundle == "/tmp/bundle"
+    assert args.cluster_config is None
+    assert args.gates_config is None
+    assert args.infer_stage == "full"
+    assert args.device == "auto"
+    assert args.precision_mode == "fp32"
+    assert args.cluster_backend is None
+    assert args.uid_scope == "dataset"
+    assert args.uid_namespace is None
+    assert args.progress is True
+    assert args.func is cli.cmd_run_infer_sources
 
 
-def test_run_infer_ads_parser_boolean_overrides():
+def test_run_infer_sources_parser_accepts_references_and_overrides():
     parser = cli.build_parser()
     args = parser.parse_args(
         [
-            "run-infer-ads",
+            "run-infer-sources",
+            "--publications-path",
+            "publications.parquet",
+            "--references-path",
+            "references.parquet",
+            "--output-root",
+            "out",
             "--dataset-id",
             "my_ads_2026",
-            "--model-run-id",
-            "full_2026abc",
+            "--model-bundle",
+            "/tmp/bundle",
             "--infer-stage",
             "mini",
-            "--infer-run-config",
-            "cfg/infer-mini.yaml",
+            "--cluster-config",
+            "cfg/cluster.yaml",
+            "--gates-config",
+            "cfg/gates.yaml",
             "--no-progress",
-            "--verbose-libs",
             "--precision-mode",
             "amp_bf16",
-            "--score-batch-size",
-            "4096",
-            "--memory-policy",
-            "warn",
-            "--max-ram-fraction",
-            "0.5",
-            "--cpu-sharding",
-            "on",
-            "--cpu-workers",
-            "4",
-            "--cpu-min-pairs-per-worker",
-            "2000000",
-            "--cpu-target-ram-fraction",
-            "0.7",
             "--cluster-backend",
             "sklearn_cpu",
-            "--uid-scope",
-            "local",
-            "--uid-namespace",
-            "ignored_in_local",
-        ]
-    )
-
-    assert args.infer_stage == "mini"
-    assert args.infer_run_config == "cfg/infer-mini.yaml"
-    assert args.progress is False
-    assert args.quiet_libs is False
-    assert args.precision_mode == "amp_bf16"
-    assert args.score_batch_size == 4096
-    assert args.memory_policy == "warn"
-    assert args.max_ram_fraction == 0.5
-    assert args.cpu_sharding == "on"
-    assert args.cpu_workers == "4"
-    assert args.cpu_min_pairs_per_worker == 2000000
-    assert args.cpu_target_ram_fraction == 0.7
-    assert args.cluster_backend == "sklearn_cpu"
-    assert args.uid_scope == "local"
-    assert args.uid_namespace == "ignored_in_local"
-
-
-def test_run_infer_ads_parser_accepts_registry_uid_scope():
-    parser = cli.build_parser()
-    args = parser.parse_args(
-        [
-            "run-infer-ads",
-            "--dataset-id",
-            "my_ads_2026",
-            "--model-run-id",
-            "full_2026abc",
             "--uid-scope",
             "registry",
             "--uid-namespace",
             "stable_ads",
         ]
     )
+    assert args.references_path == "references.parquet"
+    assert args.model_bundle == "/tmp/bundle"
+    assert args.infer_stage == "mini"
+    assert args.cluster_config == "cfg/cluster.yaml"
+    assert args.gates_config == "cfg/gates.yaml"
+    assert args.progress is False
+    assert args.precision_mode == "amp_bf16"
+    assert args.cluster_backend == "sklearn_cpu"
     assert args.uid_scope == "registry"
     assert args.uid_namespace == "stable_ads"
 
 
-def test_run_infer_ads_parser_requires_exactly_one_model_source():
+def test_run_infer_sources_parser_requires_required_fields():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
-                "run-infer-ads",
+                "run-infer-sources",
                 "--dataset-id",
                 "my_ads_2026",
+                "--publications-path",
+                "publications.parquet",
+                "--output-root",
+                "out",
             ]
         )
 
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
-                "run-infer-ads",
-                "--dataset-id",
-                "my_ads_2026",
-                "--model-run-id",
-                "full_2026abc",
+                "run-infer-sources",
+                "--publications-path",
+                "publications.parquet",
+                "--output-root",
+                "out",
                 "--model-bundle",
                 "/tmp/bundle",
             ]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.common import cpu_runtime
+from author_name_disambiguation.common import cpu_runtime
 
 
 def test_normalize_workers_request_accepts_auto_and_ints():

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.common.cache_ops import hash_checkpoint_model_state
+from author_name_disambiguation.common.cache_ops import hash_checkpoint_model_state
 
 try:  # pragma: no cover
     import torch  # noqa: F401

@@ -1,0 +1,13 @@
+stage: "full"
+subset_target_mentions: null
+seed: 11
+subset_sampling:
+  target_mean_block_size: 2
+infer_overrides:
+  max_pairs_per_block: null
+  score_batch_size: 8192
+  cpu_sharding_mode: auto
+  cpu_workers: auto
+  cpu_min_pairs_per_worker: 1000000
+  cpu_target_ram_fraction: 0.6
+  cluster_backend: auto

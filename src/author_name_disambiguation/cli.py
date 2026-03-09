@@ -18,20 +18,20 @@ import pandas as pd
 import yaml
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
-from src.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
-from src.approaches.nand.cluster import cluster_blockwise_dbscan, resolve_dbscan_eps
-from src.approaches.nand.export import build_publication_author_mapping, export_source_mirrored_outputs
-from src.approaches.nand.infer_pairs import score_pairs_with_checkpoint
-from src.approaches.nand.train import train_nand_across_seeds
-from src.common.cli_ui import CliUI
-from src.common.cache_ops import (
+from author_name_disambiguation.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
+from author_name_disambiguation.approaches.nand.cluster import cluster_blockwise_dbscan, resolve_dbscan_eps
+from author_name_disambiguation.approaches.nand.export import build_publication_author_mapping, export_source_mirrored_outputs
+from author_name_disambiguation.approaches.nand.infer_pairs import score_pairs_with_checkpoint
+from author_name_disambiguation.approaches.nand.train import train_nand_across_seeds
+from author_name_disambiguation.common.cli_ui import CliUI
+from author_name_disambiguation.common.cache_ops import (
     hash_checkpoint_model_state,
     hash_file,
     link_or_copy,
     resolve_shared_cache_root,
     stable_hash,
 )
-from src.common.cpu_runtime import (
+from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     compute_ram_budget_bytes,
     detect_available_ram_bytes,
@@ -39,7 +39,7 @@ from src.common.cpu_runtime import (
     normalize_workers_request,
     resolve_effective_workers,
 )
-from src.common.config import (
+from author_name_disambiguation.common.config import (
     build_run_dirs,
     find_project_root,
     load_yaml,
@@ -48,8 +48,8 @@ from src.common.config import (
     write_latest_run_context,
     write_run_consistency,
 )
-from src.common.io_schema import MENTION_REQUIRED_COLUMNS, PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
-from src.common.pipeline_reports import (
+from author_name_disambiguation.common.io_schema import MENTION_REQUIRED_COLUMNS, PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
+from author_name_disambiguation.common.pipeline_reports import (
     build_cluster_qc,
     build_infer_stage_metrics,
     build_pairs_qc,
@@ -59,20 +59,20 @@ from src.common.pipeline_reports import (
     write_compare_train_to_baseline,
     write_json,
 )
-from src.common.run_report import evaluate_go_no_go, load_gate_config, write_go_no_go_report
-from src.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
-from src.common.subset_artifacts import (
+from author_name_disambiguation.common.run_report import evaluate_go_no_go, load_gate_config, write_go_no_go_report
+from author_name_disambiguation.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
+from author_name_disambiguation.common.subset_artifacts import (
     atomic_save_parquet,
     compute_lspo_source_fp,
     compute_subset_identity,
     resolve_manifest_paths,
     resolve_shared_subset_paths,
 )
-from src.common.subset_builder import build_stage_subset, write_subset_manifest
-from src.data.prepare_ads import prepare_ads_mentions
-from src.data.prepare_lspo import prepare_lspo_mentions
-from src.features.embed_chars2vec import get_or_create_chars2vec_embeddings
-from src.features.embed_specter import get_or_create_specter_embeddings
+from author_name_disambiguation.common.subset_builder import build_stage_subset, write_subset_manifest
+from author_name_disambiguation.data.prepare_ads import prepare_ads_mentions
+from author_name_disambiguation.data.prepare_lspo import prepare_lspo_mentions
+from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
+from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
 
 SUBSET_CACHE_VERSION = "v3"
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
@@ -296,7 +296,7 @@ def _emit_run_stage_deprecation(ui: CliUI | None = None) -> None:
         return
     msg = (
         "Command 'run-stage' is deprecated and now runs train-only. "
-        "Use 'run-train-stage' for training and 'run-infer-ads' for ADS disambiguation."
+        "Use 'run-train-stage' for training and 'run-infer-sources' for source disambiguation."
     )
     warnings.warn(msg, DeprecationWarning, stacklevel=2)
     if ui is not None:
@@ -3637,6 +3637,46 @@ def cmd_run_infer_ads(args):
     return _run_infer_ads_impl(args)
 
 
+def cmd_run_infer_sources(args):
+    from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
+
+    result = run_infer_sources(
+        InferSourcesRequest(
+            publications_path=args.publications_path,
+            references_path=args.references_path,
+            output_root=args.output_root,
+            dataset_id=args.dataset_id,
+            model_bundle=args.model_bundle,
+            uid_scope=args.uid_scope,
+            uid_namespace=args.uid_namespace,
+            infer_stage=args.infer_stage,
+            cluster_config=args.cluster_config,
+            gates_config=args.gates_config,
+            device=args.device,
+            precision_mode=args.precision_mode,
+            cluster_backend=args.cluster_backend,
+            force=bool(args.force),
+            progress=bool(args.progress),
+        )
+    )
+    payload = {
+        "run_id": result.run_id,
+        "go": result.go,
+        "output_root": str(result.output_root),
+        "publications_disambiguated_path": str(result.publications_disambiguated_path),
+        "references_disambiguated_path": (
+            None if result.references_disambiguated_path is None else str(result.references_disambiguated_path)
+        ),
+        "source_author_assignments_path": str(result.source_author_assignments_path),
+        "author_entities_path": str(result.author_entities_path),
+        "mention_clusters_path": str(result.mention_clusters_path),
+        "stage_metrics_path": str(result.stage_metrics_path),
+        "go_no_go_path": str(result.go_no_go_path),
+    }
+    print(json.dumps(payload, indent=2))
+    return payload
+
+
 def cmd_run_cluster_test_report(args):
     ui = CliUI(total_steps=6, progress=args.progress)
     try:
@@ -4045,38 +4085,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_train_stage_args(sp, include_deprecated_ads_flag=True)
     sp.set_defaults(func=cmd_run_stage)
 
-    sp = sub.add_parser("run-infer-ads")
+    sp = sub.add_parser("run-infer-sources")
+    sp.add_argument("--publications-path", required=True)
+    sp.add_argument("--references-path", default=None)
+    sp.add_argument("--output-root", required=True)
     sp.add_argument("--dataset-id", required=True)
-    model_source = sp.add_mutually_exclusive_group(required=True)
-    model_source.add_argument("--model-run-id", default=None)
-    model_source.add_argument("--model-bundle", default=None)
+    sp.add_argument("--model-bundle", required=True)
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full"], default="full")
-    sp.add_argument("--infer-run-config", default=None)
-    sp.add_argument("--paths-config", default="configs/paths.local.yaml")
-    sp.add_argument("--cluster-config", default="configs/clustering/dbscan_paper.yaml")
-    sp.add_argument("--gates-config", default="configs/gates.yaml")
-    sp.add_argument("--run-id", default=None)
+    sp.add_argument("--cluster-config", default=None)
+    sp.add_argument("--gates-config", default=None)
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
-    sp.add_argument("--score-batch-size", type=int, default=None)
-    sp.add_argument("--memory-policy", choices=["fail", "warn"], default="fail")
-    sp.add_argument("--max-ram-fraction", type=float, default=0.80)
-    sp.add_argument("--cpu-sharding", choices=["auto", "on", "off"], default=None)
-    sp.add_argument("--cpu-workers", default=None)
-    sp.add_argument("--cpu-min-pairs-per-worker", type=int, default=None)
-    sp.add_argument("--cpu-target-ram-fraction", type=float, default=None)
     sp.add_argument("--cluster-backend", choices=["auto", "sklearn_cpu", "cuml_gpu"], default=None)
     sp.add_argument("--uid-scope", choices=["dataset", "local", "registry"], default="dataset")
     sp.add_argument("--uid-namespace", default=None)
-    sp.add_argument("--baseline-run-id", default=None)
     sp.add_argument("--force", action="store_true")
     sp.add_argument("--progress", dest="progress", action="store_true")
     sp.add_argument("--no-progress", dest="progress", action="store_false")
     sp.set_defaults(progress=True)
-    sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
-    sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
-    sp.set_defaults(quiet_libs=True)
-    sp.set_defaults(func=cmd_run_infer_ads)
+    sp.set_defaults(func=cmd_run_infer_sources)
 
     sp = sub.add_parser("run-cluster-test-report")
     sp.add_argument("--model-run-id", required=True)

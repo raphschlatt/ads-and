@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from src import cli
+from author_name_disambiguation import cli
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:

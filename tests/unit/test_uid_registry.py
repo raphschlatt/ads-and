@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
+from author_name_disambiguation.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
 
 
 def test_uid_registry_assigns_and_reuses_ids(tmp_path: Path):

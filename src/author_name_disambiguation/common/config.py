@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable
 
 import yaml
 
-from src.common.cache_ops import resolve_shared_cache_root
+from author_name_disambiguation.common.cache_ops import resolve_shared_cache_root
 
 
 def load_yaml(path: str | Path) -> Dict[str, Any]:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from src import cli
+from author_name_disambiguation import cli
 
 
 def test_compute_mean_sem_handles_empty_single_and_multi():

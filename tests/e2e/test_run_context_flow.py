@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.common.config import (
+from author_name_disambiguation.common.config import (
     build_run_dirs,
     resolve_run_id,
     write_latest_run_context,

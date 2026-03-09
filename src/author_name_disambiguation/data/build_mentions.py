@@ -6,7 +6,7 @@ from typing import List
 
 import pandas as pd
 
-from src.data.build_blocks import create_block_key
+from author_name_disambiguation.data.build_blocks import create_block_key
 
 
 _SPLIT_RE = re.compile(r"\s*[;,]\s*")
@@ -44,6 +44,19 @@ def make_mention_id(bibcode: str, author_idx: int) -> str:
     return f"{bibcode}::{author_idx}"
 
 
+def _resolve_affiliation_value(raw_aff, author_idx: int):
+    if isinstance(raw_aff, Iterable) and not isinstance(raw_aff, (str, bytes, dict)):
+        values = list(raw_aff)
+        if 0 <= int(author_idx) < len(values):
+            value = values[int(author_idx)]
+            return None if value is None else str(value).strip()
+        return None
+    if raw_aff is None:
+        return None
+    text = str(raw_aff).strip()
+    return text or None
+
+
 def explode_records_to_mentions(
     records: pd.DataFrame,
     source_type_default: str,
@@ -78,7 +91,7 @@ def explode_records_to_mentions(
                     "year": parse_year(rec_dict.get("year")),
                     "source_type": rec_dict.get("source_type", source_type_default) or source_type_default,
                     "block_key": create_block_key(author),
-                    "aff": rec_dict.get("aff"),
+                    "aff": _resolve_affiliation_value(rec_dict.get("aff"), author_idx),
                     "orcid": rec_dict.get("orcid"),
                     "precomputed_embedding": rec_dict.get("precomputed_embedding"),
                 }

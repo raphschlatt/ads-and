@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.approaches.nand.cluster import (
+from author_name_disambiguation.approaches.nand.cluster import (
     _apply_constraints,
     _name_conflict,
     cluster_blockwise_dbscan,

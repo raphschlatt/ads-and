@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.approaches.nand.train import _combined_pair_loss, train_nand_seed
+from author_name_disambiguation.approaches.nand.train import _combined_pair_loss, train_nand_seed
 
 
 def test_combined_pair_loss_includes_info_nce_and_negative_margin_terms():

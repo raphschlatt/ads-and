@@ -12,14 +12,14 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
 
-from src.common.cpu_runtime import (
+from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     detect_cpu_limit,
     resolve_effective_workers,
     sharding_enabled,
 )
-from src.common.io_schema import CLUSTER_REQUIRED_COLUMNS, save_parquet, validate_columns
-from src.common.numeric_safety import sanitize_precomputed_distance_matrix
+from author_name_disambiguation.common.io_schema import CLUSTER_REQUIRED_COLUMNS, save_parquet, validate_columns
+from author_name_disambiguation.common.numeric_safety import sanitize_precomputed_distance_matrix
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 _SURNAME_PARTICLES = {

@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.cache_ops import resolve_shared_cache_root
-from src.common.io_schema import save_parquet
-from src.common.subset_artifacts import (
+from author_name_disambiguation.common.cache_ops import resolve_shared_cache_root
+from author_name_disambiguation.common.io_schema import save_parquet
+from author_name_disambiguation.common.subset_artifacts import (
     compute_ads_source_fp,
     compute_lspo_source_fp,
     compute_source_fp,

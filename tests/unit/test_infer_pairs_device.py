@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.approaches.nand import infer_pairs
+from author_name_disambiguation.approaches.nand import infer_pairs
 
 
 class _FakeCuda:

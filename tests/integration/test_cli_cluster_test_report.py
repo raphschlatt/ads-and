@@ -10,8 +10,8 @@ import pandas as pd
 import pytest
 import yaml
 
-from src import cli
-from src.common.subset_artifacts import compute_lspo_source_fp, compute_subset_identity
+from author_name_disambiguation import cli
+from author_name_disambiguation.common.subset_artifacts import compute_lspo_source_fp, compute_subset_identity
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:

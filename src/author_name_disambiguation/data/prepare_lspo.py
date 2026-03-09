@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.common.config import find_project_root, resolve_existing_path
-from src.common.io_schema import MENTION_REQUIRED_COLUMNS, validate_columns, save_parquet
-from src.data.build_blocks import create_block_key
-from src.data.build_mentions import make_mention_id
+from author_name_disambiguation.common.config import find_project_root, resolve_existing_path
+from author_name_disambiguation.common.io_schema import MENTION_REQUIRED_COLUMNS, validate_columns, save_parquet
+from author_name_disambiguation.data.build_blocks import create_block_key
+from author_name_disambiguation.data.build_mentions import make_mention_id
 
 
 def load_lspo_raw(parquet_path: str | Path, h5_path: str | Path | None = None) -> pd.DataFrame:

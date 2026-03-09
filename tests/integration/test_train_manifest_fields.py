@@ -4,8 +4,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.approaches.nand import train as train_mod
-from src.approaches.nand.train import train_nand_across_seeds
+from author_name_disambiguation.approaches.nand import train as train_mod
+from author_name_disambiguation.approaches.nand.train import train_nand_across_seeds
 
 
 def test_train_manifest_contains_new_threshold_and_class_fields(tmp_path: Path, monkeypatch):

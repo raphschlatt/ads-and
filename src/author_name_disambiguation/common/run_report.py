@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from src.common.config import load_resolved_config
+from author_name_disambiguation.common.config import load_resolved_config
 
 
 def load_gate_config(path: str | Path = "configs/gates.yaml") -> Dict:
@@ -62,6 +62,14 @@ def _default_gate_config() -> Dict:
                 "singleton_ratio_severity": "warning",
                 "eps_range_limited_severity": "warning",
             },
+            "infer_sources": {
+                "f1_min": 0.0,
+                "min_neg_val": 0,
+                "min_neg_test": 0,
+                "cluster_quality_severity": "blocker",
+                "singleton_ratio_severity": "warning",
+                "eps_range_limited_severity": "warning",
+            },
         },
     }
 
@@ -88,7 +96,7 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     stage = str(stage_metrics.get("stage", "smoke"))
     metric_scope = str(stage_metrics.get("metric_scope", "") or "").strip().lower()
     is_train_scope = metric_scope == "train"
-    is_infer_scope = metric_scope == "infer" or stage == "infer_ads"
+    is_infer_scope = metric_scope == "infer" or stage in {"infer_ads", "infer_sources"}
     scope_key = "infer" if is_infer_scope else "train" if is_train_scope else ""
     scoped = gates.get(scope_key) if scope_key else None
     if isinstance(scoped, dict):

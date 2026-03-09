@@ -1,7 +1,7 @@
 import pandas as pd
 
-from src.approaches.nand.cluster import cluster_blockwise_dbscan
-from src.approaches.nand.export import build_publication_author_mapping
+from author_name_disambiguation.approaches.nand.cluster import cluster_blockwise_dbscan
+from author_name_disambiguation.approaches.nand.export import build_publication_author_mapping
 
 
 def test_cluster_then_export_consistency():

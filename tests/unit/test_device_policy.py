@@ -1,7 +1,7 @@
 import pytest
 
-from src.approaches.nand import train
-from src.features import embed_specter
+from author_name_disambiguation.approaches.nand import train
+from author_name_disambiguation.features import embed_specter
 
 
 class _FakeCuda:

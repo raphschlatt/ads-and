@@ -1,4 +1,4 @@
-from src.common import cli_ui
+from author_name_disambiguation.common import cli_ui
 
 
 class _FakeBar:

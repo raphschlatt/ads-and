@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.common.numeric_safety import (
+from author_name_disambiguation.common.numeric_safety import (
     clamp_cosine_sim,
     compute_safe_distance_from_cosine,
     sanitize_precomputed_distance_matrix,

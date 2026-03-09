@@ -10,8 +10,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from src.common.io_schema import read_parquet, save_parquet
-from src.common.cache_ops import resolve_shared_cache_root
+from author_name_disambiguation.common.io_schema import read_parquet, save_parquet
+from author_name_disambiguation.common.cache_ops import resolve_shared_cache_root
 
 
 @dataclass(frozen=True)

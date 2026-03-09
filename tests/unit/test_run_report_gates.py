@@ -1,4 +1,4 @@
-from src.common.run_report import evaluate_go_no_go
+from author_name_disambiguation.common.run_report import evaluate_go_no_go
 
 
 def _base_metrics():

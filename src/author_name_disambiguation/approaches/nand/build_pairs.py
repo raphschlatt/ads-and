@@ -11,13 +11,13 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from src.common.cpu_runtime import (
+from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     detect_cpu_limit,
     resolve_effective_workers,
     sharding_enabled,
 )
-from src.common.io_schema import PAIR_REQUIRED_COLUMNS, save_parquet, validate_columns
+from author_name_disambiguation.common.io_schema import PAIR_REQUIRED_COLUMNS, save_parquet, validate_columns
 
 
 def _split_sets_from_orcid(

@@ -1,7 +1,7 @@
 import pandas as pd
 
-from src.approaches.nand.build_pairs import assign_lspo_splits
-from src.common.subset_builder import build_stage_subset
+from author_name_disambiguation.approaches.nand.build_pairs import assign_lspo_splits
+from author_name_disambiguation.common.subset_builder import build_stage_subset
 
 
 def _mentions(n_orcid: int, reps_per_orcid: int = 2) -> pd.DataFrame:

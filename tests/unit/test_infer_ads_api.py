@@ -2,63 +2,46 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from src import cli
-from src.infer_ads_api import InferAdsRequest, run_infer_ads
+from author_name_disambiguation.infer_sources import InferSourcesRequest, InferSourcesResult, run_infer_sources
 
 
-def test_run_infer_ads_requires_exactly_one_model_source():
-    with pytest.raises(ValueError, match="exactly one"):
-        run_infer_ads(InferAdsRequest(dataset_id="ads_2026"))
-
-    with pytest.raises(ValueError, match="exactly one"):
-        run_infer_ads(
-            InferAdsRequest(
-                dataset_id="ads_2026",
-                model_run_id="full_2026",
-                model_bundle="artifacts/models/full_2026/bundle_v1",
-            )
-        )
-
-
-def test_run_infer_ads_returns_typed_result(monkeypatch):
+def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
     captured = {}
 
-    def _fake_impl(args):
-        captured["args"] = args
-        return {
-            "run_id": "infer_ads_api_test",
-            "go": True,
-            "metrics_dir": "/tmp/metrics",
-            "clusters_path": "/tmp/clusters.parquet",
-            "publication_authors_path": "/tmp/publication_authors.parquet",
-            "publications_disambiguated_path": "/tmp/publications.disambiguated.jsonl",
-            "references_disambiguated_path": None,
-            "stage_metrics_path": "/tmp/05_stage_metrics_infer_ads.json",
-            "go_no_go_path": "/tmp/05_go_no_go_infer_ads.json",
-        }
+    def _fake_run(request):
+        captured["request"] = request
+        return InferSourcesResult(
+            run_id="infer_sources_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+        )
 
-    monkeypatch.setattr(cli, "_run_infer_ads_impl", _fake_impl)
+    monkeypatch.setattr("author_name_disambiguation.infer_sources.run_source_inference", _fake_run)
 
-    request = InferAdsRequest(
+    request = InferSourcesRequest(
+        publications_path=tmp_path / "publications.parquet",
+        output_root=tmp_path / "out",
         dataset_id="ads_prod_current",
-        model_run_id="full_2026",
+        model_bundle=tmp_path / "bundle",
         uid_scope="dataset",
         uid_namespace="ads_prod_current",
         progress=False,
     )
-    result = run_infer_ads(request)
+    result = run_infer_sources(request)
 
-    assert result.run_id == "infer_ads_api_test"
+    assert result.run_id == "infer_sources_test"
     assert result.go is True
-    assert result.metrics_dir == Path("/tmp/metrics")
-    assert result.clusters_path == Path("/tmp/clusters.parquet")
+    assert result.output_root == tmp_path
 
-    args = captured["args"]
-    assert args.dataset_id == "ads_prod_current"
-    assert args.model_run_id == "full_2026"
-    assert args.model_bundle is None
-    assert args.uid_scope == "dataset"
-    assert args.uid_namespace == "ads_prod_current"
-    assert args.progress is False
+    captured_request = captured["request"]
+    assert captured_request.dataset_id == "ads_prod_current"
+    assert captured_request.uid_scope == "dataset"
+    assert captured_request.uid_namespace == "ads_prod_current"
+    assert captured_request.progress is False

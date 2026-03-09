@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.common.subset_builder import _allocate_block_quotas, build_stage_subset
+from author_name_disambiguation.common.subset_builder import _allocate_block_quotas, build_stage_subset
 
 
 def _toy_mentions(n_blocks: int = 120, block_size: int = 8) -> pd.DataFrame:

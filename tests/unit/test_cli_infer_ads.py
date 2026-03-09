@@ -7,7 +7,7 @@ import pytest
 import pandas as pd
 import yaml
 
-from src import cli
+from author_name_disambiguation import cli
 
 
 def test_resolve_ads_dataset_files_references_optional(tmp_path: Path):
