@@ -16,6 +16,7 @@ def test_run_context_flow_without_placeholder(tmp_path: Path):
         "processed_dir": str(tmp_path / "data/processed"),
     }
     artifacts_cfg = {
+        "root": str(tmp_path / "artifacts"),
         "metrics_dir": str(tmp_path / "artifacts/metrics"),
         "checkpoints_dir": str(tmp_path / "artifacts/checkpoints"),
         "pair_scores_dir": str(tmp_path / "artifacts/pair_scores"),
@@ -31,7 +32,7 @@ def test_run_context_flow_without_placeholder(tmp_path: Path):
     latest = tmp_path / "artifacts/metrics/latest_run.json"
     write_latest_run_context(run_id=run_id, run_dirs=run_dirs, output_path=latest, stage="smoke")
 
-    resolved = resolve_run_id(None, latest, allow_placeholder=False)
+    resolved = resolve_run_id(None, latest)
     assert resolved == run_id
     assert "replace_with_run_id_from_00" not in resolved
 

@@ -1,54 +1,69 @@
 # Author Name Disambiguation
 
-Dieses Repo hat jetzt zwei saubere Pfade:
+`author_name_disambiguation` is a standalone package for training and running NAND-style author disambiguation on curated source datasets.
 
-1. `run-train-stage`: Trainieren und benchmarken auf LSPO.
-2. `run-infer-sources`: kuratierte Source-Datensätze rein, disambiguierte Source-Datensätze plus Autor-Artefakte raus.
+The installed surface is intentionally small:
 
-`run-stage` bleibt nur als deprecated Train-Alias erhalten. Der öffentliche Infer-Pfad ist rein source-basiert und läuft über das installierte Package.
+- `run-train-stage`
+- `run-cluster-test-report`
+- `export-model-bundle`
+- `run-infer-sources`
+
+The public Python API is inference-only:
+
+- `InferSourcesRequest`
+- `InferSourcesResult`
+- `run_infer_sources()`
 
 ## Install
 
 ```bash
-python -m pip install -e .
+python -m pip install -e .[dev]
 ```
 
-## Quickstart
+For optional local research tooling:
 
-CLI-Hilfe:
+```bash
+python -m pip install -r requirements-research.txt
+```
+
+## Public CLI
+
+Show help:
 
 ```bash
 author-name-disambiguation -h
 ```
 
-Train:
+Train a stage from explicit workspace paths:
 
 ```bash
 author-name-disambiguation run-train-stage \
   --run-stage smoke \
-  --paths-config configs/paths.local.yaml \
-  --device auto
+  --data-root data \
+  --artifacts-root artifacts \
+  --raw-lspo-parquet data/raw/lspo/mock.parquet
 ```
 
-Finalen LSPO-Clustering-Report schreiben:
+Write the final clustering report for a trained run:
 
 ```bash
 author-name-disambiguation run-cluster-test-report \
-  --model-run-id full_20260218T111506Z_cli02681429 \
-  --paths-config configs/paths.local.yaml \
-  --device auto \
-  --precision-mode fp32
+  --model-run-id smoke_20260309T120000Z_cli12345678 \
+  --data-root data \
+  --artifacts-root artifacts \
+  --raw-lspo-parquet data/raw/lspo/mock.parquet
 ```
 
-Model-Bundle exportieren:
+Export a model bundle:
 
 ```bash
 author-name-disambiguation export-model-bundle \
-  --model-run-id full_20260218T111506Z_cli02681429 \
-  --paths-config configs/paths.local.yaml
+  --model-run-id smoke_20260309T120000Z_cli12345678 \
+  --artifacts-root artifacts
 ```
 
-Source-Inferenz mit Bundle:
+Run source inference:
 
 ```bash
 author-name-disambiguation run-infer-sources \
@@ -56,13 +71,10 @@ author-name-disambiguation run-infer-sources \
   --references-path data/raw/ads/ads_prod_current/references.parquet \
   --output-root artifacts/exports/ads_prod_current \
   --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1 \
-  --infer-stage full \
-  --device auto \
-  --cluster-backend auto
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
 ```
 
-## Programmatic API
+## Programmatic Inference
 
 ```python
 from author_name_disambiguation import InferSourcesRequest, run_infer_sources
@@ -73,27 +85,25 @@ result = run_infer_sources(
         references_path="data/raw/ads/ads_prod_current/references.parquet",
         output_root="artifacts/exports/ads_prod_current",
         dataset_id="ads_prod_current",
-        model_bundle="artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1",
-        infer_stage="full",
-        uid_scope="dataset",
+        model_bundle="artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1",
         progress=False,
     )
 )
-
-print(result.run_id, result.go, result.publications_disambiguated_path)
 ```
 
-## Public Infer Contract
+## Public Data Contract
 
-Input pro Record:
+Input fields per source record:
 
-- Pflicht: `Bibcode`, `Author`, `Year`
-- Pflicht: `Title_en` oder `Title`
-- Pflicht: `Abstract_en` oder `Abstract`
-- Optional: `Affiliation`
-- Optional: `embedding` oder `precomputed_embedding`
+- required: `Bibcode`
+- required: `Author`
+- required: `Year`
+- required: `Title_en` or `Title`
+- required: `Abstract_en` or `Abstract`
+- optional: `Affiliation`
+- optional: `embedding` or `precomputed_embedding`
 
-Outputs unter `output_root`:
+Inference outputs under `output_root`:
 
 - `publications_disambiguated.{parquet|jsonl}`
 - optional `references_disambiguated.{parquet|jsonl}`
@@ -103,28 +113,14 @@ Outputs unter `output_root`:
 - `05_stage_metrics_infer_sources.json`
 - `05_go_no_go_infer_sources.json`
 
-Die source-mirrored Outputs behalten alle Inputspalten und ergänzen:
+The disambiguated source files keep all input columns and add:
 
 - `AuthorUID`
 - `AuthorDisplayName`
 
-## Runtime Notes
+## Docs
 
-- `run-infer-sources` akzeptiert nur `model_bundle`, keinen `model_run_id`.
-- `cluster_config` und `gates_config` sind optional; ohne Angabe werden Package-Defaults geladen.
-- `uid_scope` unterstützt `dataset`, `local` und `registry`.
-- `author_entities.parquet` und `source_author_assignments.parquet` sind verpflichtende Infer-Artefakte.
-
-## Utility Commands
-
-Cache prüfen:
-
-```bash
-author-name-disambiguation cache doctor --paths-config configs/paths.local.yaml
-```
-
-Cache gezielt bereinigen:
-
-```bash
-author-name-disambiguation cache purge --paths-config configs/paths.local.yaml --target stale-subsets
-```
+- [Training Workflow](docs/training_workflow.md)
+- [Inference Workflow](docs/inference_workflow.md)
+- [Data Contracts](docs/data_contracts.md)
+- [Provenance](docs/provenance.md)

@@ -21,9 +21,11 @@ def test_resolve_model_run_for_inference_requires_selected_eps(tmp_path: Path):
     with (metrics_dir / "04_clustering_config_used.json").open("w", encoding="utf-8") as handle:
         json.dump({"eps_resolution": {}}, handle)
 
-    paths_cfg = {"artifacts": {"metrics_dir": str(tmp_path / "artifacts" / "metrics")}}
     with pytest.raises(ValueError, match="selected_eps missing"):
-        cli._resolve_model_run_for_inference(paths_cfg=paths_cfg, model_run_id="model_run_1")
+        cli._resolve_model_run_for_inference(
+            artifacts_root=tmp_path / "artifacts",
+            model_run_id="model_run_1",
+        )
 
 
 def test_resolve_model_run_for_inference_loads_run_and_model_cfg(tmp_path: Path):
@@ -52,8 +54,10 @@ def test_resolve_model_run_for_inference_loads_run_and_model_cfg(tmp_path: Path)
     with (metrics_dir / "00_context.json").open("w", encoding="utf-8") as handle:
         json.dump({"run_config": str(run_cfg_path), "model_config": str(model_cfg_path)}, handle)
 
-    paths_cfg = {"artifacts": {"metrics_dir": str(tmp_path / "artifacts" / "metrics")}}
-    resolved = cli._resolve_model_run_for_inference(paths_cfg=paths_cfg, model_run_id="model_run_1")
+    resolved = cli._resolve_model_run_for_inference(
+        artifacts_root=tmp_path / "artifacts",
+        model_run_id="model_run_1",
+    )
 
     assert resolved["selected_eps"] == 0.42
     assert resolved["best_threshold"] == 0.31

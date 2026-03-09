@@ -157,6 +157,10 @@ def _make_configs(tmp_path: Path) -> dict[str, Path]:
         "model": _write_yaml(cfg_dir / "model.yaml", model_cfg),
         "cluster": _write_yaml(cfg_dir / "cluster.yaml", cluster_cfg),
         "gates": _write_yaml(cfg_dir / "gates.yaml", gates_cfg),
+        "data_root": tmp_path / "data",
+        "artifacts_root": tmp_path / "artifacts",
+        "raw_lspo_parquet": Path(paths_cfg["data"]["raw_lspo_parquet"]),
+        "raw_lspo_h5": Path(paths_cfg["data"]["raw_lspo_h5"]),
     }
 
 
@@ -321,8 +325,14 @@ def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
             "run-train-stage",
             "--run-stage",
             "smoke",
-            "--paths-config",
-            str(cfg["paths"]),
+            "--data-root",
+            str(cfg["data_root"]),
+            "--artifacts-root",
+            str(cfg["artifacts_root"]),
+            "--raw-lspo-parquet",
+            str(cfg["raw_lspo_parquet"]),
+            "--raw-lspo-h5",
+            str(cfg["raw_lspo_h5"]),
             "--run-config",
             str(cfg["run"]),
             "--model-config",
@@ -343,8 +353,14 @@ def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
             "run-cluster-test-report",
             "--model-run-id",
             train_run_id,
-            "--paths-config",
-            str(cfg["paths"]),
+            "--data-root",
+            str(cfg["data_root"]),
+            "--artifacts-root",
+            str(cfg["artifacts_root"]),
+            "--raw-lspo-parquet",
+            str(cfg["raw_lspo_parquet"]),
+            "--raw-lspo-h5",
+            str(cfg["raw_lspo_h5"]),
             "--no-progress",
         ]
     )
@@ -360,8 +376,8 @@ def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):
             "export-model-bundle",
             "--model-run-id",
             train_run_id,
-            "--paths-config",
-            str(cfg["paths"]),
+            "--artifacts-root",
+            str(cfg["artifacts_root"]),
         ]
     )
     export_args.func(export_args)

@@ -2,148 +2,70 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
 import yaml
 
 from author_name_disambiguation.common.cache_ops import resolve_shared_cache_root
 
 
-def load_yaml(path: str | Path) -> Dict[str, Any]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Config file not found: {p}")
-    with p.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return data
+def load_yaml(path: str | Path) -> dict[str, Any]:
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"Config file not found: {target}")
+    with target.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"Config file must contain a mapping: {target}")
+    return dict(payload)
 
 
-def merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = merge_dict(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
+def build_workspace_paths(
+    *,
+    data_root: str | Path,
+    artifacts_root: str | Path,
+    raw_lspo_parquet: str | Path | None = None,
+    raw_lspo_h5: str | Path | None = None,
+) -> dict[str, Any]:
+    data_root_path = Path(data_root).expanduser().resolve()
+    artifacts_root_path = Path(artifacts_root).expanduser().resolve()
 
-
-def ensure_dir(path: str | Path) -> Path:
-    p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def find_project_root(start: str | Path | None = None) -> Path:
-    base = Path(start) if start is not None else Path.cwd()
-    for candidate in [base, *base.parents]:
-        if (candidate / "src").exists() and (candidate / "configs").exists():
-            return candidate.resolve()
-    return base.resolve()
-
-
-def resolve_path(path_value: str | Path, project_root: str | Path | None = None) -> Path:
-    p = Path(path_value)
-    if p.is_absolute():
-        return p
-    root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
-    return (root / p).resolve()
-
-
-def resolve_existing_path(
-    path_value: str | Path,
-    project_root: str | Path | None = None,
-    extra_bases: Iterable[str | Path] | None = None,
-) -> Path | None:
-    p = Path(path_value)
-    candidates: list[Path] = []
-
-    if p.is_absolute():
-        candidates.append(p)
-    else:
-        # First, as-is relative to current cwd.
-        candidates.append((Path.cwd() / p).resolve())
-
-        root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
-        candidates.append((root / p).resolve())
-
-        # Walk parents of cwd for notebook kernels started in subdirs.
-        for parent in [Path.cwd(), *Path.cwd().parents]:
-            candidates.append((parent / p).resolve())
-
-    if extra_bases:
-        for b in extra_bases:
-            candidates.append((Path(b) / p).resolve())
-
-    seen = set()
-    dedup = []
-    for c in candidates:
-        key = str(c)
-        if key not in seen:
-            seen.add(key)
-            dedup.append(c)
-
-    for c in dedup:
-        if c.exists():
-            return c
-    return None
-
-
-def resolve_paths_config(paths_cfg: Dict[str, Any], project_root: str | Path | None = None) -> Dict[str, Any]:
-    root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
-    out = dict(paths_cfg)
-    out["project_root"] = str(root)
-
-    for section in ("data", "artifacts"):
-        sec = dict(out.get(section, {}))
-        for key, value in sec.items():
-            if isinstance(value, str):
-                sec[key] = str(resolve_path(value, project_root=root))
-        out[section] = sec
-
-    return out
-
-
-def load_resolved_config(path: str | Path, project_root: str | Path | None = None) -> Dict[str, Any]:
-    root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
-    cfg_path = resolve_existing_path(path, project_root=root) or resolve_path(path, project_root=root)
-    return load_yaml(cfg_path)
-
-
-def load_notebook_context(
-    run_stage: str,
-    project_root: str | Path | None = None,
-    paths_config: str | Path = "configs/paths.local.yaml",
-    model_config: str | Path = "configs/model/nand_best.yaml",
-    cluster_config: str | Path = "configs/clustering/dbscan_paper.yaml",
-) -> Dict[str, Any]:
-    root = Path(project_root) if project_root is not None else find_project_root(Path.cwd())
-    paths_raw = load_resolved_config(paths_config, project_root=root)
-    paths_cfg = resolve_paths_config(paths_raw, project_root=root)
-    model_cfg = load_resolved_config(model_config, project_root=root)
-    run_cfg = load_resolved_config(f"configs/runs/{run_stage}.yaml", project_root=root)
-    cluster_cfg = load_resolved_config(cluster_config, project_root=root)
-
-    return {
-        "ROOT": root,
-        "PATHS": paths_cfg,
-        "DATA": paths_cfg.get("data", {}),
-        "ART": paths_cfg.get("artifacts", {}),
-        "MODEL": model_cfg,
-        "RUN": run_cfg,
-        "CLUSTER": cluster_cfg,
+    data_cfg: dict[str, Any] = {
+        "interim_dir": str(data_root_path / "interim"),
+        "processed_dir": str(data_root_path / "processed"),
+        "subset_cache_dir": str(data_root_path / "subsets" / "cache"),
+        "subset_manifest_dir": str(data_root_path / "subsets" / "manifests"),
     }
+    if raw_lspo_parquet is not None:
+        data_cfg["raw_lspo_parquet"] = str(Path(raw_lspo_parquet).expanduser().resolve())
+    if raw_lspo_h5 is not None:
+        data_cfg["raw_lspo_h5"] = str(Path(raw_lspo_h5).expanduser().resolve())
+
+    artifacts_cfg = {
+        "root": str(artifacts_root_path),
+        "embeddings_dir": str(artifacts_root_path / "embeddings"),
+        "checkpoints_dir": str(artifacts_root_path / "checkpoints"),
+        "pair_scores_dir": str(artifacts_root_path / "pair_scores"),
+        "clusters_dir": str(artifacts_root_path / "clusters"),
+        "metrics_dir": str(artifacts_root_path / "metrics"),
+        "models_dir": str(artifacts_root_path / "models"),
+    }
+    return {"data": data_cfg, "artifacts": artifacts_cfg}
 
 
-def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_id: str) -> Dict[str, Path]:
+def build_run_dirs(data_cfg: dict[str, Any], artifacts_cfg: dict[str, Any], run_id: str) -> dict[str, Path]:
     shared_root = resolve_shared_cache_root(data_cfg)
-    if artifacts_cfg.get("models_dir"):
-        models_root = Path(str(artifacts_cfg["models_dir"]))
-    elif artifacts_cfg.get("root"):
-        models_root = Path(str(artifacts_cfg["root"])) / "models"
-    else:
-        models_root = Path(str(artifacts_cfg["metrics_dir"])).parent / "models"
-    dirs = {
+    artifacts_root = artifacts_cfg.get("root")
+    if artifacts_root is None:
+        for key in ["metrics_dir", "checkpoints_dir", "pair_scores_dir", "clusters_dir", "embeddings_dir"]:
+            value = artifacts_cfg.get(key)
+            if value:
+                artifacts_root = str(Path(value).expanduser().resolve().parent)
+                break
+    if artifacts_root is None:
+        raise ValueError("artifacts_cfg must define `root` or at least one artifacts directory.")
+    models_root = Path(str(artifacts_cfg.get("models_dir", Path(str(artifacts_root)) / "models")))
+    return {
         "metrics": Path(artifacts_cfg["metrics_dir"]) / run_id,
         "checkpoints": Path(artifacts_cfg["checkpoints_dir"]) / run_id,
         "pair_scores": Path(artifacts_cfg["pair_scores_dir"]) / run_id,
@@ -161,78 +83,63 @@ def build_run_dirs(data_cfg: Dict[str, Any], artifacts_cfg: Dict[str, Any], run_
         "shared_pair_scores": shared_root / "pair_scores",
         "shared_eps_sweeps": shared_root / "eps_sweeps",
     }
-    return dirs
 
 
 def write_latest_run_context(
     run_id: str,
-    run_dirs: Dict[str, Path],
+    run_dirs: dict[str, Path],
     output_path: str | Path,
     stage: str | None = None,
-    extras: Dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> Path:
-    p = Path(output_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, Any] = {
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
         "run_id": run_id,
         "stage": stage,
-        "run_dirs": {k: str(v) for k, v in run_dirs.items()},
+        "run_dirs": {key: str(value) for key, value in run_dirs.items()},
     }
     if extras:
         payload.update(extras)
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    return p
+    with target.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return target
 
 
-def read_latest_run_context(path: str | Path) -> Dict[str, Any]:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Latest run context not found: {p}")
-    with p.open("r", encoding="utf-8") as f:
-        return json.load(f)
+def read_latest_run_context(path: str | Path) -> dict[str, Any]:
+    target = Path(path)
+    if not target.exists():
+        raise FileNotFoundError(f"Latest run context not found: {target}")
+    with target.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def resolve_run_id(
-    manual_run_id: str | None,
-    latest_context_path: str | Path,
-    allow_placeholder: bool = False,
-) -> str:
-    placeholder = "replace_with_run_id_from_00"
+def resolve_run_id(manual_run_id: str | None, latest_context_path: str | Path) -> str:
     if manual_run_id and manual_run_id.strip():
-        candidate = manual_run_id.strip()
-    else:
-        ctx = read_latest_run_context(latest_context_path)
-        candidate = str(ctx.get("run_id") or "").strip()
-
+        return manual_run_id.strip()
+    ctx = read_latest_run_context(latest_context_path)
+    candidate = str(ctx.get("run_id") or "").strip()
     if not candidate:
-        raise ValueError(
-            "RUN_ID could not be resolved. Set RUN_ID manually or run notebook 00_setup_and_config first."
-        )
-    if not allow_placeholder and candidate == placeholder:
-        raise ValueError(
-            "RUN_ID is still the placeholder 'replace_with_run_id_from_00'. "
-            "Run notebook 00 and use auto RUN_ID resolution."
-        )
+        raise ValueError("run_id could not be resolved from latest run context.")
     return candidate
 
 
 def write_run_consistency(
     run_id: str,
     run_stage: str,
-    run_dirs: Dict[str, Path],
+    run_dirs: dict[str, Path],
     output_path: str | Path,
-    extras: Dict[str, Any] | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> Path:
-    p = Path(output_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, Any] = {
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
         "run_id": run_id,
         "run_stage": run_stage,
-        "paths": {k: str(v) for k, v in run_dirs.items()},
+        "paths": {key: str(value) for key, value in run_dirs.items()},
     }
     if extras:
         payload.update(extras)
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    return p
+    with target.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return target

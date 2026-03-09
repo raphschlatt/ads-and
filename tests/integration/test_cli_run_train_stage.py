@@ -141,6 +141,10 @@ def _make_configs(
         "model": _write_yaml(cfg_dir / "model.yaml", model_cfg),
         "cluster": _write_yaml(cfg_dir / "cluster.yaml", cluster_cfg),
         "gates": _write_yaml(cfg_dir / "gates.yaml", gates_cfg),
+        "data_root": tmp_path / "data",
+        "artifacts_root": tmp_path / "artifacts",
+        "raw_lspo_parquet": Path(paths_cfg["data"]["raw_lspo_parquet"]),
+        "raw_lspo_h5": Path(paths_cfg["data"]["raw_lspo_h5"]),
         "metrics_dir": Path(paths_cfg["artifacts"]["metrics_dir"]),
         "clusters_dir": Path(paths_cfg["artifacts"]["clusters_dir"]),
         "models_dir": Path(paths_cfg["artifacts"]["models_dir"]),
@@ -312,15 +316,19 @@ def _run_train_stage(
     cfg: dict[str, Path],
     run_id: str,
     extra: list[str] | None = None,
-    *,
-    command: str = "run-train-stage",
 ) -> None:
     argv = [
-        command,
+        "run-train-stage",
         "--run-stage",
         "smoke",
-        "--paths-config",
-        str(cfg["paths"]),
+        "--data-root",
+        str(cfg["data_root"]),
+        "--artifacts-root",
+        str(cfg["artifacts_root"]),
+        "--raw-lspo-parquet",
+        str(cfg["raw_lspo_parquet"]),
+        "--raw-lspo-h5",
+        str(cfg["raw_lspo_h5"]),
         "--run-config",
         str(cfg["run"]),
         "--model-config",
@@ -357,7 +365,6 @@ def test_cli_run_train_stage_smoke_stub(monkeypatch, tmp_path: Path):
     assert (metrics_dir / "05_stage_metrics_smoke.json").exists()
     assert (metrics_dir / "05_go_no_go_smoke.json").exists()
     assert (metrics_dir / "00_cache_refs.json").exists()
-    assert (cfg["models_dir"] / run_id / "bundle_v1" / "bundle_manifest.json").exists()
 
     context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
     assert context["precision_mode"] == "fp32"
@@ -371,18 +378,6 @@ def test_cli_run_train_stage_smoke_stub(monkeypatch, tmp_path: Path):
     assert "warnings" in go_payload
 
     assert not (cfg["clusters_dir"] / run_id / "ads_clusters_smoke.parquet").exists()
-
-
-def test_cli_run_stage_alias_maps_to_train_only(monkeypatch, tmp_path: Path):
-    cfg = _make_configs(tmp_path)
-    _apply_fast_mocks(monkeypatch)
-    parser = cli.build_parser()
-    run_id = "smoke_test_run_stage_alias"
-    _run_train_stage(parser, cfg, run_id, command="run-stage")
-    metrics_dir = cfg["metrics_dir"] / run_id
-    context = json.loads((metrics_dir / "00_context.json").read_text(encoding="utf-8"))
-    assert context["pipeline_scope"] == "train"
-    assert (metrics_dir / "05_stage_metrics_smoke.json").exists()
 
 
 def test_cli_run_train_stage_resume_behavior(monkeypatch, tmp_path: Path):

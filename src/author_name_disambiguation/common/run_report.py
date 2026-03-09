@@ -6,11 +6,11 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from author_name_disambiguation.common.config import load_resolved_config
+from author_name_disambiguation.common.package_resources import load_yaml_like
 
 
-def load_gate_config(path: str | Path = "configs/gates.yaml") -> Dict:
-    return load_resolved_config(path)
+def load_gate_config(path: str | Path | None = None) -> Dict:
+    return load_yaml_like(path, default_resource="resources/gates.yaml", param_name="gates_config")
 
 
 def _default_gate_config() -> Dict:

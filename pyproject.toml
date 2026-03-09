@@ -5,13 +5,72 @@ build-backend = "hatchling.build"
 [project]
 name = "author-name-disambiguation"
 version = "0.1.0"
-description = "Standalone author name disambiguation for source datasets."
+description = "Standalone author name disambiguation for curated source datasets."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+license = { file = "LICENSE" }
+authors = [
+  { name = "Raphael Schlattmann", email = "raphael.schlattmann@tu-berlin.de" },
+]
+maintainers = [
+  { name = "Raphael Schlattmann", email = "raphael.schlattmann@tu-berlin.de" },
+]
+keywords = [
+  "author-name-disambiguation",
+  "entity-resolution",
+  "bibliography",
+  "scientific-metadata",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: Other/Proprietary License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "pyarrow>=14.0",
+  "PyYAML>=6.0",
+  "scikit-learn>=1.3",
+  "tqdm>=4.66",
+  "chars2vec==0.1.7",
+  "keras==3.13.2",
+  "tensorflow==2.20.0",
+  "torch>=2.1",
+  "transformers>=4.38",
+  "adapters>=0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+research = [
+  "jupyter>=1.0",
+  "notebook>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/raphschlatt/Author_Name_Disambiguation"
+Repository = "https://github.com/raphschlatt/Author_Name_Disambiguation"
+Issues = "https://github.com/raphschlatt/Author_Name_Disambiguation/issues"
 
 [project.scripts]
 author-name-disambiguation = "author_name_disambiguation.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/author_name_disambiguation"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/author_name_disambiguation",
+  "/README.md",
+  "/LICENSE",
+  "/CITATION.cff",
+  "/requirements-research.txt",
+  "/docs",
+]

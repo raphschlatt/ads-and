@@ -45,9 +45,9 @@ def test_resolve_run_id_from_latest_context(tmp_path: Path):
     assert resolved == "smoke_ctx"
 
 
-def test_resolve_run_id_rejects_placeholder(tmp_path: Path):
+def test_resolve_run_id_rejects_missing_context_run_id(tmp_path: Path):
     out = tmp_path / "latest_run.json"
-    out.write_text(json.dumps({"run_id": "replace_with_run_id_from_00"}), encoding="utf-8")
+    out.write_text(json.dumps({"run_id": ""}), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="placeholder"):
-        resolve_run_id(None, out, allow_placeholder=False)
+    with pytest.raises(ValueError, match="could not be resolved"):
+        resolve_run_id(None, out)
