@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from src.approaches.nand.cluster import cluster_blockwise_dbscan
+from author_name_disambiguation.approaches.nand.cluster import cluster_blockwise_dbscan
 
 
 def _toy_inputs() -> tuple[pd.DataFrame, pd.DataFrame, dict]:

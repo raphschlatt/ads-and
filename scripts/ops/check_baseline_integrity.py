@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from src.common.subset_artifacts import compute_lspo_source_fp, compute_subset_identity
+from author_name_disambiguation.common.subset_artifacts import compute_lspo_source_fp, compute_subset_identity
 
 
 DEFAULT_BASELINE_RUN_ID = "full_20260218T111506Z_cli02681429"

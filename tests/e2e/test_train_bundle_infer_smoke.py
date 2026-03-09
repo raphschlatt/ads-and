@@ -146,7 +146,7 @@ def _make_configs(tmp_path: Path) -> dict[str, Path]:
         },
         "stages": {
             "smoke": {"f1_min": 0.0, "min_neg_val": 0, "min_neg_test": 0},
-            "infer_ads": {"f1_min": 0.0, "min_neg_val": 0, "min_neg_test": 0},
+            "infer_sources": {"f1_min": 0.0, "min_neg_val": 0, "min_neg_test": 0},
         },
     }
 
@@ -299,7 +299,6 @@ def _apply_fast_mocks(monkeypatch) -> None:
     monkeypatch.setattr(cli, "train_nand_across_seeds", _train)
     monkeypatch.setattr(cli, "score_pairs_with_checkpoint", _score)
     monkeypatch.setattr(cli, "cluster_blockwise_dbscan", _cluster)
-    monkeypatch.setattr(cli, "build_publication_author_mapping", _export)
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_chars2vec_embeddings", _chars)
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_specter_embeddings", _text)
     monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _pairs)

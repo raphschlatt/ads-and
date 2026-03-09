@@ -769,7 +769,7 @@ def write_compare_to_baseline(
     """
     current_stage = _safe_load_json(Path(metrics_root) / current_run_id / f"05_stage_metrics_{run_stage}.json") or {}
     scope = str(current_stage.get("metric_scope", "")).strip().lower()
-    if scope == "infer" or str(run_stage) in {"infer_ads", "infer_sources"}:
+    if scope == "infer" or str(run_stage) == "infer_sources":
         return write_compare_infer_to_baseline(
             baseline_run_id=baseline_run_id,
             current_run_id=current_run_id,

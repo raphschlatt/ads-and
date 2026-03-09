@@ -54,14 +54,6 @@ def _default_gate_config() -> Dict:
                 "lspo_pairs_min": 300000,
                 "eps_range_limited_severity": "blocker",
             },
-            "infer_ads": {
-                "f1_min": 0.0,
-                "min_neg_val": 0,
-                "min_neg_test": 0,
-                "cluster_quality_severity": "blocker",
-                "singleton_ratio_severity": "warning",
-                "eps_range_limited_severity": "warning",
-            },
             "infer_sources": {
                 "f1_min": 0.0,
                 "min_neg_val": 0,
@@ -96,7 +88,7 @@ def evaluate_go_no_go(stage_metrics: Dict, gate_config: Dict | None = None) -> D
     stage = str(stage_metrics.get("stage", "smoke"))
     metric_scope = str(stage_metrics.get("metric_scope", "") or "").strip().lower()
     is_train_scope = metric_scope == "train"
-    is_infer_scope = metric_scope == "infer" or stage in {"infer_ads", "infer_sources"}
+    is_infer_scope = metric_scope == "infer" or stage == "infer_sources"
     scope_key = "infer" if is_infer_scope else "train" if is_train_scope else ""
     scoped = gates.get(scope_key) if scope_key else None
     if isinstance(scoped, dict):

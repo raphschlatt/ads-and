@@ -16,7 +16,6 @@ defaults:
     range_limited_severity: warning
 
 stages:
-  # Legacy root-level stage gates remain for backward compatibility.
   smoke:
     f1_min: 0.80
     min_neg_val: 20
@@ -49,7 +48,7 @@ stages:
     lspo_block_size_p95_min: 2
     lspo_pairs_min: 300000
     eps_range_limited_severity: blocker
-  infer_ads:
+  infer_sources:
     f1_min: 0.0
     min_neg_val: 0
     min_neg_test: 0
@@ -94,7 +93,7 @@ train:
 
 infer:
   stages:
-    infer_ads:
+    infer_sources:
       f1_min: 0.0
       min_neg_val: 0
       min_neg_test: 0

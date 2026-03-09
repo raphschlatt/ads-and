@@ -272,7 +272,7 @@ def main() -> int:
         override_path = str(candidate_report.get("cluster_config_override_path", "")).strip()
         if override_path:
             reproduction_commands.append(
-                "PYTHONPATH=. python -m src.cli run-cluster-test-report "
+                "author-name-disambiguation run-cluster-test-report "
                 f"--model-run-id {baseline_run_id} "
                 "--paths-config configs/paths.local.yaml "
                 f"--cluster-config-override {override_path} "

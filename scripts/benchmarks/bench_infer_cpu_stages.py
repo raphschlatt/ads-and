@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.approaches.nand.build_pairs import build_pairs_within_blocks
-from src.approaches.nand.cluster import cluster_blockwise_dbscan
-from src.common.cpu_runtime import (
+from author_name_disambiguation.approaches.nand.build_pairs import build_pairs_within_blocks
+from author_name_disambiguation.approaches.nand.cluster import cluster_blockwise_dbscan
+from author_name_disambiguation.common.cpu_runtime import (
     compute_ram_budget_bytes,
     detect_available_ram_bytes,
     detect_cpu_limit,

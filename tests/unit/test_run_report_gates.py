@@ -161,13 +161,13 @@ def test_go_no_go_blocks_when_split_feasibility_fails():
     assert "split_neg_feasible" in go["blockers"]
 
 
-def test_go_no_go_infer_ads_does_not_require_lspo_f1():
+def test_go_no_go_infer_sources_does_not_require_lspo_f1():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["lspo_pairwise_f1"] = None
 
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,
@@ -194,7 +194,7 @@ def test_go_no_go_train_scope_ignores_infer_only_checks():
 
 def test_go_no_go_infer_scope_ignores_train_only_checks():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["metric_scope"] = "infer"
     metrics["split_balance_status"] = "split_balance_infeasible"
     metrics["max_possible_neg_total"] = 0
@@ -202,7 +202,7 @@ def test_go_no_go_infer_scope_ignores_train_only_checks():
     metrics["val_class_counts"] = {"pos": 0, "neg": 0}
     metrics["test_class_counts"] = {"pos": 0, "neg": 0}
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,
@@ -218,11 +218,11 @@ def test_go_no_go_infer_scope_ignores_train_only_checks():
 
 def test_go_no_go_blocks_when_memory_not_feasible():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["metric_scope"] = "infer"
     metrics["memory_feasible"] = False
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,
@@ -235,11 +235,11 @@ def test_go_no_go_blocks_when_memory_not_feasible():
 
 def test_go_no_go_accepts_bundle_manifest_threshold_status():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["metric_scope"] = "infer"
     metrics["threshold_selection_status"] = "bundle_manifest"
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,
@@ -252,11 +252,11 @@ def test_go_no_go_accepts_bundle_manifest_threshold_status():
 
 def test_go_no_go_infer_singleton_ratio_can_be_warning_only():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["metric_scope"] = "infer"
     metrics["singleton_ratio"] = 0.95
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,
@@ -271,12 +271,12 @@ def test_go_no_go_infer_singleton_ratio_can_be_warning_only():
 
 def test_go_no_go_blocks_when_uid_local_to_global_invalid():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["metric_scope"] = "infer"
     metrics["uid_local_to_global_valid"] = False
     metrics["uid_local_to_global_max_nunique"] = 3
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,
@@ -289,12 +289,12 @@ def test_go_no_go_blocks_when_uid_local_to_global_invalid():
 
 def test_go_no_go_passes_when_uid_local_to_global_valid():
     metrics = _base_metrics()
-    metrics["stage"] = "infer_ads"
+    metrics["stage"] = "infer_sources"
     metrics["metric_scope"] = "infer"
     metrics["uid_local_to_global_valid"] = True
     metrics["uid_local_to_global_max_nunique"] = 1
     gate_cfg = _gate_cfg()
-    gate_cfg["stages"]["infer_ads"] = {
+    gate_cfg["stages"]["infer_sources"] = {
         "f1_min": 0.0,
         "min_neg_val": 0,
         "min_neg_test": 0,

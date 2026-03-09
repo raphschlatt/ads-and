@@ -175,7 +175,7 @@ def test_cluster_eps_block_policy_disabled_uses_base_eps(monkeypatch):
         def fit_predict(self, dist):
             return np.zeros(dist.shape[0], dtype=np.int64)
 
-    monkeypatch.setattr("src.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
 
     clusters, meta = cluster_blockwise_dbscan(
         mentions=mentions,
@@ -244,7 +244,7 @@ def test_cluster_eps_block_policy_applies_buckets_and_clamp(monkeypatch):
         def fit_predict(self, dist):
             return np.zeros(dist.shape[0], dtype=np.int64)
 
-    monkeypatch.setattr("src.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
 
     _, meta = cluster_blockwise_dbscan(
         mentions=mentions,
@@ -398,7 +398,7 @@ def test_cluster_backend_gpu_failure_falls_back_to_cpu(monkeypatch):
     cfg = {"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
 
     monkeypatch.setattr(
-        "src.approaches.nand.cluster._resolve_cluster_backend",
+        "author_name_disambiguation.approaches.nand.cluster._resolve_cluster_backend",
         lambda backend, metric: {
             "requested": backend,
             "effective": "cuml_gpu",
@@ -408,7 +408,7 @@ def test_cluster_backend_gpu_failure_falls_back_to_cpu(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "src.approaches.nand.cluster._run_dbscan_cuml",
+        "author_name_disambiguation.approaches.nand.cluster._run_dbscan_cuml",
         lambda dist, eps, min_samples, metric: (_ for _ in ()).throw(RuntimeError("gpu fail")),
     )
 

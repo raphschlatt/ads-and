@@ -1,27 +1,17 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
 
 [project]
 name = "author-name-disambiguation"
 version = "0.1.0"
 description = "Standalone author name disambiguation for source datasets."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
 author-name-disambiguation = "author_name_disambiguation.cli:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-author_name_disambiguation = [
-  "resources/*.yaml",
-  "resources/clustering/*.yaml",
-  "resources/infer_runs/*.yaml",
-]
+[tool.hatch.build.targets.wheel]
+packages = ["src/author_name_disambiguation"]

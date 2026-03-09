@@ -292,7 +292,7 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
 
     stage_metrics = build_infer_stage_metrics(
         run_id=run_id,
-        run_stage="infer_ads",
+        run_stage="infer_sources",
         ads_mentions=ads_mentions,
         clusters=clusters,
         consistency_files=consistency_files,
@@ -316,8 +316,8 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     assert stage_metrics["split_high_sim_rate_probe"] == 0.13
     assert stage_metrics["lspo_pairwise_f1"] is None
 
-    write_json(stage_metrics, current_dir / "05_stage_metrics_infer_ads.json")
-    write_json({"go": True, "blockers": [], "warnings": []}, current_dir / "05_go_no_go_infer_ads.json")
+    write_json(stage_metrics, current_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"go": True, "blockers": [], "warnings": []}, current_dir / "05_go_no_go_infer_sources.json")
     write_json(
         {
             "metric_scope": "infer",
@@ -326,15 +326,15 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
             "merged_low_conf_rate_probe": 0.05,
             "counts": {"ads_mentions": 4, "ads_clusters": 2, "ads_cluster_assignments": 4},
         },
-        baseline_dir / "05_stage_metrics_infer_ads.json",
+        baseline_dir / "05_stage_metrics_infer_sources.json",
     )
-    write_json({"go": False, "warnings": []}, baseline_dir / "05_go_no_go_infer_ads.json")
+    write_json({"go": False, "warnings": []}, baseline_dir / "05_go_no_go_infer_sources.json")
 
     out = current_dir / "99_compare_infer_to_baseline.json"
     write_compare_infer_to_baseline(
         baseline_run_id=baseline_run_id,
         current_run_id=run_id,
-        run_stage="infer_ads",
+        run_stage="infer_sources",
         metrics_root=metrics_root,
         output_path=out,
     )
@@ -353,16 +353,16 @@ def test_legacy_compare_dispatches_to_scope_specific_writer(tmp_path: Path):
     baseline_dir = metrics_root / "base"
     current_dir.mkdir(parents=True, exist_ok=True)
     baseline_dir.mkdir(parents=True, exist_ok=True)
-    write_json({"metric_scope": "infer", "counts": {"ads_clusters": 2}}, current_dir / "05_stage_metrics_infer_ads.json")
-    write_json({"counts": {"ads_clusters": 1}}, baseline_dir / "05_stage_metrics_infer_ads.json")
-    write_json({"go": True}, current_dir / "05_go_no_go_infer_ads.json")
-    write_json({"go": False}, baseline_dir / "05_go_no_go_infer_ads.json")
+    write_json({"metric_scope": "infer", "counts": {"ads_clusters": 2}}, current_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"counts": {"ads_clusters": 1}}, baseline_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"go": True}, current_dir / "05_go_no_go_infer_sources.json")
+    write_json({"go": False}, baseline_dir / "05_go_no_go_infer_sources.json")
 
     out = current_dir / "legacy_compare.json"
     write_compare_to_baseline(
         baseline_run_id="base",
         current_run_id="cur",
-        run_stage="infer_ads",
+        run_stage="infer_sources",
         metrics_root=metrics_root,
         output_path=out,
     )

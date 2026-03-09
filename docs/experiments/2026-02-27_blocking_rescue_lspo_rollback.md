@@ -122,7 +122,7 @@ They were executed on the temporary experiment patch before rollback; on baselin
 ### Candidate reports
 
 ```bash
-PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+author-name-disambiguation run-cluster-test-report \
   --model-run-id full_20260218T111506Z_cli02681429 \
   --paths-config configs/paths.local.yaml \
   --report-tag blk_phrase_v1 \
@@ -133,7 +133,7 @@ PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
 ```
 
 ```bash
-PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+author-name-disambiguation run-cluster-test-report \
   --model-run-id full_20260218T111506Z_cli02681429 \
   --paths-config configs/paths.local.yaml \
   --report-tag blk_phrase_v1_rescue_particles_v1 \
@@ -145,7 +145,7 @@ PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
 ```
 
 ```bash
-PYTHONPATH=. python3 -m src.cli run-cluster-test-report \
+author-name-disambiguation run-cluster-test-report \
   --model-run-id full_20260218T111506Z_cli02681429 \
   --paths-config configs/paths.local.yaml \
   --report-tag blk_phrase_v1_rescue_particles_v1_relaxed80 \

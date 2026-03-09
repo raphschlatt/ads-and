@@ -1,56 +1,43 @@
-# Clean Production Setup (ADS)
+# Clean Production Setup
 
-## Behalten (für funktionalen Betrieb + Qualitätsvergleich)
+## Keep-Set
 
-- Full-Modell (produktiv):
-  - `artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1`
-  - `artifacts/checkpoints/full_20260218T111506Z_cli02681429`
-  - `artifacts/metrics/full_20260218T111506Z_cli02681429`
-- Referenzrun (Vergleich):
-  - `artifacts/checkpoints/mid_20260217T173829Z_cli60965158`
-  - `artifacts/metrics/mid_20260217T173829Z_cli60965158`
-  - `artifacts/models/mid_20260217T173829Z_cli60965158`
-  - `artifacts/embeddings/mid_20260217T173829Z_cli60965158`
+Für einen produktiven Infer-Lauf brauchst du nur:
 
-## ADS-Datenablage (neu)
+- ein exportiertes Model-Bundle
+- die kuratierten Source-Dateien (`publications`, optional `references`)
+- ein leeres oder bestehendes `output_root`
 
-Lege dein echtes ADS-Set hier ab:
+## Empfohlener Ablauf
 
-- `data/raw/ads/ads_prod_current/publications.jsonl`
-- optional `data/raw/ads/ads_prod_current/references.jsonl`
-
-Konfiguration ist darauf gesetzt in `configs/paths.local.yaml`.
-
-## Inferenz starten
-
-Mit Full-Run-ID:
+Bundle exportieren:
 
 ```bash
-python -m src.cli run-infer-ads \
-  --dataset-id ads_prod_current \
+author-name-disambiguation export-model-bundle \
   --model-run-id full_20260218T111506Z_cli02681429 \
-  --infer-stage full \
-  --cpu-sharding auto \
-  --cpu-workers auto \
-  --cluster-backend auto
+  --paths-config configs/paths.local.yaml
 ```
 
-Oder mit Bundle:
+Source-Inferenz starten:
 
 ```bash
-python -m src.cli run-infer-ads \
+author-name-disambiguation run-infer-sources \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/exports/ads_prod_current \
   --dataset-id ads_prod_current \
   --model-bundle artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1 \
   --infer-stage full \
-  --cpu-sharding auto \
-  --cpu-workers auto \
+  --device auto \
   --cluster-backend auto
 ```
 
-## Cleanup-Restore
+## Erwartete Outputs
 
-Alle entfernten Entwicklungsdaten wurden verschoben nach:
-
-- `/home/ubuntu/trash/nand_cleanup_20260223T000000Z_prod_clean/moved`
-
-Du kannst einzelne Ordner bei Bedarf zurückverschieben.
+- `publications_disambiguated.*`
+- optional `references_disambiguated.*`
+- `source_author_assignments.parquet`
+- `author_entities.parquet`
+- `mention_clusters.parquet`
+- `05_stage_metrics_infer_sources.json`
+- `05_go_no_go_infer_sources.json`
