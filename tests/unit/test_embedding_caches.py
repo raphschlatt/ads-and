@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -99,3 +102,93 @@ def test_generate_specter_embeddings_uses_precomputed_vectors_directly():
     assert meta["precomputed_embedding_count"] == 2
     assert meta["recomputed_embedding_count"] == 0
     assert meta["used_precomputed_embeddings"] is True
+
+
+def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkeypatch: pytest.MonkeyPatch):
+    predict_calls: list[dict[str, object]] = []
+    progress_updates: list[int] = []
+
+    @contextmanager
+    def _fake_loop_progress(**_kwargs):
+        class _Tracker:
+            def update(self, n=1):
+                progress_updates.append(int(n))
+
+        yield _Tracker()
+
+    monkeypatch.setattr(embed_chars2vec, "loop_progress", _fake_loop_progress)
+
+    def _pad_sequences(sequences, maxlen=None):
+        del maxlen
+        max_length = max(seq.shape[0] for seq in sequences)
+        vocab_size = sequences[0].shape[1]
+        out = np.zeros((len(sequences), max_length, vocab_size), dtype=np.float32)
+        for idx, seq in enumerate(sequences):
+            out[idx, : seq.shape[0], :] = seq
+        return out
+
+    class _FakeCallback:
+        pass
+
+    class _FakeEmbeddingModel:
+        def predict(self, inputs, batch_size=None, verbose=None, callbacks=None):
+            total_rows = len(inputs[0])
+            predict_calls.append(
+                {
+                    "batch_size": batch_size,
+                    "verbose": verbose,
+                    "callback_count": 0 if callbacks is None else len(callbacks),
+                }
+            )
+            total_batches = (total_rows + int(batch_size) - 1) // int(batch_size)
+            for callback in callbacks or []:
+                if hasattr(callback, "on_predict_begin"):
+                    callback.on_predict_begin({})
+            for batch_idx in range(total_batches):
+                for callback in callbacks or []:
+                    if hasattr(callback, "on_predict_batch_end"):
+                        callback.on_predict_batch_end(batch_idx, {})
+            for callback in callbacks or []:
+                if hasattr(callback, "on_predict_end"):
+                    callback.on_predict_end({})
+            return np.ones((total_rows, 50), dtype=np.float32)
+
+    class _FakeModel:
+        def __init__(self):
+            self.cache: dict[str, np.ndarray] = {}
+            self.char_to_ix = {char: idx for idx, char in enumerate("abcdefghijklmnopqrstuvwxyz0123456789_")}
+            self.vocab_size = len(self.char_to_ix)
+            self.embedding_model = _FakeEmbeddingModel()
+
+    fake_chars2vec = SimpleNamespace(
+        load_model=lambda _model_name: _FakeModel(),
+        keras=SimpleNamespace(
+            preprocessing=SimpleNamespace(sequence=SimpleNamespace(pad_sequences=_pad_sequences)),
+            callbacks=SimpleNamespace(Callback=_FakeCallback),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "chars2vec", fake_chars2vec)
+
+    names = [f"name_{idx:03d}" for idx in range(70)]
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=names,
+        show_progress=True,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (70, 50)
+    assert meta["generation_mode"] == "chars2vec"
+    assert len(predict_calls) == 1
+    assert predict_calls[0] == {"batch_size": 32, "verbose": 0, "callback_count": 1}
+    assert progress_updates == [1, 1, 1]
+
+
+def test_chars2vec_stderr_filter_only_suppresses_known_startup_lines():
+    assert embed_chars2vec._should_filter_library_stderr_line(
+        "WARNING: All log messages before absl::InitializeLog() is called are written to STDERR"
+    )
+    assert embed_chars2vec._should_filter_library_stderr_line(
+        "I0000 00:00:1773084365.774281   21635 gpu_device.cc:2020] Created device /job:localhost/replica:0/task:0/device:GPU:0"
+    )
+    assert not embed_chars2vec._should_filter_library_stderr_line("RuntimeError: chars2vec embedding generation failed")

@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Mapping
 from typing import TYPE_CHECKING
 
@@ -357,6 +358,86 @@ def _required_outputs_exist(output_root: Path, references_present: bool) -> bool
     return all(path.exists() for path in required)
 
 
+def _format_count(value: int | float) -> str:
+    return f"{int(value):,}"
+
+
+def _format_elapsed(seconds: float) -> str:
+    if seconds >= 120.0:
+        return f"{round(seconds):.0f}s"
+    return f"{seconds:.1f}s"
+
+
+def _format_rate(value: int, seconds: float) -> str:
+    if seconds <= 0:
+        return "n/a"
+    return f"{int(round(float(value) / seconds)):,}/s"
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _probe_bootstrap_runtime(requested_device: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "requested_device": str(requested_device or "auto"),
+        "resolved_device": None,
+        "gpu_name": None,
+        "torch_version": None,
+        "torch_cuda_version": None,
+        "torch_cuda_available": None,
+        "fallback_reason": None,
+        "cuda_probe_error": None,
+    }
+    try:
+        import torch
+    except Exception as exc:
+        payload["resolved_device"] = "cpu" if str(requested_device or "auto").strip().lower() == "auto" else str(requested_device)
+        payload["fallback_reason"] = "torch_import_failed"
+        payload["cuda_probe_error"] = repr(exc)
+        return payload
+
+    requested = str(requested_device or "auto").strip().lower()
+    payload["torch_version"] = getattr(torch, "__version__", None)
+    payload["torch_cuda_version"] = getattr(getattr(torch, "version", None), "cuda", None)
+
+    try:
+        cuda_available = bool(torch.cuda.is_available())
+    except Exception as exc:
+        payload["torch_cuda_available"] = False
+        payload["resolved_device"] = "cpu" if requested == "auto" else requested
+        payload["fallback_reason"] = "cuda_probe_failed"
+        payload["cuda_probe_error"] = repr(exc)
+        return payload
+
+    payload["torch_cuda_available"] = cuda_available
+    if requested != "auto":
+        payload["resolved_device"] = requested
+        if requested.startswith("cuda") and cuda_available:
+            try:
+                device_index = int(requested.split(":", 1)[1]) if ":" in requested else int(torch.cuda.current_device())
+                payload["gpu_name"] = torch.cuda.get_device_name(device_index)
+            except Exception:
+                payload["gpu_name"] = None
+        return payload
+
+    if not cuda_available:
+        payload["resolved_device"] = "cpu"
+        payload["fallback_reason"] = "torch_cuda_unavailable"
+        return payload
+
+    try:
+        device_index = int(torch.cuda.current_device())
+        torch.empty(1, device=f"cuda:{device_index}")
+        payload["resolved_device"] = f"cuda:{device_index}"
+        payload["gpu_name"] = torch.cuda.get_device_name(device_index)
+    except Exception as exc:
+        payload["resolved_device"] = "cpu"
+        payload["fallback_reason"] = "cuda_probe_failed"
+        payload["cuda_probe_error"] = repr(exc)
+    return payload
+
+
 def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     from author_name_disambiguation.infer_sources import InferSourcesResult
 
@@ -378,7 +459,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         if ui is not None:
             ui.skip(message)
 
-    _ui_start("Bootstrap and context")
+    bootstrap_started_at = perf_counter()
+    _ui_start("Bootstrap")
     _ui_info(
         f"dataset={str(request.dataset_id)} | infer_stage={str(request.infer_stage)} | "
         f"output_root={Path(request.output_root).expanduser().resolve()}"
@@ -397,7 +479,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     dirs = _build_output_dirs(output_root)
     run_id = _default_run_id("infer_sources")
     references_present = request.references_path is not None
-    _ui_done(f"run_id={run_id} | uid_scope={uid_scope} | references_present={bool(references_present)}")
+    bootstrap_runtime = _probe_bootstrap_runtime(str(request.device))
+    _ui_info(
+        f"device={str(request.device)} -> {bootstrap_runtime.get('resolved_device') or 'n/a'} | "
+        f"gpu={bootstrap_runtime.get('gpu_name') or 'n/a'} | "
+        f"precision={str(request.precision_mode)} | "
+        f"torch={bootstrap_runtime.get('torch_version') or 'n/a'}"
+    )
+    _ui_info(f"run_id={run_id} | uid_scope={uid_scope} | references_present={bool(references_present)}")
+    _ui_done(f"Bootstrap in {_format_elapsed(perf_counter() - bootstrap_started_at)}")
 
     result_paths = {
         "publications_disambiguated": _resolve_source_output_path(
@@ -421,7 +511,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
         go_payload = _load_json(result_paths["go_no_go"])
-        _ui_start("Bundle and inputs")
+        _ui_start("Load inputs")
         _ui_skip("Reused existing infer outputs.")
         return InferSourcesResult(
             run_id=run_id,
@@ -436,7 +526,12 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             go_no_go_path=result_paths["go_no_go"],
         )
 
-    _ui_start("Bundle and inputs")
+    load_started_at = perf_counter()
+    _ui_start("Load inputs")
+    _ui_info(
+        f"publications={Path(request.publications_path).expanduser().resolve()} | "
+        f"references={None if request.references_path is None else Path(request.references_path).expanduser().resolve()}"
+    )
     cluster_cfg = load_yaml_like(
         request.cluster_config,
         default_resource="resources/clustering/default.yaml",
@@ -502,11 +597,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     canonical_records = prepared["canonical_records"]
     full_mentions = prepared["mentions"]
     _ui_done(
-        "loaded "
-        f"publications={len(publications)} references={len(references)} canonical_records={len(canonical_records)}"
+        "Loaded "
+        f"publications={_format_count(len(publications))} "
+        f"references={_format_count(len(references))} "
+        f"canonical_records={_format_count(len(canonical_records))} "
+        f"in {_format_elapsed(perf_counter() - load_started_at)}"
     )
 
-    _ui_start("Mentions and preflight")
+    preflight_started_at = perf_counter()
+    _ui_start("Preflight")
     save_parquet(full_mentions, dirs["interim"] / "mentions_full.parquet", index=False)
 
     if infer_stage == "full":
@@ -574,14 +673,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             extras={"pair_upper_bound": int(preflight["pair_upper_bound"])},
         )
     )
+    _ui_info(
+        f"precomputed_embedding column present={_yes_no(precomputed_embeddings['mentions']['column_present'])}"
+    )
+    _ui_info(
+        f"specter_recompute={_format_count(precomputed_embeddings['mentions']['recomputed_embedding_count'])} | "
+        f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])}"
+    )
     _ui_done(
-        f"ads_mentions={len(mentions)} | pair_upper_bound={int(preflight['pair_upper_bound'])} | "
-        f"precomputed_text={int(precomputed_embeddings['mentions']['precomputed_embedding_count'])}"
+        f"Preflight for {_format_count(len(mentions))} mentions in "
+        f"{_format_elapsed(perf_counter() - preflight_started_at)}"
     )
 
-    _ui_start("Chars2Vec embeddings")
+    name_embeddings_started_at = perf_counter()
+    _ui_start("Name embeddings")
     chars_path = dirs["embeddings"] / "chars2vec.npy"
     text_path = dirs["embeddings"] / "specter.npy"
+    chars_cache_requested = chars_path.exists() and not bool(request.force)
+    _ui_info(
+        f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | backend=chars2vec/tensorflow"
+    )
     chars_result = get_or_create_chars2vec_embeddings(
         mentions=mentions,
         output_path=chars_path,
@@ -598,12 +709,21 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         chars_meta = {"cache_hit": False, "generation_mode": "unknown"}
     if not isinstance(chars, np.ndarray):
         chars = np.load(chars_path, mmap_mode="r")
+    chars_elapsed = perf_counter() - name_embeddings_started_at
     _ui_done(
-        f"mode={chars_meta.get('generation_mode')} | cache_hit={chars_meta.get('cache_hit')} | "
-        f"shape={tuple(chars.shape)}"
+        f"{_format_count(len(mentions))} names embedded in {_format_elapsed(chars_elapsed)} "
+        f"({_format_rate(len(mentions), chars_elapsed)}) | "
+        f"cache={'hit' if chars_meta.get('cache_hit') else 'miss'} | backend=chars2vec/tensorflow"
     )
 
-    _ui_start("SPECTER embeddings")
+    text_embeddings_started_at = perf_counter()
+    _ui_start("Text embeddings")
+    text_cache_requested = text_path.exists() and not bool(request.force)
+    _ui_info(
+        f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
+        f"precomputed={_format_count(precomputed_embeddings['mentions']['precomputed_embedding_count'])} | "
+        f"batch_size=32 | device={str(request.device)}"
+    )
     text_result = get_or_create_specter_embeddings(
         mentions=mentions,
         output_path=text_path,
@@ -633,10 +753,16 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     if not isinstance(text, np.ndarray):
         text = np.load(text_path, mmap_mode="r")
+    text_elapsed = perf_counter() - text_embeddings_started_at
+    resolved_text_device = text_runtime_meta.get("resolved_device")
+    if text_runtime_meta.get("cache_hit"):
+        resolved_text_device = resolved_text_device or "cache"
     _ui_done(
-        f"mode={text_runtime_meta.get('generation_mode')} | cache_hit={text_runtime_meta.get('cache_hit')} | "
-        f"device={text_runtime_meta.get('resolved_device')} | "
-        f"recomputed={text_runtime_meta.get('recomputed_embedding_count')}"
+        f"{_format_count(len(mentions))} texts embedded in {_format_elapsed(text_elapsed)} "
+        f"({_format_rate(len(mentions), text_elapsed)}) | "
+        f"cache={'hit' if text_runtime_meta.get('cache_hit') else 'miss'} | "
+        f"precomputed={_format_count(text_runtime_meta.get('precomputed_embedding_count') or 0)} | "
+        f"device={resolved_text_device or 'n/a'}"
     )
 
     preflight["runtime"] = {
@@ -644,7 +770,12 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     }
     write_json(preflight, preflight_path)
 
+    pair_inference_started_at = perf_counter()
     _ui_start("Pair inference")
+    _ui_info(
+        f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])} | "
+        f"score_batch_size={_format_count(score_batch_size)}"
+    )
     pairs_path = dirs["processed"] / "pairs.parquet"
     pairs, pair_meta = build_pairs_within_blocks(
         mentions=mentions,
@@ -733,12 +864,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     }
     write_json(preflight, preflight_path)
     _ui_done(
-        f"pairs={len(pairs)} | scores={len(pair_scores)} | "
-        f"device={pair_score_runtime_meta.get('resolved_device')} | "
-        f"precision={pair_score_runtime_meta.get('effective_precision_mode')}"
+        f"pair_count={_format_count(len(pairs))} | score_count={_format_count(len(pair_scores))} | "
+        f"device={pair_score_runtime_meta.get('resolved_device') or 'n/a'} | "
+        f"precision={pair_score_runtime_meta.get('effective_precision_mode') or str(request.precision_mode)} "
+        f"in {_format_elapsed(perf_counter() - pair_inference_started_at)}"
     )
 
+    clustering_started_at = perf_counter()
     _ui_start("Clustering")
+    _ui_info(f"backend={cluster_backend}")
     cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
     cluster_cfg_used["eps_mode"] = "fixed"
     cluster_cfg_used["selected_eps"] = float(model_info["selected_eps"])
@@ -765,11 +899,17 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_registry_path=uid_registry_path,
     )
     _ui_done(
-        f"mentions={len(clusters)} | authors={int(clusters['author_uid'].nunique())} | "
-        f"backend={cluster_runtime_meta.get('backend_effective')}"
+        f"clusters={_format_count(int(clusters['author_uid'].nunique()))} | "
+        f"mentions={_format_count(len(clusters))} | "
+        f"backend={cluster_runtime_meta.get('backend_effective')} "
+        f"in {_format_elapsed(perf_counter() - clustering_started_at)}"
     )
 
+    export_started_at = perf_counter()
     _ui_start("Export and reports")
+    _ui_info(f"writing {result_paths['publications_disambiguated'].name}")
+    if result_paths["references_disambiguated"] is not None:
+        _ui_info(f"writing {result_paths['references_disambiguated'].name}")
     assignments = build_source_author_assignments(
         publications=publications,
         references=references,
@@ -884,6 +1024,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         },
         precomputed_embeddings=precomputed_embeddings,
     )
+    _ui_info(f"writing {result_paths['stage_metrics'].name}")
     write_json(stage_metrics, result_paths["stage_metrics"])
     consistency_paths.append(
         _write_consistency(
@@ -895,7 +1036,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
     write_go_no_go_report(go, result_paths["go_no_go"])
-    _ui_done(f"GO={go.get('go')} | blockers={len(go.get('blockers', []))}")
+    _ui_done(
+        f"GO={go.get('go')} | blockers={len(go.get('blockers', []))} "
+        f"in {_format_elapsed(perf_counter() - export_started_at)}"
+    )
+    _ui_info(f"Run complete | run_id={run_id}")
 
     return InferSourcesResult(
         run_id=run_id,

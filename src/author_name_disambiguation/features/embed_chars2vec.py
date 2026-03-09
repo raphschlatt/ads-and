@@ -2,13 +2,25 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from author_name_disambiguation.common.cli_ui import iter_progress
+from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
+
+_CHARS2VEC_DIM = 50
+_KNOWN_TF_STDERR_PATTERNS = (
+    re.compile(r"^WARNING: All log messages before absl::InitializeLog\(\) is called are written to STDERR\s*$"),
+    re.compile(r".*\bgpu_device\.cc:\d+\].*Created device .*", re.IGNORECASE),
+    re.compile(r".*\bread_numa_node\b.*", re.IGNORECASE),
+    re.compile(r".*\bcpu_feature_guard\b.*", re.IGNORECASE),
+)
 
 
 def _hash_stub_embedding(text: str, dim: int = 50) -> np.ndarray:
@@ -21,43 +33,149 @@ def _hash_stub_embedding(text: str, dim: int = 50) -> np.ndarray:
     return vec / norm if norm > 0 else vec
 
 
-def _vectorize_words_silently(model, words: list[str], *, batch_size: int, show_progress: bool) -> np.ndarray:
+def _should_filter_library_stderr_line(line: str) -> bool:
+    text = str(line or "").strip()
+    if text == "":
+        return False
+    return any(pattern.match(text) for pattern in _KNOWN_TF_STDERR_PATTERNS)
+
+
+@contextmanager
+def _filter_known_library_stderr(*, enabled: bool) -> None:
+    if not enabled:
+        yield
+        return
+
+    stream = getattr(sys, "stderr", None)
+    if stream is None or not hasattr(stream, "fileno"):
+        yield
+        return
+
+    try:
+        stderr_fd = int(stream.fileno())
+    except Exception:
+        yield
+        return
+
+    try:
+        stream.flush()
+    except Exception:
+        pass
+
+    saved_fd = os.dup(stderr_fd)
+    read_fd, write_fd = os.pipe()
+    buffer = bytearray()
+
+    def _forward(data: bytes) -> None:
+        if not data:
+            return
+        text = data.decode("utf-8", errors="replace")
+        if _should_filter_library_stderr_line(text):
+            return
+        os.write(saved_fd, data)
+
+    def _drain() -> None:
+        try:
+            while True:
+                chunk = os.read(read_fd, 4096)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                while True:
+                    newline_index = buffer.find(b"\n")
+                    if newline_index < 0:
+                        break
+                    line = bytes(buffer[: newline_index + 1])
+                    del buffer[: newline_index + 1]
+                    _forward(line)
+        finally:
+            if buffer:
+                _forward(bytes(buffer))
+            os.close(read_fd)
+
+    thread = threading.Thread(target=_drain, daemon=True)
+    try:
+        os.dup2(write_fd, stderr_fd)
+        os.close(write_fd)
+        thread.start()
+        yield
+    finally:
+        try:
+            stream.flush()
+        except Exception:
+            pass
+        os.dup2(saved_fd, stderr_fd)
+        thread.join(timeout=1.0)
+        os.close(saved_fd)
+
+
+def _vectorize_word(model, word: str) -> np.ndarray:
+    if not isinstance(word, str):
+        raise TypeError("word must be a string")
+
+    current_embedding = []
+    for char in word:
+        if char in model.char_to_ix:
+            vec = np.zeros(model.vocab_size)
+            vec[model.char_to_ix[char]] = 1
+            current_embedding.append(vec)
+        else:
+            current_embedding.append(np.zeros(model.vocab_size))
+    return np.asarray(current_embedding)
+
+
+def _pad_sequences(model, words: list[str]) -> np.ndarray:
+    list_of_embeddings = [_vectorize_word(model, current_word) for current_word in words]
+    return model.keras.preprocessing.sequence.pad_sequences(list_of_embeddings, maxlen=None)
+
+
+def _predict_word_vectors(model, embeddings_pad_seq: np.ndarray, *, batch_size: int, show_progress: bool) -> np.ndarray:
+    total_batches = (len(embeddings_pad_seq) + batch_size - 1) // batch_size
+    callbacks = None
+    with loop_progress(
+        total=total_batches,
+        label="Chars2Vec batches",
+        enabled=show_progress,
+        unit="batch",
+    ) as tracker:
+        if show_progress:
+            callback_base = model.keras.callbacks.Callback
+
+            class _PredictProgressCallback(callback_base):
+                def on_predict_batch_end(self, batch, logs=None):
+                    del batch, logs
+                    tracker.update(1)
+
+            callbacks = [_PredictProgressCallback()]
+
+        vectors = model.embedding_model.predict(
+            [embeddings_pad_seq],
+            batch_size=batch_size,
+            verbose=0,
+            callbacks=callbacks,
+        )
+    return np.asarray(vectors, dtype=np.float32)
+
+
+def _vectorize_words_silently(
+    model,
+    words: list[str],
+    *,
+    batch_size: int,
+    show_progress: bool,
+) -> np.ndarray:
     words = [str(w).lower() for w in words]
     unique_words = np.unique(words)
     new_words = [w for w in unique_words if w not in model.cache]
 
     if len(new_words) > 0:
-        list_of_embeddings = []
-        for current_word in new_words:
-            if not isinstance(current_word, str):
-                raise TypeError("word must be a string")
-
-            current_embedding = []
-            for char in current_word:
-                if char in model.char_to_ix:
-                    vec = np.zeros(model.vocab_size)
-                    vec[model.char_to_ix[char]] = 1
-                    current_embedding.append(vec)
-                else:
-                    current_embedding.append(np.zeros(model.vocab_size))
-
-            list_of_embeddings.append(np.asarray(current_embedding))
-
-        embeddings_pad_seq = model.keras.preprocessing.sequence.pad_sequences(list_of_embeddings, maxlen=None)
-        total = (len(new_words) + batch_size - 1) // batch_size
-        chunks = iter_progress(
-            range(0, len(new_words), batch_size),
-            total=total,
-            label="Chars2Vec batches",
-            enabled=show_progress,
-            unit="batch",
+        embeddings_pad_seq = _pad_sequences(model, new_words)
+        new_words_vectors = _predict_word_vectors(
+            model,
+            embeddings_pad_seq,
+            batch_size=batch_size,
+            show_progress=show_progress,
         )
-        vectors = []
-        for start in chunks:
-            end = min(start + batch_size, len(new_words))
-            batch_vectors = model.embedding_model.predict([embeddings_pad_seq[start:end]], verbose=0)
-            vectors.append(np.asarray(batch_vectors, dtype=np.float32))
-        new_words_vectors = np.concatenate(vectors, axis=0) if vectors else np.zeros((0, 50), dtype=np.float32)
 
         for idx, word in enumerate(new_words):
             model.cache[word] = new_words_vectors[idx]
@@ -86,16 +204,17 @@ def generate_chars2vec_embeddings(
     try:
         import chars2vec  # type: ignore
 
-        model = chars2vec.load_model(model_name)
-        setattr(model, "keras", chars2vec.keras)
-        emb = _vectorize_words_silently(
-            model,
-            names,
-            batch_size=32,
-            show_progress=show_progress,
-        )
+        with _filter_known_library_stderr(enabled=quiet_libraries):
+            model = chars2vec.load_model(model_name)
+            setattr(model, "keras", chars2vec.keras)
+            emb = _vectorize_words_silently(
+                model,
+                names,
+                batch_size=32,
+                show_progress=show_progress,
+            )
         emb = np.asarray(emb, dtype=np.float32)
-        if emb.ndim != 2 or emb.shape[1] != 50:
+        if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:
             raise ValueError(f"Unexpected chars2vec output shape: {emb.shape}")
         meta = {
             "cache_hit": False,
@@ -109,7 +228,7 @@ def generate_chars2vec_embeddings(
                 "chars2vec embedding generation failed. Install `chars2vec` or set use_stub_if_missing=True for smoke tests."
             ) from exc
 
-    emb = np.vstack([_hash_stub_embedding(name, dim=50) for name in names]).astype(np.float32)
+    emb = np.vstack([_hash_stub_embedding(name, dim=_CHARS2VEC_DIM) for name in names]).astype(np.float32)
     meta = {
         "cache_hit": False,
         "generation_mode": "stub_only",

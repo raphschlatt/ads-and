@@ -207,6 +207,19 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     publications_path, references_path = _write_dataset(tmp_path, with_references=True)
     bundle_dir = _write_bundle(tmp_path)
     _apply_fast_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
+        lambda _device: {
+            "requested_device": "auto",
+            "resolved_device": "cuda:0",
+            "gpu_name": "NVIDIA A100 80GB PCIe",
+            "torch_version": "2.10.0+cu126",
+            "torch_cuda_version": "12.6",
+            "torch_cuda_available": True,
+            "fallback_reason": None,
+            "cuda_probe_error": None,
+        },
+    )
 
     output_root = tmp_path / "out"
     parser = cli.build_parser()
@@ -256,9 +269,16 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
-    assert "START Bootstrap and context" in captured.err
-    assert "START SPECTER embeddings" in captured.err
+    assert "START Bootstrap" in captured.err
+    assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err
+    assert "START Load inputs" in captured.err
+    assert "START Preflight" in captured.err
+    assert "START Name embeddings" in captured.err
+    assert "DONE 5 names embedded in " in captured.err
+    assert "START Text embeddings" in captured.err
+    assert "DONE 5 texts embedded in " in captured.err
     assert "START Export and reports" in captured.err
+    assert "Run complete | run_id=" in captured.err
     assert "\r" not in captured.err
     payload_stdout = json.loads(captured.out)
     assert payload_stdout["run_id"] == payload["run_id"]

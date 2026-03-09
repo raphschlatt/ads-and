@@ -134,6 +134,20 @@ def _format_duration(seconds: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _format_progress_percent(done: int, total: int) -> str:
+    if total <= 0:
+        return "100%"
+    if done <= 0:
+        return "0%"
+
+    pct = (float(done) * 100.0) / float(total)
+    if pct < 1.0:
+        return "<1%"
+    if pct < 10.0:
+        return f"{pct:.1f}%"
+    return f"{int(pct)}%"
+
+
 def _active_prefix() -> str:
     ui = get_active_ui()
     if ui is None:
@@ -155,7 +169,7 @@ class _LoopProgress:
     total: int
     enabled: bool
     unit: str
-    min_plain_interval: float = 5.0
+    min_plain_interval: float = 30.0
 
     def __post_init__(self) -> None:
         self.total = int(max(0, self.total))
@@ -209,10 +223,10 @@ class _LoopProgress:
         elapsed = max(0.0, now - self._started_at)
         rate = (self._done / elapsed) if elapsed > 0 else 0.0
         eta = None if rate <= 0 or self.total <= 0 else max(0.0, (self.total - self._done) / rate)
-        pct = 100 if self.total == 0 else int((self._done * 100) / max(1, self.total))
+        pct = _format_progress_percent(self._done, self.total)
         prefix = _active_prefix()
         _write_progress_line(
-            f"{prefix}INFO {self.label}: progress={pct}% done={self._done}/{self.total} "
+            f"{prefix}INFO {self.label}: progress={pct} done={self._done}/{self.total} "
             f"rate={rate:.2f}{self.unit}/s eta={_format_duration(eta)}"
         )
         self._last_plain_emit = now
@@ -241,7 +255,7 @@ def iter_progress(
     label: str,
     enabled: bool,
     unit: str = "it",
-    min_plain_interval: float = 5.0,
+    min_plain_interval: float = 30.0,
 ) -> Iterator[T]:
     if not enabled:
         yield from iterable
@@ -258,3 +272,23 @@ def iter_progress(
         for item in iterable:
             yield item
             tracker.update(1)
+
+
+@contextmanager
+def loop_progress(
+    *,
+    total: int,
+    label: str,
+    enabled: bool,
+    unit: str = "it",
+    min_plain_interval: float = 30.0,
+) -> Iterator[_LoopProgress]:
+    tracker = _LoopProgress(
+        label=label,
+        total=total,
+        enabled=enabled,
+        unit=unit,
+        min_plain_interval=min_plain_interval,
+    )
+    with tracker:
+        yield tracker

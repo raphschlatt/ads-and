@@ -82,3 +82,23 @@ def test_iter_progress_plain_mode_writes_plain_lines(monkeypatch, capsys):
     assert "SPECTER batches: total=3 unit=batch" in err
     assert "progress=100% done=3/3" in err
     assert "\r" not in err
+
+
+def test_iter_progress_plain_mode_formats_small_progress_without_repeated_zero(monkeypatch):
+    fake_stderr = _FakeNonTtyStderr()
+    monkeypatch.setattr(cli_ui.sys, "stderr", fake_stderr)
+
+    list(
+        cli_ui.iter_progress(
+            range(1),
+            total=200,
+            label="Chars2Vec batches",
+            enabled=True,
+            unit="batch",
+            min_plain_interval=0.0,
+        )
+    )
+
+    err = "".join(fake_stderr.lines)
+    assert "progress=<1% done=1/200" in err
+    assert "progress=0% done=1/200" not in err

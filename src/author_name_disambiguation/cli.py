@@ -1644,7 +1644,6 @@ def cmd_run_train_stage(args):
 def cmd_run_infer_sources(args):
     ui = CliUI(total_steps=8, progress=args.progress)
     try:
-        ui.info("Initializing run-infer-sources CLI.")
         from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
 
         result = run_infer_sources(
@@ -1680,7 +1679,6 @@ def cmd_run_infer_sources(args):
             "stage_metrics_path": str(result.stage_metrics_path),
             "go_no_go_path": str(result.go_no_go_path),
         }
-        ui.info(f"Run complete: {result.run_id}")
         print(json.dumps(payload, indent=2))
         return payload
     except Exception as exc:
