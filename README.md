@@ -18,40 +18,63 @@ The public Python API is inference-only:
 ## Install
 
 ```bash
-python -m pip install -e .[dev]
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --editable ".[dev]" \
+  --torch-backend cu126
 ```
 
-For GPU-backed SPECTER and NAND inference, install a CUDA-enabled PyTorch build explicitly.
-TensorFlow seeing a GPU is not sufficient because the SPECTER and pair-scoring paths use PyTorch.
-In this repo, prefer `uv pip` against the existing project venv instead of introducing a separate conda env.
+In this repo, prefer `uv pip` against the existing project venv instead of introducing a separate conda env or mixing `pip` and `uv`.
+Treat `python -m pip check` as a diagnostic only, not as an installation path.
 
-Verified repair command for the shared `/home/ubuntu/.venv` on the A100 host:
+Repair the shared-host GPU overlay in that same venv with the repo pins:
 
 ```bash
 source /home/ubuntu/.venv/bin/activate
 uv pip install \
   --python /home/ubuntu/.venv/bin/python \
-  --index-url https://download.pytorch.org/whl/cu126 \
-  --reinstall "torch==2.10.0+cu126"
-python - <<'PY'
-import torch
-print("torch", torch.__version__)
-print("torch.version.cuda", torch.version.cuda)
-print("torch.cuda.is_available", torch.cuda.is_available())
-print("torch.cuda.device_count", torch.cuda.device_count())
-if torch.cuda.is_available():
-    print("torch.cuda.get_device_name(0)", torch.cuda.get_device_name(0))
-PY
+  --reinstall \
+  --no-deps \
+  -r requirements-gpu-cu126.txt
 ```
-
-Do not start a large infer run unless that check prints `torch.cuda.is_available True`.
-`run-infer-sources --device auto` now reports the fallback reason in the logs and JSON reports when PyTorch cannot use CUDA.
 
 For optional local research tooling:
 
 ```bash
-python -m pip install -e ".[dev,research]"
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --editable ".[dev,research]" \
+  --torch-backend cu126
 ```
+
+## GPU Env Integrity
+
+Do not start a large infer run unless all of these succeed:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+python -m pip check
+python -c "import cupy, cuml"
+python scripts/benchmarks/cuml_e2e_smoke.py --require-gpu-backend
+```
+
+The March 10, 2026 incident was caused by mixed installers and missing repo pins. The concrete drift was:
+
+- `cupy-cuda12x 14.0.1` with `cuda-pathfinder 1.2.2` even though CuPy requires `>=1.3.3`
+- `cuda-python 12.9.5` with `cuda-bindings 12.9.4` even though CUDA Python requires `~=12.9.5`
+
+The compatible intersection for the shared host is now pinned in [requirements-gpu-cu126.txt](/home/ubuntu/Author_Name_Disambiguation/requirements-gpu-cu126.txt):
+
+- `torch 2.10.0+cu126` requires `cuda-bindings==12.9.4`
+- `cuml-cu12 26.2.0` accepts `cuda-python>=12.9.2,<13`
+- `cupy-cuda12x 14.0.1` requires `cuda-pathfinder>=1.3.3`
+
+That is why the repair target is `cuda-python==12.9.4`, `cuda-bindings==12.9.4`, and `cuda-pathfinder==1.3.3`.
+The GPU requirements file is intentionally an overlay repair spec for the existing venv, not a one-shot exact reprovision of torch plus RAPIDS.
+The repair command uses `--no-deps` on purpose so `uv` does not replace Torch's working CUDA vendor wheels with a second transitive solve from RAPIDS.
+If that class of error returns, repair the venv with the `uv pip` command above. Do not manually patch single CUDA or RAPIDS packages with `pip install ...`.
 
 ## Public CLI
 

@@ -37,33 +37,50 @@ author-name-disambiguation run-infer-sources \
 - `--device auto` may fall back to CPU if PyTorch cannot use CUDA in the current venv/session.
 - The fallback is reported in `00_context.json`, `02_preflight_infer.json`, and `05_stage_metrics_infer_sources.json`.
 - TensorFlow logging a visible GPU does not prove that SPECTER is on GPU; SPECTER and pair scoring use PyTorch.
-- On the shared A100 host, prefer repairing the existing `/home/ubuntu/.venv` with `uv pip` instead of creating a separate conda env:
+- On the shared A100 host, bootstrap the existing `/home/ubuntu/.venv` with `uv pip` instead of creating a separate conda env or mixing `pip` and `uv` installs:
 
 ```bash
 source /home/ubuntu/.venv/bin/activate
 uv pip install \
   --python /home/ubuntu/.venv/bin/python \
-  --index-url https://download.pytorch.org/whl/cu126 \
-  --reinstall "torch==2.10.0+cu126"
+  --editable ".[dev]" \
+  --torch-backend cu126
 ```
 
-- Verify PyTorch directly before large runs:
+- Repair the RAPIDS/CUDA overlay in that same venv from the repo pins:
 
 ```bash
 source /home/ubuntu/.venv/bin/activate
-python - <<'PY'
-import torch
-print("torch", torch.__version__)
-print("torch.version.cuda", torch.version.cuda)
-print("torch.cuda.is_available", torch.cuda.is_available())
-print("torch.cuda.device_count", torch.cuda.device_count())
-if torch.cuda.is_available():
-    print("torch.cuda.get_device_name(0)", torch.cuda.get_device_name(0))
-PY
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --reinstall \
+  --no-deps \
+  -r requirements-gpu-cu126.txt
+```
+
+- Verify the full GPU environment directly before large runs:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+python -m pip check
+python -c "import cupy, cuml"
+python scripts/benchmarks/cuml_e2e_smoke.py --require-gpu-backend
 ```
 
 - Do not trust TensorFlow-only GPU logs as proof of SPECTER acceleration.
-- If `torch.cuda.is_available` is `False`, fix the venv before launching a full run.
+- If any of those checks fail, fix the venv before launching a full run.
+- Root cause of the March 10, 2026 RAPIDS outage: mixed installers plus missing repo pins.
+  - `cupy-cuda12x 14.0.1` was installed alongside `cuda-pathfinder 1.2.2`, although CuPy requires `>=1.3.3`.
+  - `cuda-python 12.9.5` was installed alongside `cuda-bindings 12.9.4`, although CUDA Python requires `~=12.9.5`.
+- Compatible repair target for the shared host:
+  - `torch 2.10.0+cu126` requires `cuda-bindings==12.9.4`.
+  - `cuml-cu12 26.2.0` accepts `cuda-python>=12.9.2,<13`.
+  - `cupy-cuda12x 14.0.1` requires `cuda-pathfinder>=1.3.3`.
+  - Therefore the repo-pinned repair set is `cuda-python==12.9.4`, `cuda-bindings==12.9.4`, `cuda-pathfinder==1.3.3`.
+- `requirements-gpu-cu126.txt` is an overlay repair spec for the existing host venv, not a from-scratch exact solve for torch plus RAPIDS together.
+- The repair command uses `--no-deps` on purpose so `uv` does not replace Torch's working CUDA vendor wheels with a second transitive solve from RAPIDS.
+- `python -m pip check` is a diagnostic, not an install path.
+- Do not manually patch single CUDA or RAPIDS packages with `pip install ...`; always repair from `requirements-gpu-cu126.txt` with `uv pip`.
 
 ## Output Contract
 
