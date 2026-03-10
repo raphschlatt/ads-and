@@ -123,11 +123,13 @@ Input fields per source record:
 
 - required: `Bibcode`
 - required: `Author`
-- required: `Year`
-- required: `Title_en` or `Title`
-- required: `Abstract_en` or `Abstract`
+- optional: `Year`
+- optional: `Title_en` or `Title`
+- optional: `Abstract_en` or `Abstract`
 - optional: `Affiliation`
 - optional: `embedding` or `precomputed_embedding` as a 768-dim text embedding
+
+Records without `Bibcode` or `Author` are skipped during inference. Source-mirrored outputs still preserve raw rows with empty `Author` lists and add `AuthorUID=[]` plus `AuthorDisplayName=[]`.
 
 Inference outputs under `output_root`:
 

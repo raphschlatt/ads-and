@@ -36,22 +36,6 @@ AUTHOR_ENTITY_COLUMNS = [
 ]
 
 
-def build_publication_author_mapping(
-    mentions: pd.DataFrame,
-    clusters: pd.DataFrame,
-    output_path: str | Path | None = None,
-) -> pd.DataFrame:
-    out = mentions[["bibcode", "author_idx", "mention_id", "source_type"]].copy()
-    cluster_cols = ["mention_id", "author_uid"]
-    if "author_uid_local" in clusters.columns:
-        cluster_cols.append("author_uid_local")
-    out = out.merge(clusters[cluster_cols], on="mention_id", how="left")
-    out = out.sort_values(["bibcode", "author_idx"]).reset_index(drop=True)
-    if output_path is not None:
-        save_parquet(out, output_path, index=False)
-    return out
-
-
 def _iter_json_records(path: Path) -> Iterator[dict[str, Any]]:
     if path.suffix.lower() == ".jsonl":
         with path.open("r", encoding="utf-8") as handle:
@@ -270,6 +254,28 @@ def _get_record_authors(record: dict[str, Any]) -> list[str]:
     return split_author_field(author_raw)
 
 
+def _resolve_export_row_assignments(
+    *,
+    source_type: str,
+    row_idx: int,
+    authors: list[str],
+    group: pd.DataFrame | None,
+) -> tuple[list[str], list[str], int]:
+    if group is None:
+        if not authors:
+            return [], [], 0
+        raise RuntimeError(f"Missing source assignments for {source_type}[{row_idx}].")
+
+    author_uids = group["author_uid"].astype(str).tolist()
+    display_names = group["author_display_name"].astype(str).tolist()
+    if len(author_uids) != len(authors):
+        raise RuntimeError(
+            f"Assignment length mismatch for {source_type}[{row_idx}]: "
+            f"expected {len(authors)} authors, got {len(author_uids)}."
+        )
+    return author_uids, display_names, int((group["assignment_kind"] == "fallback_unmatched").sum())
+
+
 def _export_source_file_json(
     *,
     source_type: str,
@@ -284,19 +290,16 @@ def _export_source_file_json(
         for row_idx, record in _iter_raw_records_with_index(input_path):
             authors = _get_record_authors(record)
             group = grouped.get(row_idx)
-            if group is None:
-                raise RuntimeError(f"Missing source assignments for {source_type}[{row_idx}].")
-            author_uids = group["author_uid"].astype(str).tolist()
-            display_names = group["author_display_name"].astype(str).tolist()
-            if len(author_uids) != len(authors):
-                raise RuntimeError(
-                    f"Assignment length mismatch for {source_type}[{row_idx}]: "
-                    f"expected {len(authors)} authors, got {len(author_uids)}."
-                )
+            author_uids, display_names, authors_fallback = _resolve_export_row_assignments(
+                source_type=source_type,
+                row_idx=int(row_idx),
+                authors=authors,
+                group=group,
+            )
             stats["rows_total"] += 1
             stats["authors_total"] += len(author_uids)
             stats["authors_mapped"] += len(author_uids)
-            stats["authors_fallback"] += int((group["assignment_kind"] == "fallback_unmatched").sum())
+            stats["authors_fallback"] += authors_fallback
 
             out_row = dict(record)
             out_row["AuthorUID"] = author_uids
@@ -321,22 +324,19 @@ def _export_source_file_parquet(
     for row_idx, row in enumerate(frame.itertuples(index=False)):
         authors = _get_record_authors(row._asdict())
         group = grouped.get(row_idx)
-        if group is None:
-            raise RuntimeError(f"Missing source assignments for {source_type}[{row_idx}].")
-        author_uids = group["author_uid"].astype(str).tolist()
-        display_names = group["author_display_name"].astype(str).tolist()
-        if len(author_uids) != len(authors):
-            raise RuntimeError(
-                f"Assignment length mismatch for {source_type}[{row_idx}]: "
-                f"expected {len(authors)} authors, got {len(author_uids)}."
-            )
+        author_uids, display_names, authors_fallback = _resolve_export_row_assignments(
+            source_type=source_type,
+            row_idx=int(row_idx),
+            authors=authors,
+            group=group,
+        )
 
         author_uid_rows.append(author_uids)
         display_name_rows.append(display_names)
         stats["rows_total"] += 1
         stats["authors_total"] += len(author_uids)
         stats["authors_mapped"] += len(author_uids)
-        stats["authors_fallback"] += int((group["assignment_kind"] == "fallback_unmatched").sum())
+        stats["authors_fallback"] += authors_fallback
 
     out = frame.copy()
     out["AuthorUID"] = author_uid_rows

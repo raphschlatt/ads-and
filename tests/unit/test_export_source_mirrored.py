@@ -168,3 +168,52 @@ def test_export_source_mirrored_outputs_supports_parquet(tmp_path: Path):
     assert list(pubs_out_df.loc[0, "AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
     assert list(pubs_out_df.loc[0, "AuthorDisplayName"]) == ["Doe J", "Roe A"]
     assert list(refs_out_df.loc[0, "AuthorUID"]) == ["set::blk.r.0", "set::src.reference.0.1"]
+
+
+def test_export_source_mirrored_outputs_keeps_authorless_rows_with_empty_lists(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    pubs_out = tmp_path / "publications_disambiguated.parquet"
+
+    pd.DataFrame(
+        [
+            {"Bibcode": "bib1", "Author": ["Doe J", "Roe A"], "Title_en": "T1"},
+            {"Bibcode": "bib2", "Author": [], "Title_en": "T2"},
+        ]
+    ).to_parquet(pubs_path, index=False)
+
+    export_source_mirrored_outputs(
+        assignments=_assignments().query("source_type == 'publication' and source_row_idx == 0"),
+        publications_path=pubs_path,
+        references_path=None,
+        publications_output_path=pubs_out,
+        references_output_path=None,
+    )
+
+    pubs_out_df = pd.read_parquet(pubs_out)
+    assert list(pubs_out_df.loc[0, "AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
+    assert list(pubs_out_df.loc[1, "AuthorUID"]) == []
+    assert list(pubs_out_df.loc[1, "AuthorDisplayName"]) == []
+
+
+def test_export_source_mirrored_outputs_still_fails_when_authored_row_lacks_assignments(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    pubs_out = tmp_path / "publications_disambiguated.parquet"
+
+    pd.DataFrame(
+        [
+            {"Bibcode": "bib1", "Author": ["Doe J"], "Title_en": "T1"},
+        ]
+    ).to_parquet(pubs_path, index=False)
+
+    try:
+        export_source_mirrored_outputs(
+            assignments=pd.DataFrame(columns=_assignments().columns),
+            publications_path=pubs_path,
+            references_path=None,
+            publications_output_path=pubs_out,
+            references_output_path=None,
+        )
+    except RuntimeError as exc:
+        assert "Missing source assignments for publication[0]" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError for authored row without assignments.")

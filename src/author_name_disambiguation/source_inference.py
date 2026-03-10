@@ -326,13 +326,8 @@ def _build_output_dirs(output_root: Path) -> dict[str, Path]:
         "root": _ensure_dir(output_root),
         "interim": _ensure_dir(output_root / "interim"),
         "processed": _ensure_dir(output_root / "processed"),
-        "subset_cache": _ensure_dir(output_root / "subsets" / "cache"),
-        "subset_manifests": _ensure_dir(output_root / "subsets" / "manifests"),
         "embeddings": _ensure_dir(output_root / "artifacts" / "embeddings"),
-        "checkpoints": _ensure_dir(output_root / "artifacts" / "checkpoints"),
         "pair_scores": _ensure_dir(output_root / "artifacts" / "pair_scores"),
-        "clusters": _ensure_dir(output_root / "artifacts" / "clusters"),
-        "metrics": _ensure_dir(output_root / "artifacts" / "metrics"),
     }
 
 
@@ -854,6 +849,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         )
     else:
         pairs_input: pd.DataFrame | str | Path = pairs_path if len(pairs) > score_chunked_threshold else pairs
+        use_file_backed_pair_scores = isinstance(pairs_input, Path)
         pair_scores_result = score_pairs_with_checkpoint(
             mentions=mentions,
             pairs=pairs_input,
@@ -866,7 +862,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             precision_mode=str(request.precision_mode),
             show_progress=bool(request.progress),
             chunk_rows=score_chunk_rows,
-            return_scores=not isinstance(pairs_input, Path),
+            return_scores=not use_file_backed_pair_scores,
             return_runtime_meta=True,
         )
         if isinstance(pair_scores_result, tuple) and len(pair_scores_result) == 2:
@@ -879,7 +875,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             requested_device=str(request.device),
             effective_precision_mode=str(request.precision_mode),
         )
-        if not isinstance(pair_scores, pd.DataFrame):
+        if use_file_backed_pair_scores:
             pair_scores = read_parquet(pair_scores_path)
 
     preflight["runtime"] = {

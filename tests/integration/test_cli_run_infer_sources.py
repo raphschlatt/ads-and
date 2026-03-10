@@ -8,6 +8,7 @@ import pandas as pd
 import yaml
 
 from author_name_disambiguation import cli
+from author_name_disambiguation import source_inference
 from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
 
 
@@ -92,7 +93,7 @@ def _write_bundle(tmp_path: Path) -> Path:
     return bundle_dir
 
 
-def _apply_fast_mocks(monkeypatch) -> None:
+def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) -> dict[str, object]:
     seen: dict[str, object] = {}
 
     def _chars(mentions, output_path, force_recompute=False, **_kwargs):
@@ -181,6 +182,9 @@ def _apply_fast_mocks(monkeypatch) -> None:
             "model_to_cuda_error": None,
             "effective_precision_mode": str(_kwargs.get("precision_mode", "fp32")),
         }
+        if empty_chunked_score_return and isinstance(pairs, (str, Path)) and not _kwargs.get("return_scores", True):
+            empty = pd.DataFrame(columns=out.columns)
+            return (empty, meta) if _kwargs.get("return_runtime_meta") else empty
         return (out, meta) if _kwargs.get("return_runtime_meta") else out
 
     def _pairs(mentions, output_path=None, **_kwargs):
@@ -221,6 +225,7 @@ def _apply_fast_mocks(monkeypatch) -> None:
 
     def _cluster(mentions, pair_scores, output_path=None, **_kwargs):
         seen["cluster_kwargs"] = dict(_kwargs)
+        seen["cluster_pair_scores_rows"] = int(len(pair_scores))
         out = mentions[["mention_id", "block_key"]].copy()
         out["author_uid"] = [
             "blk.a.0",
@@ -395,3 +400,58 @@ def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):
     assert cli_stage["metric_scope"] == api_stage["metric_scope"] == "infer"
     assert cli_stage["infer_stage"] == api_stage["infer_stage"] == "full"
     assert cli_stage["counts"]["ads_mentions"] == api_stage["counts"]["ads_mentions"]
+
+
+def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_path: Path):
+    publications_path, references_path = _write_dataset(tmp_path, with_references=True)
+    bundle_dir = _write_bundle(tmp_path)
+    seen = _apply_fast_mocks(monkeypatch, empty_chunked_score_return=True)
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
+        lambda _device: {
+            "requested_device": "auto",
+            "resolved_device": "cpu",
+            "gpu_name": None,
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "fallback_reason": "torch_cuda_unavailable",
+            "cuda_probe_error": None,
+        },
+    )
+    original_resolve_infer_run_cfg = source_inference._resolve_infer_run_cfg
+
+    def _patched_resolve_infer_run_cfg(infer_stage):
+        cfg = original_resolve_infer_run_cfg(infer_stage)
+        cfg["infer_overrides"] = dict(cfg.get("infer_overrides", {}) or {})
+        cfg["infer_overrides"]["score_chunked_threshold"] = 1
+        return cfg
+
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._resolve_infer_run_cfg",
+        _patched_resolve_infer_run_cfg,
+    )
+
+    output_root = tmp_path / "out_chunked"
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-sources",
+            "--publications-path",
+            str(publications_path),
+            "--references-path",
+            str(references_path),
+            "--output-root",
+            str(output_root),
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            str(bundle_dir),
+            "--no-progress",
+        ]
+    )
+    args.func(args)
+
+    preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
+    assert seen["cluster_pair_scores_rows"] > 0
+    assert int(preflight["runtime"]["pair_building"]["pairs_written"]) == int(seen["cluster_pair_scores_rows"])

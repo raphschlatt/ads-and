@@ -1,7 +1,6 @@
 from author_name_disambiguation.approaches.nand.build_pairs import assign_lspo_splits, build_pairs_within_blocks, write_pairs
 from author_name_disambiguation.approaches.nand.export import (
     build_author_entities,
-    build_publication_author_mapping,
     build_source_author_assignments,
     export_source_mirrored_outputs,
 )
@@ -16,7 +15,6 @@ __all__ = [
     "train_nand_across_seeds",
     "score_pairs_with_checkpoint",
     "cluster_blockwise_dbscan",
-    "build_publication_author_mapping",
     "build_source_author_assignments",
     "build_author_entities",
     "export_source_mirrored_outputs",

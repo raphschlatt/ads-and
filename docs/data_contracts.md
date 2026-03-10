@@ -4,19 +4,21 @@
 
 `run-infer-sources` und `run_infer_sources()` erwarten Source-Records, keine Mentions.
 
-Pflichtfelder pro Input-Record:
+Mindestfelder pro Input-Record:
 
 - `Bibcode`
 - `Author`
-- `Year`
-- `Title_en` oder `Title`
-- `Abstract_en` oder `Abstract`
 
 Optionale Felder:
 
+- `Year`
+- `Title_en` oder `Title`
+- `Abstract_en` oder `Abstract`
 - `Affiliation`
 - `embedding`
 - `precomputed_embedding` als 768-dim Text-Embedding
+
+Records ohne `Bibcode` oder `Author` werden intern nicht in Mentions umgewandelt. Source-mirrored Outputs behalten rohe Zeilen mit leerem `Author`-Feld trotzdem bei und schreiben dafuer leere `AuthorUID`-/`AuthorDisplayName`-Listen.
 
 ## Public Infer Outputs
 
@@ -38,6 +40,7 @@ Die disambiguierten Source-Dateien behalten alle Inputspalten und ergänzen:
 - `AuthorDisplayName: list[str]`
 
 Beide Listen sind positionsparallel zu `Author`.
+Bei rohen Source-Zeilen ohne Autoren sind beide Listen leer.
 
 ### `source_author_assignments.parquet`
 
