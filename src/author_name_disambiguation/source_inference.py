@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 from time import perf_counter
@@ -260,6 +261,19 @@ def _estimate_ram_total_bytes() -> int | None:
         return int(psutil.virtual_memory().total)
     except Exception:
         return None
+
+
+def _best_effort_release_runtime_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+    except Exception:
+        return
+    try:
+        if hasattr(torch, "cuda") and torch.cuda.is_available() and hasattr(torch.cuda, "empty_cache"):
+            torch.cuda.empty_cache()
+    except Exception:
+        return
 
 
 def _estimate_pair_upper_bound(mentions: pd.DataFrame, max_pairs_per_block: int | None) -> int:
@@ -758,7 +772,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         use_stub_if_missing=False,
         show_progress=bool(request.progress),
         quiet_libraries=True,
-        reuse_model=True,
+        reuse_model=False,
         return_meta=True,
     )
     if isinstance(text_result, tuple) and len(text_result) == 2:
@@ -785,9 +799,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
 
     preflight["runtime"] = {
+        "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
     }
     write_json(preflight, preflight_path)
+    _best_effort_release_runtime_memory()
 
     pair_inference_started_at = perf_counter()
     _ui_start("Pair inference")
@@ -851,6 +867,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             effective_precision_mode=str(request.precision_mode),
             skipped=True,
         )
+        pair_score_runtime_meta["pair_scoring_strategy"] = "preencoded_mentions"
+        pair_score_runtime_meta["mention_storage_device"] = "cpu"
+        pair_score_runtime_meta["cuda_oom_fallback_used"] = False
     else:
         pairs_input: pd.DataFrame | str | Path = pairs_path if len(pairs) > score_chunked_threshold else pairs
         use_file_backed_pair_scores = isinstance(pairs_input, Path)
@@ -883,6 +902,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             pair_scores = read_parquet(pair_scores_path)
 
     preflight["runtime"] = {
+        "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
         "pair_scoring": pair_score_runtime_meta,
@@ -942,6 +962,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_registry_path=uid_registry_path,
     )
     preflight["runtime"] = {
+        "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
         "pair_scoring": pair_score_runtime_meta,
@@ -962,7 +983,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _ui_info(f"writing {result_paths['publications_disambiguated'].name}")
     if result_paths["references_disambiguated"] is not None:
         _ui_info(f"writing {result_paths['references_disambiguated'].name}")
-    assignments = build_source_author_assignments(
+    assignments_result = build_source_author_assignments(
         publications=publications,
         references=references,
         canonical_records=canonical_records,
@@ -970,11 +991,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_scope=uid_scope,
         uid_namespace=uid_namespace,
         output_path=result_paths["source_author_assignments"],
+        return_author_entities=True,
     )
-    author_entities = build_author_entities(
-        assignments,
-        output_path=result_paths["author_entities"],
-    )
+    if isinstance(assignments_result, tuple) and len(assignments_result) == 2:
+        assignments, author_entities = assignments_result
+    else:
+        assignments = assignments_result
+        author_entities = build_author_entities(assignments)
+    save_parquet(author_entities, result_paths["author_entities"], index=False)
     clusters = clusters.merge(
         author_entities[["author_uid", "author_display_name"]],
         on="author_uid",
@@ -1013,6 +1037,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "cluster_config_used": cluster_cfg_used,
         "cluster_runtime": cluster_runtime_meta,
         "runtime": {
+            "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
             "pair_scoring": pair_score_runtime_meta,
@@ -1023,6 +1048,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     }
     write_json(cluster_used_payload, cluster_cfg_used_path)
     context_payload["runtime"] = {
+        "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
         "pair_scoring": pair_score_runtime_meta,
@@ -1075,6 +1101,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_upper_bound=preflight.get("pair_upper_bound"),
         source_export_qc=source_export_qc,
         runtime={
+            "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
             "pair_scoring": pair_score_runtime_meta,

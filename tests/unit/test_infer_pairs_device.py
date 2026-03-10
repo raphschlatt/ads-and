@@ -238,6 +238,20 @@ class _FakeTorchScore:
         return _NoGrad()
 
 
+class _FakeTorchEncode:
+    def __init__(self, *, cuda_available: bool = True):
+        self.cuda = _FakeCuda(available=cuda_available)
+
+    def from_numpy(self, arr):
+        return _FakeTensor(arr)
+
+    def no_grad(self):
+        return _NoGrad()
+
+    def cat(self, *_args, **_kwargs):
+        raise AssertionError("torch.cat should not be called in _encode_mentions")
+
+
 class _IdentityModel:
     def load_state_dict(self, _state_dict):
         return None
@@ -264,6 +278,15 @@ class _NormalizeModel:
 
     def __call__(self, x):
         return x / x.norm(dim=1, keepdim=True).clamp_min(1e-8)
+
+
+class _RecordToModel(_IdentityModel):
+    def __init__(self):
+        self.to_calls: list[str] = []
+
+    def to(self, device):
+        self.to_calls.append(str(device))
+        return self
 
 
 def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
@@ -320,6 +343,24 @@ def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
     assert float(out["distance"].iloc[0]) == pytest.approx(0.0)
 
 
+def test_encode_mentions_cuda_path_materializes_batches_on_cpu_without_torch_cat():
+    torch_like = _FakeTorchEncode(cuda_available=True)
+    features = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+    emb, norms = infer_pairs._encode_mentions(
+        torch=torch_like,
+        model=_IdentityModel(),
+        features=features,
+        batch_size=2,
+        device="cuda",
+        precision_mode="fp32",
+        show_progress=False,
+    )
+
+    np.testing.assert_allclose(emb, features)
+    np.testing.assert_allclose(norms, np.linalg.norm(features, axis=1).astype(np.float32))
+
+
 def test_score_pairs_matches_reference_cosine_from_preencoded_mentions(monkeypatch):
     monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
     monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: _NormalizeModel())
@@ -360,10 +401,126 @@ def test_score_pairs_matches_reference_cosine_from_preencoded_mentions(monkeypat
     np.testing.assert_allclose(out["cosine_sim"].to_numpy(), np.asarray(expected_sim, dtype=np.float32), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(out["distance"].to_numpy(), 1.0 - np.asarray(expected_sim, dtype=np.float32), rtol=1e-6, atol=1e-6)
     assert runtime_meta["pair_scoring_strategy"] == "preencoded_mentions"
+    assert runtime_meta["mention_storage_device"] == "cpu"
+    assert runtime_meta["cuda_oom_fallback_used"] is False
     assert runtime_meta["feature_matrix_shape"] == [3, 4]
     assert runtime_meta["mention_embedding_shape"] == [3, 4]
     assert runtime_meta["pairs_total_rows"] == 3
     assert runtime_meta["pairs_valid_rows"] == 2
+
+
+def test_score_pairs_auto_retries_on_cpu_after_cuda_oom_during_mention_encoding(monkeypatch):
+    model = _RecordToModel()
+
+    monkeypatch.setattr(
+        infer_pairs,
+        "resolve_torch_device",
+        lambda _torch, device, runtime_label: (
+            "cuda" if device == "auto" else str(device),
+            {
+                "requested_device": str(device),
+                "resolved_device": "cuda" if device == "auto" else str(device),
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": "12.1",
+                "torch_cuda_available": True,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+            },
+        ),
+    )
+    monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
+    monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: model)
+    monkeypatch.setattr(
+        infer_pairs,
+        "build_feature_matrix",
+        lambda chars2vec, text_emb: np.zeros((chars2vec.shape[0], 2), dtype=np.float32),
+    )
+
+    def _fake_encode_mentions(*, device, **_kwargs):
+        if str(device).startswith("cuda"):
+            raise RuntimeError("CUDA out of memory while encoding mentions")
+        emb = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        norms = np.array([1.0, 1.0], dtype=np.float32)
+        return emb, norms
+
+    monkeypatch.setattr(infer_pairs, "_encode_mentions", _fake_encode_mentions)
+
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2"]})
+    pairs = pd.DataFrame(
+        [{"pair_id": "m1__m2", "mention_id_1": "m1", "mention_id_2": "m2", "block_key": "blk.a"}]
+    )
+
+    with pytest.warns(RuntimeWarning, match="retrying on CPU"):
+        out, runtime_meta = infer_pairs.score_pairs_with_checkpoint(
+            mentions=mentions,
+            pairs=pairs,
+            chars2vec=np.zeros((2, 1), dtype=np.float32),
+            text_emb=np.zeros((2, 1), dtype=np.float32),
+            checkpoint_path="checkpoint.pt",
+            device="auto",
+            return_runtime_meta=True,
+        )
+
+    assert list(out["pair_id"]) == ["m1__m2"]
+    assert model.to_calls == ["cuda", "cpu"]
+    assert runtime_meta["resolved_device"] == "cpu"
+    assert runtime_meta["fallback_reason"] == "pair_scoring_cuda_oom_retry_cpu"
+    assert runtime_meta["cuda_oom_fallback_used"] is True
+
+
+def test_score_pairs_explicit_cuda_oom_during_mention_encoding_still_raises(monkeypatch):
+    model = _RecordToModel()
+
+    monkeypatch.setattr(
+        infer_pairs,
+        "resolve_torch_device",
+        lambda _torch, device, runtime_label: (
+            str(device),
+            {
+                "requested_device": str(device),
+                "resolved_device": str(device),
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": "12.1",
+                "torch_cuda_available": True,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+            },
+        ),
+    )
+    monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
+    monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: model)
+    monkeypatch.setattr(
+        infer_pairs,
+        "build_feature_matrix",
+        lambda chars2vec, text_emb: np.zeros((chars2vec.shape[0], 2), dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        infer_pairs,
+        "_encode_mentions",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("CUDA out of memory during mention encoding")),
+    )
+
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2"]})
+    pairs = pd.DataFrame(
+        [{"pair_id": "m1__m2", "mention_id_1": "m1", "mention_id_2": "m2", "block_key": "blk.a"}]
+    )
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        infer_pairs.score_pairs_with_checkpoint(
+            mentions=mentions,
+            pairs=pairs,
+            chars2vec=np.zeros((2, 1), dtype=np.float32),
+            text_emb=np.zeros((2, 1), dtype=np.float32),
+            checkpoint_path="checkpoint.pt",
+            device="cuda",
+            return_runtime_meta=True,
+        )
+
+    assert model.to_calls == ["cuda"]
 
 
 def test_score_pairs_chunked_parity_matches_dataframe_path(monkeypatch, tmp_path):

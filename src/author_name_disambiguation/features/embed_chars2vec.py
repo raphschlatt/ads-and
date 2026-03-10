@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
 import re
@@ -129,6 +130,57 @@ def _pad_sequences(model, words: list[str]) -> np.ndarray:
     return model.keras.preprocessing.sequence.pad_sequences(list_of_embeddings, maxlen=None)
 
 
+def _configure_tensorflow_memory_growth() -> tuple[bool | None, str | None]:
+    try:
+        import tensorflow as tf  # type: ignore
+    except Exception:
+        return None, None
+
+    try:
+        gpus = list(getattr(tf.config, "list_physical_devices")("GPU"))
+    except Exception as exc:
+        return False, repr(exc)
+    if len(gpus) == 0:
+        return None, None
+
+    try:
+        for gpu in gpus:
+            if hasattr(tf.config, "experimental") and hasattr(tf.config.experimental, "set_memory_growth"):
+                tf.config.experimental.set_memory_growth(gpu, True)
+            elif hasattr(tf.config, "set_memory_growth"):
+                tf.config.set_memory_growth(gpu, True)
+        return True, None
+    except Exception as exc:
+        return False, repr(exc)
+
+
+def _cleanup_tensorflow_runtime(model) -> str | None:
+    error_parts: list[str] = []
+
+    keras_backend = getattr(getattr(model, "keras", None), "backend", None)
+    if keras_backend is not None and hasattr(keras_backend, "clear_session"):
+        try:
+            keras_backend.clear_session()
+        except Exception as exc:
+            error_parts.append(f"model.keras.backend.clear_session: {exc!r}")
+
+    try:
+        import tensorflow as tf  # type: ignore
+
+        tf_backend = getattr(getattr(tf, "keras", None), "backend", None)
+        if tf_backend is not None and hasattr(tf_backend, "clear_session"):
+            tf_backend.clear_session()
+    except Exception as exc:
+        error_parts.append(f"tensorflow.keras.backend.clear_session: {exc!r}")
+
+    try:
+        del model
+    except Exception:
+        pass
+    gc.collect()
+    return "; ".join(error_parts) if error_parts else None
+
+
 def _predict_word_vectors(model, embeddings_pad_seq: np.ndarray, *, batch_size: int, show_progress: bool) -> np.ndarray:
     total_batches = (len(embeddings_pad_seq) + batch_size - 1) // batch_size
     callbacks = None
@@ -193,7 +245,15 @@ def generate_chars2vec_embeddings(
 ) -> np.ndarray | tuple[np.ndarray, dict[str, object]]:
     if not names:
         empty = np.zeros((0, 50), dtype=np.float32)
-        meta = {"cache_hit": False, "generation_mode": "empty", "name_count": 0}
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "empty",
+            "name_count": 0,
+            "tensorflow_memory_growth_enabled": None,
+            "tensorflow_memory_growth_error": None,
+            "tensorflow_cleanup_attempted": False,
+            "tensorflow_cleanup_error": None,
+        }
         return (empty, meta) if return_meta else empty
 
     if quiet_libraries:
@@ -201,6 +261,7 @@ def generate_chars2vec_embeddings(
         os.environ["ABSL_LOG_LEVEL"] = "3"
         os.environ["KERAS_BACKEND"] = "tensorflow"
 
+    tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
     try:
         import chars2vec  # type: ignore
 
@@ -213,6 +274,7 @@ def generate_chars2vec_embeddings(
                 batch_size=32,
                 show_progress=show_progress,
             )
+        cleanup_error = _cleanup_tensorflow_runtime(model)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:
             raise ValueError(f"Unexpected chars2vec output shape: {emb.shape}")
@@ -220,6 +282,10 @@ def generate_chars2vec_embeddings(
             "cache_hit": False,
             "generation_mode": "chars2vec",
             "name_count": int(len(names)),
+            "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
+            "tensorflow_memory_growth_error": tf_memory_growth_error,
+            "tensorflow_cleanup_attempted": True,
+            "tensorflow_cleanup_error": cleanup_error,
         }
         return (emb, meta) if return_meta else emb
     except Exception as exc:
@@ -233,6 +299,10 @@ def generate_chars2vec_embeddings(
         "cache_hit": False,
         "generation_mode": "stub_only",
         "name_count": int(len(names)),
+        "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
+        "tensorflow_memory_growth_error": tf_memory_growth_error,
+        "tensorflow_cleanup_attempted": False,
+        "tensorflow_cleanup_error": None,
     }
     return (emb, meta) if return_meta else emb
 
@@ -256,7 +326,15 @@ def get_or_create_chars2vec_embeddings(
             description="chars2vec embedding cache",
         )
         if cached is not None:
-            meta = {"cache_hit": True, "generation_mode": "cache", "name_count": int(len(names))}
+            meta = {
+                "cache_hit": True,
+                "generation_mode": "cache",
+                "name_count": int(len(names)),
+                "tensorflow_memory_growth_enabled": None,
+                "tensorflow_memory_growth_error": None,
+                "tensorflow_cleanup_attempted": False,
+                "tensorflow_cleanup_error": None,
+            }
             return (cached, meta) if return_meta else cached
 
     result = generate_chars2vec_embeddings(

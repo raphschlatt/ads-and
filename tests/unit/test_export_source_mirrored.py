@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from author_name_disambiguation.approaches.nand.export import build_author_entities, export_source_mirrored_outputs
+from author_name_disambiguation.approaches.nand.export import (
+    build_author_entities,
+    build_source_author_assignments,
+    export_source_mirrored_outputs,
+)
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -93,6 +97,59 @@ def test_build_author_entities_uses_most_frequent_alias():
     assert entity["document_count"] == 2
     assert entity["unique_mention_count"] == 2
     assert entity["display_name_method"] == "most_frequent_alias"
+
+
+def test_build_source_author_assignments_can_return_author_entities():
+    publications = pd.DataFrame(
+        [
+            {"bibcode": "bib1", "source_type": "publication", "source_row_idx": 0, "authors": ["Doe J", "Roe A"]},
+            {"bibcode": "bib2", "source_type": "publication", "source_row_idx": 1, "authors": ["Doe J."]},
+        ]
+    )
+    references = pd.DataFrame(
+        [
+            {"bibcode": "bib3", "source_type": "reference", "source_row_idx": 0, "authors": ["Ref X", "Ref Y"]},
+        ]
+    )
+    canonical_records = pd.DataFrame(
+        [
+            {"bibcode": "bib1", "canonical_source_type": "publication", "canonical_source_row_idx": 0},
+            {"bibcode": "bib2", "canonical_source_type": "publication", "canonical_source_row_idx": 1},
+            {"bibcode": "bib3", "canonical_source_type": "reference", "canonical_source_row_idx": 0},
+        ]
+    )
+    clusters = pd.DataFrame(
+        [
+            {"mention_id": "bib1::0", "author_uid": "set::blk.a.0", "author_uid_local": "blk.a.0"},
+            {"mention_id": "bib1::1", "author_uid": "set::blk.a.1", "author_uid_local": "blk.a.1"},
+            {"mention_id": "bib2::0", "author_uid": "set::blk.a.0", "author_uid_local": "blk.a.0"},
+            {"mention_id": "bib3::0", "author_uid": "set::blk.r.0", "author_uid_local": "blk.r.0"},
+        ]
+    )
+
+    assignments, entities = build_source_author_assignments(
+        publications=publications,
+        references=references,
+        canonical_records=canonical_records,
+        clusters=clusters,
+        uid_scope="dataset",
+        uid_namespace="set",
+        return_author_entities=True,
+    )
+
+    assert list(assignments["assignment_kind"]) == [
+        "canonical",
+        "canonical",
+        "canonical",
+        "canonical",
+        "fallback_unmatched",
+    ]
+    assert set(entities["author_uid"]) == {
+        "set::blk.a.0",
+        "set::blk.a.1",
+        "set::blk.r.0",
+        "set::src.reference.0.1",
+    }
 
 
 def test_export_source_mirrored_outputs_adds_uid_and_display_name_lists(tmp_path: Path):

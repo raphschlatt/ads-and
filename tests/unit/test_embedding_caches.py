@@ -12,6 +12,78 @@ import pytest
 from author_name_disambiguation.features import embed_chars2vec, embed_specter
 
 
+def _install_fake_chars2vec_backend(monkeypatch: pytest.MonkeyPatch):
+    def _pad_sequences(sequences, maxlen=None):
+        del maxlen
+        max_length = max(seq.shape[0] for seq in sequences)
+        vocab_size = sequences[0].shape[1]
+        out = np.zeros((len(sequences), max_length, vocab_size), dtype=np.float32)
+        for idx, seq in enumerate(sequences):
+            out[idx, : seq.shape[0], :] = seq
+        return out
+
+    class _FakeCallback:
+        pass
+
+    class _FakeEmbeddingModel:
+        def predict(self, inputs, batch_size=None, verbose=None, callbacks=None):
+            del batch_size, verbose, callbacks
+            total_rows = len(inputs[0])
+            return np.ones((total_rows, 50), dtype=np.float32)
+
+    class _FakeModel:
+        def __init__(self):
+            self.cache: dict[str, np.ndarray] = {}
+            self.char_to_ix = {char: idx for idx, char in enumerate("abcdefghijklmnopqrstuvwxyz0123456789_")}
+            self.vocab_size = len(self.char_to_ix)
+            self.embedding_model = _FakeEmbeddingModel()
+
+    fake_chars2vec = SimpleNamespace(
+        load_model=lambda _model_name: _FakeModel(),
+        keras=SimpleNamespace(
+            preprocessing=SimpleNamespace(sequence=SimpleNamespace(pad_sequences=_pad_sequences)),
+            callbacks=SimpleNamespace(Callback=_FakeCallback),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "chars2vec", fake_chars2vec)
+
+
+def _install_fake_tensorflow(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    growth_raises: bool = False,
+    clear_raises: bool = False,
+):
+    state = {"memory_growth_calls": [], "clear_calls": 0}
+
+    class _Experimental:
+        def set_memory_growth(self, gpu, enabled):
+            if growth_raises:
+                raise RuntimeError("growth boom")
+            state["memory_growth_calls"].append((gpu, enabled))
+
+    class _Config:
+        experimental = _Experimental()
+
+        @staticmethod
+        def list_physical_devices(kind):
+            return ["GPU:0"] if kind == "GPU" else []
+
+    class _Backend:
+        @staticmethod
+        def clear_session():
+            state["clear_calls"] += 1
+            if clear_raises:
+                raise RuntimeError("cleanup boom")
+
+    fake_tf = SimpleNamespace(
+        config=_Config(),
+        keras=SimpleNamespace(backend=_Backend()),
+    )
+    monkeypatch.setitem(sys.modules, "tensorflow", fake_tf)
+    return state
+
+
 def test_get_or_create_chars2vec_embeddings_rebuilds_invalid_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     mentions = pd.DataFrame({"author_raw": ["Doe J", "Roe A"]})
     cache_path = tmp_path / "chars2vec.npy"
@@ -182,6 +254,46 @@ def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkey
     assert len(predict_calls) == 1
     assert predict_calls[0] == {"batch_size": 32, "verbose": 0, "callback_count": 1}
     assert progress_updates == [1, 1, 1]
+
+
+def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_cleanup(monkeypatch: pytest.MonkeyPatch):
+    tf_state = _install_fake_tensorflow(monkeypatch)
+    _install_fake_chars2vec_backend(monkeypatch)
+
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=["Doe J", "Roe A"],
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (2, 50)
+    assert meta["tensorflow_memory_growth_enabled"] is True
+    assert meta["tensorflow_memory_growth_error"] is None
+    assert meta["tensorflow_cleanup_attempted"] is True
+    assert meta["tensorflow_cleanup_error"] is None
+    assert tf_state["memory_growth_calls"] == [("GPU:0", True)]
+    assert tf_state["clear_calls"] == 1
+
+
+def test_generate_chars2vec_embeddings_tolerates_tensorflow_memory_growth_and_cleanup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _install_fake_tensorflow(monkeypatch, growth_raises=True, clear_raises=True)
+    _install_fake_chars2vec_backend(monkeypatch)
+
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=["Doe J"],
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (1, 50)
+    assert meta["tensorflow_memory_growth_enabled"] is False
+    assert "growth boom" in str(meta["tensorflow_memory_growth_error"])
+    assert meta["tensorflow_cleanup_attempted"] is True
+    assert "cleanup boom" in str(meta["tensorflow_cleanup_error"])
 
 
 def test_chars2vec_stderr_filter_only_suppresses_known_startup_lines():

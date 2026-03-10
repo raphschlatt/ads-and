@@ -67,6 +67,34 @@ def _autocast_context(torch, precision_mode: str):
     return nullcontext()
 
 
+def _is_cuda_oom_error(torch, exc: Exception) -> bool:
+    oom_types: tuple[type[BaseException], ...] = tuple()
+    cuda_module = getattr(torch, "cuda", None)
+    if cuda_module is not None:
+        oom_error = getattr(cuda_module, "OutOfMemoryError", None)
+        if isinstance(oom_error, type) and issubclass(oom_error, BaseException):
+            oom_types = (oom_error,)
+    if oom_types and isinstance(exc, oom_types):
+        return True
+    return "out of memory" in str(exc).strip().lower()
+
+
+def _best_effort_clear_cuda_cache(torch) -> None:
+    cuda_module = getattr(torch, "cuda", None)
+    if cuda_module is None:
+        return
+    try:
+        if hasattr(cuda_module, "is_available") and not bool(cuda_module.is_available()):
+            return
+    except Exception:
+        return
+    try:
+        if hasattr(cuda_module, "empty_cache"):
+            cuda_module.empty_cache()
+    except Exception:
+        return
+
+
 def load_checkpoint(checkpoint_path: str | Path, device: str = "auto") -> Dict[str, Any]:
     torch = _require_torch()
     # Load on CPU first to avoid hard failures during CUDA deserialization.
@@ -94,9 +122,7 @@ def _encode_mentions(
         enabled=show_progress,
         unit="batch",
     )
-    collect_on_device = str(device).startswith("cuda") and hasattr(torch, "cat")
-    tensor_batches: list[Any] = []
-    numpy_batches: list[np.ndarray] = []
+    mention_embeddings: np.ndarray | None = None
 
     with torch.no_grad():
         for start in starts:
@@ -104,23 +130,15 @@ def _encode_mentions(
             batch = torch.from_numpy(np.asarray(features[start:end], dtype=np.float32)).to(device)
             with _autocast_context(torch, precision_mode):
                 z = model(batch)
-            if collect_on_device:
-                tensor_batches.append(z.detach())
-            else:
-                numpy_batches.append(np.asarray(z.detach().cpu().numpy(), dtype=np.float32))
+            batch_embeddings = np.asarray(z.detach().cpu().numpy(), dtype=np.float32)
+            if mention_embeddings is None:
+                if batch_embeddings.ndim != 2:
+                    raise ValueError(f"Unexpected encoder output shape: {batch_embeddings.shape}")
+                mention_embeddings = np.empty((len(features), batch_embeddings.shape[1]), dtype=np.float32)
+            mention_embeddings[start:end] = batch_embeddings
 
-    if collect_on_device:
-        mention_embeddings = (
-            torch.cat(tensor_batches, dim=0).detach().cpu().numpy().astype(np.float32, copy=False)
-            if tensor_batches
-            else np.zeros((0, 0), dtype=np.float32)
-        )
-    else:
-        mention_embeddings = (
-            np.concatenate(numpy_batches, axis=0).astype(np.float32, copy=False)
-            if numpy_batches
-            else np.zeros((0, 0), dtype=np.float32)
-        )
+    if mention_embeddings is None:
+        mention_embeddings = np.zeros((0, 0), dtype=np.float32)
 
     mention_norms = (
         np.linalg.norm(mention_embeddings, axis=1).astype(np.float32, copy=False)
@@ -167,9 +185,9 @@ def score_pairs_with_checkpoint(
         else:
             raise
     model.eval()
-    effective_precision_mode = _resolve_effective_precision_mode(torch=torch, precision_mode=precision_mode, device=device)
-    runtime_meta["effective_precision_mode"] = effective_precision_mode
     runtime_meta["pair_scoring_strategy"] = "preencoded_mentions"
+    runtime_meta["mention_storage_device"] = "cpu"
+    runtime_meta["cuda_oom_fallback_used"] = False
     runtime_meta["score_batch_size"] = int(batch_size)
     runtime_meta["feature_build_seconds"] = 0.0
     runtime_meta["mention_encode_seconds"] = 0.0
@@ -187,25 +205,13 @@ def score_pairs_with_checkpoint(
     runtime_meta["feature_matrix_shape"] = [int(features.shape[0]), int(features.shape[1])] if features.ndim == 2 else [int(len(features))]
     runtime_meta["feature_matrix_bytes"] = int(features.nbytes)
 
-    encode_started_at = perf_counter()
-    mention_embeddings, mention_norms = _encode_mentions(
-        torch=torch,
-        model=model,
-        features=features,
-        batch_size=batch_size,
-        device=device,
-        precision_mode=effective_precision_mode,
-        show_progress=show_progress,
-    )
-    runtime_meta["mention_encode_seconds"] = float(perf_counter() - encode_started_at)
-    runtime_meta["mention_embedding_shape"] = (
-        [int(mention_embeddings.shape[0]), int(mention_embeddings.shape[1])]
-        if mention_embeddings.ndim == 2
-        else [int(len(mention_embeddings))]
-    )
-    runtime_meta["mention_embedding_bytes"] = int(mention_embeddings.nbytes)
-
-    def _score_pairs_frame(pairs_df: pd.DataFrame) -> pd.DataFrame:
+    def _score_pairs_frame(
+        pairs_df: pd.DataFrame,
+        *,
+        mention_embeddings: np.ndarray,
+        mention_norms: np.ndarray,
+        active_runtime_meta: dict[str, Any],
+    ) -> pd.DataFrame:
         idx1 = pairs_df["mention_id_1"].astype(str).map(mindex).values
         idx2 = pairs_df["mention_id_2"].astype(str).map(mindex).values
 
@@ -213,8 +219,8 @@ def score_pairs_with_checkpoint(
         p = pairs_df.loc[valid_mask].copy().reset_index(drop=True)
         idx1_valid = idx1[valid_mask].astype(int)
         idx2_valid = idx2[valid_mask].astype(int)
-        runtime_meta["pairs_total_rows"] = int(runtime_meta.get("pairs_total_rows", 0)) + int(len(pairs_df))
-        runtime_meta["pairs_valid_rows"] = int(runtime_meta.get("pairs_valid_rows", 0)) + int(len(p))
+        active_runtime_meta["pairs_total_rows"] = int(active_runtime_meta.get("pairs_total_rows", 0)) + int(len(pairs_df))
+        active_runtime_meta["pairs_valid_rows"] = int(active_runtime_meta.get("pairs_valid_rows", 0)) + int(len(p))
 
         sims = []
         total = (len(p) + batch_size - 1) // batch_size
@@ -235,7 +241,7 @@ def score_pairs_with_checkpoint(
             dot = np.einsum("ij,ij->i", z1, z2, optimize=True)
             denom = np.maximum(mention_norms[batch_idx1] * mention_norms[batch_idx2], 1e-8)
             sims.append((dot / denom).astype(np.float32, copy=False))
-        runtime_meta["pair_score_seconds"] = float(runtime_meta.get("pair_score_seconds", 0.0)) + float(
+        active_runtime_meta["pair_score_seconds"] = float(active_runtime_meta.get("pair_score_seconds", 0.0)) + float(
             perf_counter() - score_started_at
         )
 
@@ -262,80 +268,149 @@ def score_pairs_with_checkpoint(
         validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
         return out
 
-    if isinstance(pairs, (str, Path)):
-        pair_path = Path(pairs)
-        if not pair_path.exists():
-            raise FileNotFoundError(pair_path)
-        runtime_meta["pair_input_mode"] = "parquet_chunked"
-        if chunk_rows is None:
-            chunk_rows = max(10_000, int(batch_size) * 4)
+    def _run_scoring(active_device: str, active_runtime_meta: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+        effective_precision_mode = _resolve_effective_precision_mode(
+            torch=torch,
+            precision_mode=precision_mode,
+            device=active_device,
+        )
+        active_runtime_meta["resolved_device"] = str(active_device)
+        active_runtime_meta["effective_precision_mode"] = effective_precision_mode
+        encode_started_at = perf_counter()
+        mention_embeddings, mention_norms = _encode_mentions(
+            torch=torch,
+            model=model,
+            features=features,
+            batch_size=batch_size,
+            device=active_device,
+            precision_mode=effective_precision_mode,
+            show_progress=show_progress,
+        )
+        active_runtime_meta["mention_encode_seconds"] = float(perf_counter() - encode_started_at)
+        active_runtime_meta["mention_embedding_shape"] = (
+            [int(mention_embeddings.shape[0]), int(mention_embeddings.shape[1])]
+            if mention_embeddings.ndim == 2
+            else [int(len(mention_embeddings))]
+        )
+        active_runtime_meta["mention_embedding_bytes"] = int(mention_embeddings.nbytes)
 
-        out_rows: list[pd.DataFrame] = []
-        writer = None
-        writer_schema = None
-        if output_path is not None:
-            out_path = Path(output_path)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            if out_path.exists():
-                out_path.unlink()
-        else:
-            out_path = None
+        if isinstance(pairs, (str, Path)):
+            pair_path = Path(pairs)
+            if not pair_path.exists():
+                raise FileNotFoundError(pair_path)
+            active_runtime_meta["pair_input_mode"] = "parquet_chunked"
+            active_chunk_rows = chunk_rows
+            if active_chunk_rows is None:
+                active_chunk_rows = max(10_000, int(batch_size) * 4)
 
-        try:
-            import pyarrow as pa  # type: ignore
-            import pyarrow.parquet as pq  # type: ignore
-        except Exception as exc:
-            raise RuntimeError("Chunked parquet scoring requires pyarrow.") from exc
+            out_rows: list[pd.DataFrame] = []
+            writer = None
+            writer_schema = None
+            if output_path is not None:
+                out_path = Path(output_path)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if out_path.exists():
+                    out_path.unlink()
+            else:
+                out_path = None
 
-        parquet = pq.ParquetFile(pair_path)
-        batch_iter = parquet.iter_batches(batch_size=int(chunk_rows))
-        while True:
-            read_started_at = perf_counter()
             try:
-                batch = next(batch_iter)
-            except StopIteration:
-                break
-            runtime_meta["parquet_read_seconds"] = float(runtime_meta.get("parquet_read_seconds", 0.0)) + float(
-                perf_counter() - read_started_at
-            )
-            pandas_started_at = perf_counter()
-            pairs_chunk = batch.to_pandas()
-            runtime_meta["pandas_conversion_seconds"] = float(
-                runtime_meta.get("pandas_conversion_seconds", 0.0)
-            ) + float(perf_counter() - pandas_started_at)
-            scores_chunk = _score_pairs_frame(pairs_chunk)
-            if return_scores:
-                out_rows.append(scores_chunk)
-            if out_path is not None:
-                write_started_at = perf_counter()
-                table = pa.Table.from_pandas(scores_chunk, preserve_index=False)
-                if writer is None:
-                    writer_schema = table.schema
-                    writer = pq.ParquetWriter(out_path, writer_schema)
-                elif writer_schema is not None and table.schema != writer_schema:
-                    table = table.cast(writer_schema)
-                writer.write_table(table)
-                runtime_meta["parquet_write_seconds"] = float(runtime_meta.get("parquet_write_seconds", 0.0)) + float(
-                    perf_counter() - write_started_at
+                import pyarrow as pa  # type: ignore
+                import pyarrow.parquet as pq  # type: ignore
+            except Exception as exc:
+                raise RuntimeError("Chunked parquet scoring requires pyarrow.") from exc
+
+            parquet = pq.ParquetFile(pair_path)
+            batch_iter = parquet.iter_batches(batch_size=int(active_chunk_rows))
+            while True:
+                read_started_at = perf_counter()
+                try:
+                    batch = next(batch_iter)
+                except StopIteration:
+                    break
+                active_runtime_meta["parquet_read_seconds"] = float(
+                    active_runtime_meta.get("parquet_read_seconds", 0.0)
+                ) + float(perf_counter() - read_started_at)
+                pandas_started_at = perf_counter()
+                pairs_chunk = batch.to_pandas()
+                active_runtime_meta["pandas_conversion_seconds"] = float(
+                    active_runtime_meta.get("pandas_conversion_seconds", 0.0)
+                ) + float(perf_counter() - pandas_started_at)
+                scores_chunk = _score_pairs_frame(
+                    pairs_chunk,
+                    mention_embeddings=mention_embeddings,
+                    mention_norms=mention_norms,
+                    active_runtime_meta=active_runtime_meta,
                 )
+                if return_scores:
+                    out_rows.append(scores_chunk)
+                if out_path is not None:
+                    write_started_at = perf_counter()
+                    table = pa.Table.from_pandas(scores_chunk, preserve_index=False)
+                    if writer is None:
+                        writer_schema = table.schema
+                        writer = pq.ParquetWriter(out_path, writer_schema)
+                    elif writer_schema is not None and table.schema != writer_schema:
+                        table = table.cast(writer_schema)
+                    writer.write_table(table)
+                    active_runtime_meta["parquet_write_seconds"] = float(
+                        active_runtime_meta.get("parquet_write_seconds", 0.0)
+                    ) + float(perf_counter() - write_started_at)
 
-        if writer is not None:
-            writer.close()
-        if out_path is not None and writer is None:
-            save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), out_path, index=False)
+            if writer is not None:
+                writer.close()
+            if out_path is not None and writer is None:
+                save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), out_path, index=False)
 
-        if return_scores:
-            if not out_rows:
-                empty = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
-                return (empty, runtime_meta) if return_runtime_meta else empty
-            out = pd.concat(out_rows, ignore_index=True)
-            validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
-            return (out, runtime_meta) if return_runtime_meta else out
-        empty = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
-        return (empty, runtime_meta) if return_runtime_meta else empty
+            if return_scores:
+                if not out_rows:
+                    return pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), active_runtime_meta
+                out = pd.concat(out_rows, ignore_index=True)
+                validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
+                return out, active_runtime_meta
+            return pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), active_runtime_meta
 
-    runtime_meta["pair_input_mode"] = "dataframe"
-    out = _score_pairs_frame(pairs)
-    if output_path is not None:
-        save_parquet(out, output_path, index=False)
+        active_runtime_meta["pair_input_mode"] = "dataframe"
+        out = _score_pairs_frame(
+            pairs,
+            mention_embeddings=mention_embeddings,
+            mention_norms=mention_norms,
+            active_runtime_meta=active_runtime_meta,
+        )
+        if output_path is not None:
+            save_parquet(out, output_path, index=False)
+        return out, active_runtime_meta
+
+    try:
+        out, runtime_meta = _run_scoring(device, runtime_meta)
+    except Exception as exc:
+        can_retry_on_cpu = (
+            str(requested_device).strip().lower() == "auto"
+            and str(device).startswith("cuda")
+            and _is_cuda_oom_error(torch, exc)
+        )
+        if not can_retry_on_cpu:
+            raise
+        warnings.warn(
+            "Pair scoring hit CUDA OOM; retrying on CPU for this run.",
+            RuntimeWarning,
+        )
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        _best_effort_clear_cuda_cache(torch)
+        retry_runtime_meta = dict(runtime_meta)
+        retry_runtime_meta["resolved_device"] = "cpu"
+        retry_runtime_meta["fallback_reason"] = "pair_scoring_cuda_oom_retry_cpu"
+        retry_runtime_meta["cuda_oom_fallback_used"] = True
+        retry_runtime_meta["mention_encode_seconds"] = 0.0
+        retry_runtime_meta["pair_score_seconds"] = 0.0
+        retry_runtime_meta["parquet_read_seconds"] = 0.0
+        retry_runtime_meta["pandas_conversion_seconds"] = 0.0
+        retry_runtime_meta["parquet_write_seconds"] = 0.0
+        retry_runtime_meta["pairs_total_rows"] = 0
+        retry_runtime_meta["pairs_valid_rows"] = 0
+        out, runtime_meta = _run_scoring("cpu", retry_runtime_meta)
+
     return (out, runtime_meta) if return_runtime_meta else out

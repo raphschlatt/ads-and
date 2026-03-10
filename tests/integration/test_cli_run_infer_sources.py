@@ -105,6 +105,10 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "cache_hit": True,
                 "generation_mode": "cache",
                 "name_count": int(len(mentions)),
+                "tensorflow_memory_growth_enabled": None,
+                "tensorflow_memory_growth_error": None,
+                "tensorflow_cleanup_attempted": False,
+                "tensorflow_cleanup_error": None,
             }
             return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 50), dtype=np.float32)
@@ -113,6 +117,10 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "cache_hit": False,
             "generation_mode": "chars2vec",
             "name_count": int(len(mentions)),
+            "tensorflow_memory_growth_enabled": True,
+            "tensorflow_memory_growth_error": None,
+            "tensorflow_cleanup_attempted": True,
+            "tensorflow_cleanup_error": None,
         }
         return (arr, meta) if _kwargs.get("return_meta") else arr
 
@@ -182,6 +190,9 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "cuda_probe_error": None,
             "model_to_cuda_error": None,
             "effective_precision_mode": str(_kwargs.get("precision_mode", "fp32")),
+            "pair_scoring_strategy": "preencoded_mentions",
+            "mention_storage_device": "cpu",
+            "cuda_oom_fallback_used": False,
         }
         if empty_chunked_score_return and isinstance(pairs, (str, Path)) and not _kwargs.get("return_scores", True):
             empty = pd.DataFrame(columns=out.columns)
@@ -321,12 +332,15 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert refs_df.loc[0, "AuthorUID"][1].startswith("my_ads_2026::blk.r.1")
     assert "author_display_name" in entities.columns
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
+    assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert context["runtime"]["specter"]["fallback_reason"] == "torch_cuda_unavailable"
     assert context["runtime"]["pair_building"]["cpu_workers_effective"] == 4
     assert context["runtime"]["clustering"]["cpu_workers_effective"] == 4
+    assert preflight["runtime"]["chars2vec"]["tensorflow_cleanup_attempted"] is True
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
     assert preflight["runtime"]["clustering"]["cpu_sharding_enabled"] is True
+    assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
@@ -349,6 +363,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "\r" not in captured.err
     payload_stdout = json.loads(captured.out)
     assert payload_stdout["run_id"] == payload["run_id"]
+    assert seen["specter_kwargs"]["reuse_model"] is False
     assert seen["pair_kwargs"]["num_workers"] is None
     assert seen["pair_kwargs"]["sharding_mode"] == "auto"
     assert seen["pair_kwargs"]["min_pairs_per_worker"] == 1_000_000
@@ -413,6 +428,7 @@ def test_cli_run_infer_sources_passes_specter_overrides(monkeypatch, tmp_path: P
     preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
     assert seen["specter_kwargs"]["batch_size"] == 48
     assert seen["specter_kwargs"]["precision_mode"] == "amp_bf16"
+    assert seen["specter_kwargs"]["reuse_model"] is False
     assert preflight["runtime"]["specter"]["effective_precision_mode"] == "amp_bf16"
 
 
