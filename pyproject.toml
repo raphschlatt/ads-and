@@ -71,6 +71,5 @@ include = [
   "/README.md",
   "/LICENSE",
   "/CITATION.cff",
-  "/requirements-research.txt",
   "/docs",
 ]

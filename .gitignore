@@ -12,6 +12,3 @@ data/interim/
 data/processed/
 data/subsets/cache/
 data/subsets/manifests/*.parquet
-
-# Notebook checkpoints
-notebooks/**/.ipynb_checkpoints/

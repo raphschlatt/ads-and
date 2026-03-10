@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Mapping
@@ -27,6 +25,8 @@ from author_name_disambiguation.common.pipeline_reports import (
     build_cluster_qc,
     build_infer_stage_metrics,
     build_pairs_qc,
+    default_run_id,
+    load_json,
     write_json,
 )
 from author_name_disambiguation.common.run_report import evaluate_go_no_go, write_go_no_go_report
@@ -43,16 +43,6 @@ if TYPE_CHECKING:
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 UID_SCOPE_VALUES = {"dataset", "local", "registry"}
 INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full"}
-
-
-def _load_json(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def _default_run_id(stage: str) -> str:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stage}_{timestamp}_{uuid.uuid4().hex[:8]}"
 
 
 def _ensure_dir(path: str | Path) -> Path:
@@ -213,7 +203,7 @@ def _resolve_model_bundle(model_bundle: str | Path) -> dict[str, Any]:
         if not path.exists():
             raise FileNotFoundError(f"Model bundle is missing required file: {path}")
 
-    manifest = _load_json(manifest_path)
+    manifest = load_json(manifest_path)
     schema_version = str(manifest.get("bundle_schema_version", "")).strip()
     if schema_version != MODEL_BUNDLE_SCHEMA_VERSION:
         raise ValueError(
@@ -226,7 +216,7 @@ def _resolve_model_bundle(model_bundle: str | Path) -> dict[str, Any]:
         raise ValueError("bundle_manifest.json must contain selected_eps and best_threshold.")
 
     model_cfg = load_yaml_like(model_cfg_path, default_resource="resources/infer_runs/full.yaml", param_name="model_config")
-    clustering_payload = _load_json(clustering_path)
+    clustering_payload = load_json(clustering_path)
     eps_resolution = dict(clustering_payload.get("eps_resolution", {}) or {})
     if eps_resolution.get("selected_eps") is None:
         eps_resolution["selected_eps"] = float(selected_eps)
@@ -491,7 +481,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     output_root = Path(request.output_root).expanduser().resolve()
     dirs = _build_output_dirs(output_root)
-    run_id = _default_run_id("infer_sources")
+    run_id = default_run_id("infer_sources")
     references_present = request.references_path is not None
     bootstrap_runtime = _probe_bootstrap_runtime(str(request.device))
     _ui_info(
@@ -524,7 +514,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     }
 
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
-        go_payload = _load_json(result_paths["go_no_go"])
+        go_payload = load_json(result_paths["go_no_go"])
         _ui_start("Load inputs")
         _ui_skip("Reused existing infer outputs.")
         return InferSourcesResult(

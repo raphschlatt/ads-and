@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -9,12 +11,22 @@ import pandas as pd
 from author_name_disambiguation.common.io_schema import CLUSTER_REQUIRED_COLUMNS, MENTION_REQUIRED_COLUMNS, validate_columns
 
 
+def load_json(path: str | Path) -> dict[str, Any]:
+    with Path(path).open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def write_json(payload: Mapping[str, Any], output_path: str | Path) -> Path:
     p = Path(output_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8") as f:
         json.dump(dict(payload), f, indent=2)
     return p
+
+
+def default_run_id(stage: str, *, tag: str = "") -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stage}_{ts}_{tag}{uuid.uuid4().hex[:8]}"
 
 
 def _safe_load_json(path: str | Path) -> dict[str, Any] | None:

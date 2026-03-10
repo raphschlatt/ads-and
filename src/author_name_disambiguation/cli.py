@@ -42,6 +42,8 @@ from author_name_disambiguation.common.pipeline_reports import (
     build_pairs_qc,
     build_train_stage_metrics,
     build_subset_summary,
+    default_run_id,
+    load_json,
     write_compare_train_to_baseline,
     write_json,
 )
@@ -102,14 +104,8 @@ def _build_public_workspace_paths(args) -> dict[str, Any]:
     )
 
 
-def _load_json(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _default_run_id(stage: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{stage}_{ts}_cli{uuid.uuid4().hex[:8]}"
+def _cli_run_id(stage: str) -> str:
+    return default_run_id(stage, tag="cli")
 
 
 def _configure_library_noise(quiet_libraries: bool) -> None:
@@ -299,7 +295,7 @@ def _resolve_model_run_for_inference(
         raise FileNotFoundError(
             f"Missing train manifest for model_run_id={model_run_id}: {manifest_path}"
         )
-    train_manifest = _load_json(manifest_path)
+    train_manifest = load_json(manifest_path)
     best_checkpoint = Path(str(train_manifest.get("best_checkpoint", ""))).expanduser()
     if not best_checkpoint.exists():
         raise FileNotFoundError(
@@ -320,7 +316,7 @@ def _resolve_model_run_for_inference(
         raise FileNotFoundError(
             f"Missing clustering metadata for model_run_id={model_run_id}: {cluster_used_path}"
         )
-    cluster_used_payload = _load_json(cluster_used_path)
+    cluster_used_payload = load_json(cluster_used_path)
     eps_resolution = dict(cluster_used_payload.get("eps_resolution", {}) or {})
     selected_eps = eps_resolution.get("selected_eps")
     if selected_eps is None:
@@ -335,7 +331,7 @@ def _resolve_model_run_for_inference(
     selected_eps = float(selected_eps)
 
     context_path = metrics_dir / "00_context.json"
-    context_payload = _load_json(context_path) if context_path.exists() else {}
+    context_payload = load_json(context_path) if context_path.exists() else {}
 
     run_cfg = dict(context_payload.get("run_config_payload") or {})
     run_cfg_path = context_payload.get("run_config")
@@ -389,7 +385,7 @@ def _write_model_bundle(
     with model_cfg_dst.open("w", encoding="utf-8") as f:
         yaml.safe_dump(dict(model_info["model_cfg"]), f, sort_keys=False)
 
-    cluster_used_payload = _load_json(model_info["cluster_used_path"])
+    cluster_used_payload = load_json(model_info["cluster_used_path"])
     eps_resolution = dict(cluster_used_payload.get("eps_resolution", {}) or {})
     if eps_resolution.get("selected_eps") is None:
         eps_resolution["selected_eps"] = float(model_info["selected_eps"])
@@ -1031,7 +1027,7 @@ def cmd_run_train_stage(args):
         gate_cfg = load_gate_config(args.gates_config)
 
         stage = args.run_stage
-        run_id = args.run_id or _default_run_id(stage)
+        run_id = args.run_id or _cli_run_id(stage)
         run_dirs = build_run_dirs(data_cfg, art_cfg, run_id)
         _ensure_run_dirs(
             run_dirs,
@@ -1360,8 +1356,8 @@ def cmd_run_train_stage(args):
         ):
             lspo_mentions_split = read_parquet(lspo_split_shared_path)
             lspo_pairs = read_parquet(lspo_pairs_shared_path)
-            split_meta = _load_json(split_meta_shared_path)
-            pairs_qc = _load_json(pairs_qc_shared_path)
+            split_meta = load_json(split_meta_shared_path)
+            pairs_qc = load_json(pairs_qc_shared_path)
             ui.skip(f"Reused LSPO split+pairs ({len(lspo_pairs)} rows).")
         else:
             lspo_mentions_split, split_meta = assign_lspo_splits(
@@ -1462,7 +1458,7 @@ def cmd_run_train_stage(args):
         ui.start("Train NAND model")
         train_cache_hit = False
         if train_manifest_path.exists() and not args.force:
-            train_manifest = _load_json(train_manifest_path)
+            train_manifest = load_json(train_manifest_path)
             best_ckpt = Path(str(train_manifest.get("best_checkpoint", "")))
             if best_ckpt.exists():
                 train_cache_hit = True
@@ -1590,8 +1586,8 @@ def cmd_run_train_stage(args):
             extras={"command": command_name},
         )
         if stage_metrics_path.exists() and go_no_go_path.exists() and not args.force:
-            stage_metrics = _load_json(stage_metrics_path)
-            go = _load_json(go_no_go_path)
+            stage_metrics = load_json(stage_metrics_path)
+            go = load_json(go_no_go_path)
             ui.skip(f"Reused stage reports (GO={go.get('go')}).")
         else:
             determinism_paths = [manifest_paths.lspo_primary] if manifest_paths.lspo_primary.exists() else [manifest_paths.lspo_legacy]
@@ -1714,7 +1710,7 @@ def cmd_run_cluster_test_report(args):
             if not p.exists():
                 raise FileNotFoundError(f"Missing required train artifact for clustering report: {p}")
 
-        context_payload = _load_json(context_path)
+        context_payload = load_json(context_path)
         if str(context_payload.get("pipeline_scope", "")).strip().lower() != "train":
             raise ValueError(
                 f"Expected pipeline_scope=train in {context_path}, got {context_payload.get('pipeline_scope')!r}."
@@ -1729,21 +1725,21 @@ def cmd_run_cluster_test_report(args):
             raise FileNotFoundError(
                 f"Missing stage metrics for run_stage={run_stage}: {stage_metrics_path}"
             )
-        stage_metrics = _load_json(stage_metrics_path)
+        stage_metrics = load_json(stage_metrics_path)
         expected_subset_cache_key = str(stage_metrics.get("subset_cache_key", "")).strip()
         if not expected_subset_cache_key:
             raise ValueError(
                 f"subset_cache_key missing in {stage_metrics_path}; cannot verify reproducibility."
             )
 
-        train_manifest = _load_json(train_manifest_path)
+        train_manifest = load_json(train_manifest_path)
         seed_runs = _resolve_train_seed_runs(train_manifest)
         for row in seed_runs:
             ckpt = Path(row["checkpoint"])
             if not ckpt.exists():
                 raise FileNotFoundError(f"Checkpoint for seed={row['seed']} does not exist: {ckpt}")
 
-        cluster_used_payload = _load_json(cluster_used_path)
+        cluster_used_payload = load_json(cluster_used_path)
         selected_eps = _resolve_selected_eps(cluster_used_payload, source_path=cluster_used_path)
         cluster_config_used = dict(cluster_used_payload.get("cluster_config_used", {}) or {})
         if len(cluster_config_used) == 0:

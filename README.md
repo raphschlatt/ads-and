@@ -50,7 +50,7 @@ Do not start a large infer run unless that check prints `torch.cuda.is_available
 For optional local research tooling:
 
 ```bash
-python -m pip install -r requirements-research.txt
+python -m pip install -e ".[dev,research]"
 ```
 
 ## Public CLI
