@@ -71,22 +71,21 @@ def _build_index(mentions: pd.DataFrame) -> Dict[str, int]:
 
 
 def _pairs_to_index_arrays(pairs: pd.DataFrame, mention_index: Dict[str, int], labeled_only: bool = True):
-    arr_1, arr_2, labels = [], [], []
-    for row in pairs.itertuples(index=False):
-        m1 = str(row.mention_id_1)
-        m2 = str(row.mention_id_2)
-        if m1 not in mention_index or m2 not in mention_index:
-            continue
-        label = getattr(row, "label", None)
-        if labeled_only and (label is None or pd.isna(label)):
-            continue
-        arr_1.append(mention_index[m1])
-        arr_2.append(mention_index[m2])
-        labels.append(int(label) if label is not None and not pd.isna(label) else -1)
+    idx1 = pairs["mention_id_1"].astype(str).map(mention_index)
+    idx2 = pairs["mention_id_2"].astype(str).map(mention_index)
+    label_series = pairs["label"] if "label" in pairs.columns else pd.Series([None] * len(pairs), index=pairs.index)
 
-    if not arr_1:
+    valid = idx1.notna() & idx2.notna()
+    if labeled_only:
+        valid &= label_series.notna()
+
+    if not bool(valid.any()):
         return np.array([], dtype=np.int64), np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-    return np.asarray(arr_1, dtype=np.int64), np.asarray(arr_2, dtype=np.int64), np.asarray(labels, dtype=np.int64)
+    return (
+        idx1[valid].astype(np.int64).to_numpy(),
+        idx2[valid].astype(np.int64).to_numpy(),
+        label_series[valid].fillna(-1).astype(np.int64).to_numpy(),
+    )
 
 
 def _label_class_counts(labels: np.ndarray) -> Dict[str, int]:
@@ -153,26 +152,42 @@ def _compute_best_threshold(
         }
         return float(default_threshold), stats, "fallback_no_negatives", "fallback_default"
 
-    thresholds = np.linspace(-1.0, 1.0, num=2001)
-    best_key = (-1.0, -1.0)
-    best_thr = float(default_threshold)
-    best_stats: Dict[str, float] = {}
+    thresholds = np.linspace(-1.0, 1.0, num=2001, dtype=np.float64)
+    sim_arr = np.asarray(sim, dtype=np.float64)
+    labels_arr = np.asarray(labels, dtype=np.int64)
+    order = np.argsort(sim_arr, kind="mergesort")
+    sim_sorted = sim_arr[order]
+    labels_sorted = labels_arr[order]
+    pos_sorted = (labels_sorted == 1).astype(np.int64)
+    neg_sorted = (labels_sorted == 0).astype(np.int64)
 
-    for thr in thresholds:
-        pred = (sim >= thr).astype(int)
-        f1 = f1_score(labels, pred, zero_division=0)
-        edge_margin = min(float(thr + 1.0), float(1.0 - thr))
-        key = (float(f1), edge_margin)
-        if key > best_key:
-            best_key = key
-            best_thr = float(thr)
-            best_stats = {
-                "f1": float(f1),
-                "precision": float(precision_score(labels, pred, zero_division=0)),
-                "recall": float(recall_score(labels, pred, zero_division=0)),
-                "accuracy": float(accuracy_score(labels, pred)),
-            }
+    pos_prefix = np.concatenate(([0], np.cumsum(pos_sorted, dtype=np.int64)))
+    neg_prefix = np.concatenate(([0], np.cumsum(neg_sorted, dtype=np.int64)))
+    idx = np.searchsorted(sim_sorted, thresholds, side="left")
 
+    total_pos = counts["pos"]
+    total_neg = counts["neg"]
+    total_count = max(1, len(labels_arr))
+
+    tp = total_pos - pos_prefix[idx]
+    fp = total_neg - neg_prefix[idx]
+    fn = total_pos - tp
+    tn = total_neg - fp
+
+    precision = np.divide(tp, tp + fp, out=np.zeros_like(tp, dtype=np.float64), where=(tp + fp) > 0)
+    recall = np.divide(tp, total_pos, out=np.zeros_like(tp, dtype=np.float64), where=total_pos > 0)
+    f1 = np.divide(2 * precision * recall, precision + recall, out=np.zeros_like(precision), where=(precision + recall) > 0)
+    accuracy = (tp + tn) / total_count
+    edge_margin = np.minimum(thresholds + 1.0, 1.0 - thresholds)
+    best_idx = int(np.lexsort((edge_margin, f1))[-1])
+
+    best_thr = float(thresholds[best_idx])
+    best_stats = {
+        "f1": float(f1[best_idx]),
+        "precision": float(precision[best_idx]),
+        "recall": float(recall[best_idx]),
+        "accuracy": float(accuracy[best_idx]),
+    }
     return best_thr, best_stats, "ok", "val_f1_opt"
 
 

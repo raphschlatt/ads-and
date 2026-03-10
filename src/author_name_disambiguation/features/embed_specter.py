@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import logging
 import os
@@ -50,6 +51,44 @@ def _coerce_precomputed_embedding(item: Any, dim: int = _SPECTER_DIM) -> np.ndar
 def _resolve_device(torch, device: str) -> str:
     resolved, _ = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
     return resolved
+
+
+def _resolve_effective_precision_mode(torch, precision_mode: str, device: str) -> str:
+    mode = str(precision_mode or "auto").strip().lower()
+    if mode not in {"auto", "fp32", "amp_bf16"}:
+        warnings.warn(
+            f"Unknown precision_mode={precision_mode!r}; falling back to auto.",
+            RuntimeWarning,
+        )
+        mode = "auto"
+    if mode == "fp32":
+        return "fp32"
+    if not str(device).startswith("cuda"):
+        if mode == "amp_bf16":
+            warnings.warn("precision_mode=amp_bf16 requested on non-CUDA device; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+
+    is_supported = True
+    try:
+        if hasattr(torch.cuda, "is_bf16_supported"):
+            is_supported = bool(torch.cuda.is_bf16_supported())
+    except Exception:
+        is_supported = False
+
+    if mode == "auto":
+        return "amp_bf16" if is_supported else "fp32"
+    if not is_supported:
+        warnings.warn("CUDA BF16 is not supported in this environment; falling back to fp32.", RuntimeWarning)
+        return "fp32"
+    return "amp_bf16"
+
+
+def _autocast_context(torch, precision_mode: str):
+    if str(precision_mode) == "amp_bf16":
+        if hasattr(torch, "autocast"):
+            return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
+    return nullcontext()
 
 
 def summarize_precomputed_embeddings(
@@ -178,6 +217,7 @@ def generate_specter_embeddings(
     batch_size: int = 16,
     max_length: int = 256,
     device: str = "auto",
+    precision_mode: str = "auto",
     prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
     show_progress: bool = False,
@@ -185,6 +225,7 @@ def generate_specter_embeddings(
     reuse_model: bool = True,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+    batch_size = max(1, int(batch_size))
     titles = mentions["title"].fillna("").astype(str).tolist()
     abstracts = mentions["abstract"].fillna("").astype(str).tolist()
     texts = [_to_text(t, a) for t, a in zip(titles, abstracts)]
@@ -297,6 +338,8 @@ def generate_specter_embeddings(
         else:
             raise
     model.eval()
+    effective_precision_mode = _resolve_effective_precision_mode(torch=torch, precision_mode=precision_mode, device=device)
+    runtime_meta["effective_precision_mode"] = effective_precision_mode
 
     out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
     for idx, item in enumerate(precomputed_vectors):
@@ -304,6 +347,7 @@ def generate_specter_embeddings(
             out[idx] = item
 
     vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
+    vectors_for_indices = sorted(vectors_for_indices, key=lambda idx: (len(texts[idx]), idx))
     total = (len(vectors_for_indices) + batch_size - 1) // batch_size
     starts = iter_progress(
         range(0, len(vectors_for_indices), batch_size),
@@ -324,7 +368,8 @@ def generate_specter_embeddings(
                 return_tensors="pt",
             )
             enc = {k: v.to(device) for k, v in enc.items()}
-            batch_out = model(**enc)
+            with _autocast_context(torch, effective_precision_mode):
+                batch_out = model(**enc)
             cls = batch_out.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
             out[np.asarray(batch_indices, dtype=np.int64)] = cls
 
@@ -350,6 +395,7 @@ def get_or_create_specter_embeddings(
     batch_size: int = 16,
     max_length: int = 256,
     device: str = "auto",
+    precision_mode: str = "auto",
     prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
     show_progress: bool = False,
@@ -396,6 +442,7 @@ def get_or_create_specter_embeddings(
         batch_size=batch_size,
         max_length=max_length,
         device=device,
+        precision_mode=precision_mode,
         prefer_precomputed=prefer_precomputed,
         use_stub_if_missing=use_stub_if_missing,
         show_progress=show_progress,

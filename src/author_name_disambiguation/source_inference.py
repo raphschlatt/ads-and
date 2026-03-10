@@ -549,6 +549,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     max_pairs_per_block = infer_overrides.get("max_pairs_per_block", model_info["run_cfg"].get("max_pairs_per_block"))
     max_pairs_per_block = None if max_pairs_per_block is None else int(max_pairs_per_block)
     score_batch_size = int(infer_overrides.get("score_batch_size", 8192))
+    specter_batch_size = int(infer_overrides.get("specter_batch_size", 32))
+    specter_precision_mode = str(infer_overrides.get("specter_precision_mode", "auto")).strip().lower()
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
     score_chunked_threshold = int(infer_overrides.get("score_chunked_threshold", 500_000))
     pair_chunk_rows = int(infer_overrides.get("pair_chunk_rows", 200_000))
@@ -737,7 +739,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _ui_info(
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
         f"precomputed={_format_count(precomputed_embeddings['mentions']['precomputed_embedding_count'])} | "
-        f"batch_size=32 | device={str(request.device)}"
+        f"batch_size={_format_count(specter_batch_size)} | device={str(request.device)} | "
+        f"precision={specter_precision_mode}"
     )
     text_result = get_or_create_specter_embeddings(
         mentions=mentions,
@@ -748,8 +751,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         text_adapter_name=model_info["model_cfg"].get("representation", {}).get("text_adapter_name"),
         text_adapter_alias=model_info["model_cfg"].get("representation", {}).get("text_adapter_alias", "specter2"),
         max_length=int(model_info["model_cfg"].get("representation", {}).get("max_length", 256)),
-        batch_size=32,
+        batch_size=specter_batch_size,
         device=str(request.device),
+        precision_mode=specter_precision_mode,
         prefer_precomputed=True,
         use_stub_if_missing=False,
         show_progress=bool(request.progress),
@@ -894,6 +898,17 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"precision={pair_score_runtime_meta.get('effective_precision_mode') or str(request.precision_mode)} "
         f"in {_format_elapsed(perf_counter() - pair_inference_started_at)}"
     )
+    if any(
+        float(pair_score_runtime_meta.get(key) or 0.0) > 0.0
+        for key in ("parquet_read_seconds", "pandas_conversion_seconds", "pair_score_seconds", "parquet_write_seconds")
+    ):
+        _ui_info(
+            "pair_score_timing "
+            f"read={_format_elapsed(float(pair_score_runtime_meta.get('parquet_read_seconds') or 0.0))} | "
+            f"to_pandas={_format_elapsed(float(pair_score_runtime_meta.get('pandas_conversion_seconds') or 0.0))} | "
+            f"score={_format_elapsed(float(pair_score_runtime_meta.get('pair_score_seconds') or 0.0))} | "
+            f"write={_format_elapsed(float(pair_score_runtime_meta.get('parquet_write_seconds') or 0.0))}"
+        )
 
     clustering_started_at = perf_counter()
     _ui_start("Clustering")

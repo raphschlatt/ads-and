@@ -10,6 +10,54 @@ from author_name_disambiguation.approaches.nand.cluster import (
 )
 
 
+def _apply_constraints_reference(dist: np.ndarray, block_mentions: pd.DataFrame, constraints: dict) -> np.ndarray:
+    if not constraints or not constraints.get("enabled", False):
+        return dist
+
+    out = dist.copy()
+    max_year_gap = int(constraints.get("max_year_gap", 30))
+    enforce_name_conflict = bool(constraints.get("enforce_name_conflict", True))
+    constraint_mode = str(constraints.get("constraint_mode", "soft")).lower()
+    name_conflict_mode = str(constraints.get("name_conflict_mode", constraint_mode)).lower()
+    year_gap_mode = str(constraints.get("year_gap_mode", constraint_mode)).lower()
+    name_conflict_min_distance = float(constraints.get("name_conflict_min_distance", 1.0))
+    year_gap_min_distance = float(constraints.get("year_gap_min_distance", 1.0))
+
+    authors = block_mentions["author_raw"].fillna("").astype(str).tolist()
+    years = block_mentions["year"].tolist()
+
+    n = len(block_mentions)
+    for i in range(n):
+        for j in range(i + 1, n):
+            force_name = False
+            force_year = False
+            if enforce_name_conflict and _name_conflict(authors[i], authors[j]):
+                force_name = True
+            yi, yj = years[i], years[j]
+            if (yi is not None and yj is not None) and not (pd.isna(yi) or pd.isna(yj)):
+                if abs(int(yi) - int(yj)) > max_year_gap:
+                    force_year = True
+
+            if not (force_name or force_year):
+                continue
+
+            force_hard = (force_name and name_conflict_mode == "hard") or (force_year and year_gap_mode == "hard")
+            if force_hard:
+                out[i, j] = 1.0
+                out[j, i] = 1.0
+                continue
+
+            if force_name:
+                out[i, j] = max(out[i, j], name_conflict_min_distance)
+                out[j, i] = max(out[j, i], name_conflict_min_distance)
+            if force_year:
+                out[i, j] = max(out[i, j], year_gap_min_distance)
+                out[j, i] = max(out[j, i], year_gap_min_distance)
+
+    np.fill_diagonal(out, 0.0)
+    return out
+
+
 def test_name_conflict_handles_diacritics_and_initials():
     assert _name_conflict("Allègre, C. J.", "Allegre, CJ") is False
     assert _name_conflict("Smith, John", "Smith, Jane") is True
@@ -56,6 +104,41 @@ def test_hard_constraints_force_distance_to_one():
     out = _apply_constraints(dist, block_mentions, constraints)
     assert np.isclose(out[0, 1], 1.0)
     assert np.isclose(out[1, 0], 1.0)
+
+
+def test_apply_constraints_matches_reference_loop_for_mixed_block():
+    dist = np.array(
+        [
+            [0.0, 0.2, 0.4, 0.6],
+            [0.2, 0.0, 0.3, 0.7],
+            [0.4, 0.3, 0.0, 0.5],
+            [0.6, 0.7, 0.5, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    block_mentions = pd.DataFrame(
+        [
+            {"author_raw": "Smith, John", "year": 1990},
+            {"author_raw": "Smith, Jane", "year": 2025},
+            {"author_raw": "Wang, Y.", "year": 1992},
+            {"author_raw": "Wang, Yong", "year": None},
+        ]
+    )
+    constraints = {
+        "enabled": True,
+        "constraint_mode": "soft",
+        "name_conflict_mode": "hard",
+        "year_gap_mode": "soft",
+        "max_year_gap": 20,
+        "enforce_name_conflict": True,
+        "name_conflict_min_distance": 0.75,
+        "year_gap_min_distance": 0.65,
+    }
+
+    expected = _apply_constraints_reference(dist, block_mentions, constraints)
+    out = _apply_constraints(dist, block_mentions, constraints)
+
+    np.testing.assert_allclose(out, expected)
 
 
 def test_name_conflict_can_be_hard_while_year_gap_remains_soft():

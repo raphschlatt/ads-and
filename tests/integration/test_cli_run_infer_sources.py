@@ -117,6 +117,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
         return (arr, meta) if _kwargs.get("return_meta") else arr
 
     def _text(mentions, output_path, force_recompute=False, **_kwargs):
+        seen["specter_kwargs"] = dict(_kwargs)
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
@@ -152,7 +153,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "torch_cuda_available": False,
             "cuda_probe_error": None,
             "model_to_cuda_error": None,
-            "effective_precision_mode": None,
+            "effective_precision_mode": str(_kwargs.get("precision_mode", "auto")),
             "column_present": False,
             "precomputed_embedding_count": 0,
             "recomputed_embedding_count": len(mentions),
@@ -356,6 +357,63 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert seen["cluster_kwargs"]["sharding_mode"] == "auto"
     assert seen["cluster_kwargs"]["min_pairs_per_worker"] == 1_000_000
     assert int(seen["cluster_kwargs"]["ram_budget_bytes"]) > 0
+
+
+def test_cli_run_infer_sources_passes_specter_overrides(monkeypatch, tmp_path: Path):
+    publications_path, references_path = _write_dataset(tmp_path, with_references=True)
+    bundle_dir = _write_bundle(tmp_path)
+    seen = _apply_fast_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
+        lambda _device: {
+            "requested_device": "auto",
+            "resolved_device": "cpu",
+            "gpu_name": None,
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "fallback_reason": "torch_cuda_unavailable",
+            "cuda_probe_error": None,
+        },
+    )
+    original_resolve_infer_run_cfg = source_inference._resolve_infer_run_cfg
+
+    def _patched_resolve_infer_run_cfg(infer_stage):
+        cfg = original_resolve_infer_run_cfg(infer_stage)
+        cfg["infer_overrides"] = dict(cfg.get("infer_overrides", {}) or {})
+        cfg["infer_overrides"]["specter_batch_size"] = 48
+        cfg["infer_overrides"]["specter_precision_mode"] = "amp_bf16"
+        return cfg
+
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._resolve_infer_run_cfg",
+        _patched_resolve_infer_run_cfg,
+    )
+
+    output_root = tmp_path / "out_specter_overrides"
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-sources",
+            "--publications-path",
+            str(publications_path),
+            "--references-path",
+            str(references_path),
+            "--output-root",
+            str(output_root),
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            str(bundle_dir),
+            "--no-progress",
+        ]
+    )
+    args.func(args)
+
+    preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
+    assert seen["specter_kwargs"]["batch_size"] == 48
+    assert seen["specter_kwargs"]["precision_mode"] == "amp_bf16"
+    assert preflight["runtime"]["specter"]["effective_precision_mode"] == "amp_bf16"
 
 
 def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):

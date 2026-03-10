@@ -4,7 +4,10 @@ import builtins
 import sys
 from types import SimpleNamespace
 
+import numpy as np
+import pandas as pd
 import pytest
+import torch
 
 from author_name_disambiguation.features import embed_specter
 
@@ -100,3 +103,57 @@ def test_load_specter_components_adapter_backend_loads_adapter(monkeypatch: pyte
     assert isinstance(model, _FakeAutoAdapterModel)
     assert model.loaded_adapter_name == "allenai/specter2"
     assert model.loaded_adapter_kwargs == {"source": "hf", "set_active": True, "load_as": "specter2"}
+
+
+class _LengthSortingTokenizer:
+    def __init__(self):
+        self.seen_chunks: list[list[str]] = []
+
+    def __call__(self, chunk, padding=True, truncation=True, max_length=256, return_tensors="pt"):
+        del padding, truncation, max_length, return_tensors
+        self.seen_chunks.append(list(chunk))
+        lengths = torch.tensor([[len(text)] for text in chunk], dtype=torch.int64)
+        return {"input_ids": lengths}
+
+
+class _LengthSortingModel:
+    def to(self, _device):
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, input_ids):
+        out = torch.zeros((input_ids.shape[0], 1, 768), dtype=torch.float32, device=input_ids.device)
+        out[:, 0, 0] = input_ids[:, 0].to(torch.float32)
+        return SimpleNamespace(last_hidden_state=out)
+
+
+def test_generate_specter_embeddings_length_batches_and_cpu_auto_precision(monkeypatch: pytest.MonkeyPatch):
+    tokenizer = _LengthSortingTokenizer()
+    model = _LengthSortingModel()
+    monkeypatch.setattr(
+        embed_specter,
+        "_load_specter_components",
+        lambda **_kwargs: (tokenizer, model),
+    )
+
+    mentions = pd.DataFrame(
+        {
+            "title": ["a", "aaaa", "aa"],
+            "abstract": ["", "", ""],
+        }
+    )
+
+    out, meta = embed_specter.generate_specter_embeddings(
+        mentions=mentions,
+        batch_size=2,
+        device="cpu",
+        precision_mode="auto",
+        return_meta=True,
+    )
+
+    assert out.shape == (3, 768)
+    np.testing.assert_allclose(out[:, 0], np.array([1.0, 4.0, 2.0], dtype=np.float32))
+    assert tokenizer.seen_chunks == [["a", "aa"], ["aaaa"]]
+    assert meta["effective_precision_mode"] == "fp32"

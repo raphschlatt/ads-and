@@ -252,6 +252,20 @@ class _IdentityModel:
         return x
 
 
+class _NormalizeModel:
+    def load_state_dict(self, _state_dict):
+        return None
+
+    def to(self, _device):
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, x):
+        return x / x.norm(dim=1, keepdim=True).clamp_min(1e-8)
+
+
 def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
     monkeypatch.setattr(infer_pairs, "_require_torch", lambda: _FakeTorchScore())
     monkeypatch.setattr(
@@ -304,3 +318,102 @@ def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
 
     assert float(out["cosine_sim"].iloc[0]) == pytest.approx(1.0)
     assert float(out["distance"].iloc[0]) == pytest.approx(0.0)
+
+
+def test_score_pairs_matches_reference_cosine_from_preencoded_mentions(monkeypatch):
+    monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
+    monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: _NormalizeModel())
+
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2", "m3"]})
+    pairs = pd.DataFrame(
+        [
+            {"pair_id": "m1__m2", "mention_id_1": "m1", "mention_id_2": "m2", "block_key": "blk.a"},
+            {"pair_id": "m2__m3", "mention_id_1": "m2", "mention_id_2": "m3", "block_key": "blk.a"},
+            {"pair_id": "m1__missing", "mention_id_1": "m1", "mention_id_2": "missing", "block_key": "blk.a"},
+        ]
+    )
+    chars = np.array([[1.0, 0.0], [0.2, 0.8], [0.5, 0.5]], dtype=np.float32)
+    text = np.array([[0.1, 0.9], [0.3, 0.7], [0.9, 0.1]], dtype=np.float32)
+
+    out, runtime_meta = infer_pairs.score_pairs_with_checkpoint(
+        mentions=mentions,
+        pairs=pairs,
+        chars2vec=chars,
+        text_emb=text,
+        checkpoint_path="checkpoint.pt",
+        device="cpu",
+        return_runtime_meta=True,
+        show_progress=False,
+    )
+
+    features = infer_pairs.build_feature_matrix(chars, text)
+    mention_emb = features / np.linalg.norm(features, axis=1, keepdims=True).clip(min=1e-8)
+    mention_index = {str(m): i for i, m in enumerate(mentions["mention_id"].tolist())}
+    expected_pairs = pairs[pairs["mention_id_2"].isin(mention_index)].reset_index(drop=True)
+    expected_sim = []
+    for row in expected_pairs.itertuples(index=False):
+        z1 = mention_emb[mention_index[str(row.mention_id_1)]]
+        z2 = mention_emb[mention_index[str(row.mention_id_2)]]
+        expected_sim.append(float(np.dot(z1, z2)))
+
+    assert list(out["pair_id"]) == ["m1__m2", "m2__m3"]
+    np.testing.assert_allclose(out["cosine_sim"].to_numpy(), np.asarray(expected_sim, dtype=np.float32), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(out["distance"].to_numpy(), 1.0 - np.asarray(expected_sim, dtype=np.float32), rtol=1e-6, atol=1e-6)
+    assert runtime_meta["pair_scoring_strategy"] == "preencoded_mentions"
+    assert runtime_meta["feature_matrix_shape"] == [3, 4]
+    assert runtime_meta["mention_embedding_shape"] == [3, 4]
+    assert runtime_meta["pairs_total_rows"] == 3
+    assert runtime_meta["pairs_valid_rows"] == 2
+
+
+def test_score_pairs_chunked_parity_matches_dataframe_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
+    monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: _NormalizeModel())
+
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2", "m3", "m4"]})
+    pairs = pd.DataFrame(
+        [
+            {"pair_id": "m1__m2", "mention_id_1": "m1", "mention_id_2": "m2", "block_key": "blk.a"},
+            {"pair_id": "m2__m3", "mention_id_1": "m2", "mention_id_2": "m3", "block_key": "blk.a"},
+            {"pair_id": "m3__m4", "mention_id_1": "m3", "mention_id_2": "m4", "block_key": "blk.b"},
+        ]
+    )
+    chars = np.array([[1.0, 0.0], [0.2, 0.8], [0.5, 0.5], [0.8, 0.2]], dtype=np.float32)
+    text = np.array([[0.1, 0.9], [0.3, 0.7], [0.9, 0.1], [0.4, 0.6]], dtype=np.float32)
+
+    direct, direct_meta = infer_pairs.score_pairs_with_checkpoint(
+        mentions=mentions,
+        pairs=pairs,
+        chars2vec=chars,
+        text_emb=text,
+        checkpoint_path="checkpoint.pt",
+        device="cpu",
+        return_runtime_meta=True,
+        show_progress=False,
+    )
+
+    pairs_path = tmp_path / "pairs.parquet"
+    output_path = tmp_path / "scores.parquet"
+    pairs.to_parquet(pairs_path, index=False)
+    chunked, chunked_meta = infer_pairs.score_pairs_with_checkpoint(
+        mentions=mentions,
+        pairs=pairs_path,
+        chars2vec=chars,
+        text_emb=text,
+        checkpoint_path="checkpoint.pt",
+        output_path=output_path,
+        batch_size=2,
+        chunk_rows=2,
+        device="cpu",
+        return_runtime_meta=True,
+        show_progress=False,
+    )
+
+    pd.testing.assert_frame_equal(direct.reset_index(drop=True), chunked.reset_index(drop=True))
+    pd.testing.assert_frame_equal(chunked.reset_index(drop=True), pd.read_parquet(output_path).reset_index(drop=True))
+    assert direct_meta["pair_input_mode"] == "dataframe"
+    assert chunked_meta["pair_input_mode"] == "parquet_chunked"
+    assert chunked_meta["parquet_read_seconds"] >= 0.0
+    assert chunked_meta["pandas_conversion_seconds"] >= 0.0
+    assert chunked_meta["pair_score_seconds"] >= 0.0
+    assert chunked_meta["parquet_write_seconds"] >= 0.0

@@ -83,26 +83,28 @@ def _split_name_parts(author_raw: str) -> tuple[list[str], list[str]]:
     return [parts[-1]], [parts[0]]
 
 
+def _extract_name_tokens(author_raw: str) -> tuple[str, str]:
+    surname_tokens, given_tokens = _split_name_parts(author_raw)
+    given = given_tokens[0] if given_tokens else ""
+    if not surname_tokens:
+        return given, ""
+    if len(surname_tokens) > 1 and surname_tokens[0] in _SURNAME_PARTICLES:
+        surname_tokens = surname_tokens[1:]
+    surname = surname_tokens[-1] if surname_tokens else ""
+    return given, surname
+
+
 def _given_name_token(author_raw: str) -> str:
-    _, given_tokens = _split_name_parts(author_raw)
-    return given_tokens[0] if given_tokens else ""
+    given, _ = _extract_name_tokens(author_raw)
+    return given
 
 
 def _surname_token(author_raw: str) -> str:
-    surname_tokens, _ = _split_name_parts(author_raw)
-    if not surname_tokens:
-        return ""
-    if len(surname_tokens) > 1 and surname_tokens[0] in _SURNAME_PARTICLES:
-        surname_tokens = surname_tokens[1:]
-    return surname_tokens[-1] if surname_tokens else ""
+    _, surname = _extract_name_tokens(author_raw)
+    return surname
 
 
-def _name_conflict(a: str, b: str) -> bool:
-    ga = _given_name_token(a)
-    gb = _given_name_token(b)
-    sa = _surname_token(a)
-    sb = _surname_token(b)
-
+def _name_conflict_tokens(ga: str, gb: str, sa: str, sb: str) -> bool:
     if sa and sb and sa != sb and len(sa) > 2 and len(sb) > 2:
         return True
 
@@ -124,6 +126,12 @@ def _name_conflict(a: str, b: str) -> bool:
     return ga != gb
 
 
+def _name_conflict(a: str, b: str) -> bool:
+    ga, sa = _extract_name_tokens(a)
+    gb, sb = _extract_name_tokens(b)
+    return _name_conflict_tokens(ga, gb, sa, sb)
+
+
 def _build_distance_matrix(block_mentions: pd.DataFrame, block_scores: pd.DataFrame) -> Tuple[np.ndarray, Dict[str, int]]:
     mention_ids = block_mentions["mention_id"].astype(str).tolist()
     n = len(mention_ids)
@@ -132,14 +140,14 @@ def _build_distance_matrix(block_mentions: pd.DataFrame, block_scores: pd.DataFr
     dist = np.ones((n, n), dtype=np.float32)
     np.fill_diagonal(dist, 0.0)
 
-    for row in block_scores.itertuples(index=False):
-        i = idx.get(str(row.mention_id_1))
-        j = idx.get(str(row.mention_id_2))
-        if i is None or j is None:
-            continue
-        d = float(row.distance)
-        dist[i, j] = d
-        dist[j, i] = d
+    id1 = block_scores["mention_id_1"].astype(str).map(idx)
+    id2 = block_scores["mention_id_2"].astype(str).map(idx)
+    valid = id1.notna() & id2.notna()
+    i_arr = id1[valid].astype(np.int64).to_numpy()
+    j_arr = id2[valid].astype(np.int64).to_numpy()
+    d_arr = block_scores.loc[valid, "distance"].astype(np.float32).to_numpy()
+    dist[i_arr, j_arr] = d_arr
+    dist[j_arr, i_arr] = d_arr
 
     return dist, idx
 
@@ -161,32 +169,58 @@ def _apply_constraints(dist: np.ndarray, block_mentions: pd.DataFrame, constrain
     years = block_mentions["year"].tolist()
 
     n = len(block_mentions)
-    for i in range(n):
-        for j in range(i + 1, n):
-            force_name = False
-            force_year = False
-            if enforce_name_conflict and _name_conflict(authors[i], authors[j]):
-                force_name = True
-            yi, yj = years[i], years[j]
-            if (yi is not None and yj is not None) and not (pd.isna(yi) or pd.isna(yj)):
-                if abs(int(yi) - int(yj)) > max_year_gap:
-                    force_year = True
+    if n < 2:
+        np.fill_diagonal(out, 0.0)
+        return out
 
-            if not (force_name or force_year):
-                continue
+    given_tokens = np.empty(n, dtype=object)
+    surname_tokens = np.empty(n, dtype=object)
+    for idx, author in enumerate(authors):
+        given, surname = _extract_name_tokens(author)
+        given_tokens[idx] = given
+        surname_tokens[idx] = surname
 
-            force_hard = (force_name and name_conflict_mode == "hard") or (force_year and year_gap_mode == "hard")
-            if force_hard:
-                out[i, j] = 1.0
-                out[j, i] = 1.0
-                continue
+    name_conflict_mask = np.zeros((n, n), dtype=bool)
+    if enforce_name_conflict:
+        for i in range(n):
+            gi = str(given_tokens[i])
+            si = str(surname_tokens[i])
+            for j in range(i + 1, n):
+                if _name_conflict_tokens(gi, str(given_tokens[j]), si, str(surname_tokens[j])):
+                    name_conflict_mask[i, j] = True
+                    name_conflict_mask[j, i] = True
 
-            if force_name:
-                out[i, j] = max(out[i, j], name_conflict_min_distance)
-                out[j, i] = max(out[j, i], name_conflict_min_distance)
-            if force_year:
-                out[i, j] = max(out[i, j], year_gap_min_distance)
-                out[j, i] = max(out[j, i], year_gap_min_distance)
+    years_arr = pd.to_numeric(pd.Series(years), errors="coerce").to_numpy(dtype=np.float64)
+    valid_years = ~np.isnan(years_arr)
+    year_gap_mask = valid_years[:, None] & valid_years[None, :]
+    year_gap_mask &= np.abs(years_arr[:, None] - years_arr[None, :]) > max_year_gap
+
+    upper_i, upper_j = np.triu_indices(n, k=1)
+    force_name = name_conflict_mask[upper_i, upper_j]
+    force_year = year_gap_mask[upper_i, upper_j]
+    force_hard = (force_name & (name_conflict_mode == "hard")) | (force_year & (year_gap_mode == "hard"))
+
+    if bool(force_hard.any()):
+        hard_i = upper_i[force_hard]
+        hard_j = upper_j[force_hard]
+        out[hard_i, hard_j] = 1.0
+        out[hard_j, hard_i] = 1.0
+
+    soft_name = force_name & ~force_hard
+    if bool(soft_name.any()):
+        soft_name_i = upper_i[soft_name]
+        soft_name_j = upper_j[soft_name]
+        soft_name_values = np.maximum(out[soft_name_i, soft_name_j], name_conflict_min_distance)
+        out[soft_name_i, soft_name_j] = soft_name_values
+        out[soft_name_j, soft_name_i] = soft_name_values
+
+    soft_year = force_year & ~force_hard
+    if bool(soft_year.any()):
+        soft_year_i = upper_i[soft_year]
+        soft_year_j = upper_j[soft_year]
+        soft_year_values = np.maximum(out[soft_year_i, soft_year_j], year_gap_min_distance)
+        out[soft_year_i, soft_year_j] = soft_year_values
+        out[soft_year_j, soft_year_i] = soft_year_values
 
     np.fill_diagonal(out, 0.0)
     return out
