@@ -88,6 +88,45 @@ def _best_effort_clear_cuda_cache(torch) -> None:
             return
     except Exception:
         return
+
+
+def _init_numeric_clamp_summary() -> dict[str, int | bool]:
+    return {
+        "clamped": False,
+        "events": 0,
+        "cosine_non_finite_count": 0,
+        "cosine_below_min_count": 0,
+        "cosine_above_max_count": 0,
+        "distance_non_finite_count": 0,
+        "distance_below_min_count": 0,
+        "distance_above_max_count": 0,
+    }
+
+
+def _accumulate_numeric_clamp_summary(
+    target: dict[str, int | bool],
+    *,
+    sim_meta: dict[str, Any],
+    dist_meta: dict[str, Any],
+) -> None:
+    if not sim_meta.get("clamped") and not dist_meta.get("clamped"):
+        return
+    target["clamped"] = True
+    target["events"] = int(target.get("events", 0)) + 1
+    target["cosine_non_finite_count"] = int(target.get("cosine_non_finite_count", 0)) + int(
+        sim_meta.get("non_finite_count", 0)
+    )
+    target["cosine_below_min_count"] = int(target.get("cosine_below_min_count", 0)) + int(sim_meta.get("below_min_count", 0))
+    target["cosine_above_max_count"] = int(target.get("cosine_above_max_count", 0)) + int(sim_meta.get("above_max_count", 0))
+    target["distance_non_finite_count"] = int(target.get("distance_non_finite_count", 0)) + int(
+        dist_meta.get("non_finite_count", 0)
+    )
+    target["distance_below_min_count"] = int(target.get("distance_below_min_count", 0)) + int(
+        dist_meta.get("below_min_count", 0)
+    )
+    target["distance_above_max_count"] = int(target.get("distance_above_max_count", 0)) + int(
+        dist_meta.get("above_max_count", 0)
+    )
     try:
         if hasattr(cuda_module, "empty_cache"):
             cuda_module.empty_cache()
@@ -197,6 +236,7 @@ def score_pairs_with_checkpoint(
     runtime_meta["parquet_write_seconds"] = 0.0
     runtime_meta["pairs_total_rows"] = 0
     runtime_meta["pairs_valid_rows"] = 0
+    runtime_meta["numeric_clamping"] = _init_numeric_clamp_summary()
 
     mindex = _build_mention_index(mentions)
     feature_started_at = perf_counter()
@@ -248,19 +288,11 @@ def score_pairs_with_checkpoint(
         sim_arr = np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)
         sim_arr, sim_meta = clamp_cosine_sim(sim_arr)
         dist_arr, dist_meta = compute_safe_distance_from_cosine(sim_arr)
-        if sim_meta["clamped"] or dist_meta["clamped"]:
-            warnings.warn(
-                (
-                    "Applied numeric clamping to pair scores: "
-                    f"cosine_non_finite={sim_meta['non_finite_count']}, "
-                    f"cosine_below_min={sim_meta['below_min_count']}, "
-                    f"cosine_above_max={sim_meta['above_max_count']}, "
-                    f"distance_non_finite={dist_meta['non_finite_count']}, "
-                    f"distance_below_min={dist_meta['below_min_count']}, "
-                    f"distance_above_max={dist_meta['above_max_count']}."
-                ),
-                RuntimeWarning,
-            )
+        _accumulate_numeric_clamp_summary(
+            active_runtime_meta.setdefault("numeric_clamping", _init_numeric_clamp_summary()),
+            sim_meta=sim_meta,
+            dist_meta=dist_meta,
+        )
 
         out = p[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
         out["cosine_sim"] = sim_arr.astype(np.float32)

@@ -44,6 +44,7 @@ from author_name_disambiguation.common.pipeline_reports import (
     build_subset_summary,
     default_run_id,
     load_json,
+    write_compare_infer_to_baseline,
     write_compare_train_to_baseline,
     write_json,
 )
@@ -1684,6 +1685,41 @@ def cmd_run_infer_sources(args):
         ui.close()
 
 
+def cmd_compare_infer_baseline(args):
+    payload = None
+    ui = CliUI(total_steps=1, progress=args.progress)
+    try:
+        ui.start("Compare infer run to baseline")
+        baseline_ref = str(args.baseline_run_id)
+        current_ref = str(args.current_run_id)
+        metrics_root = Path(args.metrics_root).expanduser().resolve()
+        current_candidate = Path(current_ref).expanduser()
+        current_dir = current_candidate.resolve() if current_candidate.exists() else (metrics_root / current_ref).resolve()
+        output_path = (
+            Path(args.output_path).expanduser().resolve()
+            if args.output_path is not None
+            else (current_dir / "99_compare_infer_to_baseline.json").resolve()
+        )
+        ui.info(f"baseline={baseline_ref} | current={current_ref} | metrics_root={metrics_root}")
+        report_path = write_compare_infer_to_baseline(
+            baseline_run_id=baseline_ref,
+            current_run_id=current_ref,
+            run_stage="infer_sources",
+            metrics_root=metrics_root,
+            output_path=output_path,
+        )
+        payload = load_json(report_path)
+        payload["output_path"] = str(report_path)
+        ui.done(f"Wrote {report_path.name}")
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
 def cmd_run_cluster_test_report(args):
     ui = CliUI(total_steps=6, progress=args.progress)
     try:
@@ -2120,6 +2156,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_infer_sources)
+
+    sp = sub.add_parser("compare-infer-baseline")
+    sp.add_argument("--baseline-run-id", required=True)
+    sp.add_argument("--current-run-id", required=True)
+    sp.add_argument("--metrics-root", required=True)
+    sp.add_argument("--output-path", default=None)
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_compare_infer_baseline)
 
     sp = sub.add_parser("run-cluster-test-report")
     sp.add_argument("--model-run-id", required=True)

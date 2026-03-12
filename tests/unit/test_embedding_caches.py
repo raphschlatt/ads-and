@@ -276,6 +276,63 @@ def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_clea
     assert tf_state["clear_calls"] == 1
 
 
+def test_generate_chars2vec_embeddings_filters_model_load_but_not_predict(monkeypatch: pytest.MonkeyPatch):
+    filter_state = {"active": False}
+    call_states: dict[str, bool] = {}
+
+    @contextmanager
+    def _fake_filter_known_library_stderr(*, enabled: bool):
+        assert enabled is True
+        filter_state["active"] = True
+        try:
+            yield
+        finally:
+            filter_state["active"] = False
+
+    class _FakeEmbeddingModel:
+        def predict(self, inputs, batch_size=None, verbose=None, callbacks=None):
+            del inputs, batch_size, verbose, callbacks
+            call_states["predict_filter_active"] = bool(filter_state["active"])
+            return np.ones((1, 50), dtype=np.float32)
+
+    class _FakeModel:
+        def __init__(self):
+            self.cache: dict[str, np.ndarray] = {}
+            self.char_to_ix = {"a": 0}
+            self.vocab_size = 1
+            self.embedding_model = _FakeEmbeddingModel()
+
+    def _load_model(_model_name):
+        call_states["load_filter_active"] = bool(filter_state["active"])
+        return _FakeModel()
+
+    monkeypatch.setattr(embed_chars2vec, "_filter_known_library_stderr", _fake_filter_known_library_stderr)
+    monkeypatch.setattr(embed_chars2vec, "_pad_sequences", lambda _model, _words: np.ones((1, 1, 1), dtype=np.float32))
+    monkeypatch.setitem(
+        sys.modules,
+        "chars2vec",
+        SimpleNamespace(
+            load_model=_load_model,
+            keras=SimpleNamespace(
+                preprocessing=SimpleNamespace(sequence=SimpleNamespace(pad_sequences=lambda *_args, **_kwargs: np.ones((1, 1, 1), dtype=np.float32))),
+                callbacks=SimpleNamespace(Callback=object),
+            ),
+        ),
+    )
+
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=["a"],
+        quiet_libraries=True,
+        show_progress=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (1, 50)
+    assert meta["generation_mode"] == "chars2vec"
+    assert call_states["load_filter_active"] is True
+    assert call_states["predict_filter_active"] is False
+
+
 def test_generate_chars2vec_embeddings_tolerates_tensorflow_memory_growth_and_cleanup_errors(
     monkeypatch: pytest.MonkeyPatch,
 ):

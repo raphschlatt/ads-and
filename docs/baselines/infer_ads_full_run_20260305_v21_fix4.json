@@ -1,0 +1,71 @@
+{
+  "manifest_scope": "infer_baseline",
+  "manifest_version": 1,
+  "dataset_id": "ads_full_run_20260305",
+  "metrics_root": "artifacts/exports",
+  "historical_reference": {
+    "artifact_dir": "infer_ads_full_20260305_full_20260310T134713Z",
+    "run_id": "infer_sources_20260310T134717Z_b4fbfc57",
+    "hardware": {
+      "gpu": "NVIDIA A100 80GB PCIe"
+    },
+    "runtime": {
+      "torch_version": "2.10.0+cu126",
+      "specter_resolved_device": "cuda"
+    },
+    "stage_wall_seconds": {
+      "total": 9360.6,
+      "load_inputs": 258.0,
+      "name_embeddings": 498.0,
+      "text_embeddings": 4377.0,
+      "pair_inference": 1662.0,
+      "clustering": 1752.0,
+      "export": 794.0
+    }
+  },
+  "canonical_baseline": {
+    "artifact_dir": "bench_full_v21_fix4",
+    "run_id": "infer_sources_20260312T125912Z_13a92e75",
+    "hardware": {
+      "gpu": "NVIDIA A100 80GB PCIe"
+    },
+    "runtime": {
+      "torch_version": "2.10.0+cu128",
+      "precision_mode": "fp32",
+      "specter_effective_precision_mode": "amp_bf16",
+      "specter_effective_batch_size": 128
+    },
+    "stage_wall_seconds": {
+      "total": 3629.072,
+      "pair_inference": 1168.0,
+      "clustering": 870.0,
+      "export": 77.2
+    },
+    "runtime_seconds": {
+      "load_inputs_total": 30.36851698927751,
+      "specter_tokenize_total": 591.3301812564023,
+      "specter_forward_total": 153.69219491630793,
+      "specter_device_to_host_total": 250.2202134085819,
+      "pair_score_total": 7.071209894493222
+    }
+  },
+  "accepted_drift_from_historical_reference": {
+    "ads_clusters_delta": -5,
+    "changed_mentions": 149,
+    "changed_blocks": 30
+  },
+  "included_optimizations": [
+    "parquet_vectorized_load_inputs",
+    "single_pass_sorted_deduplicate",
+    "specter_amp_bf16_auto_batching",
+    "nand_preencoded_mention_scoring",
+    "cpu_materialized_mention_embeddings",
+    "cluster_backend_auto_heuristic",
+    "parquet_frame_reuse_export"
+  ],
+  "artifact_keep_set": [
+    "infer_ads_full_20260305_full_20260310T134713Z",
+    "bench_full_v21_fix4",
+    "bench_mid_v21_fix4"
+  ]
+}

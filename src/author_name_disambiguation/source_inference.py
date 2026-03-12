@@ -464,6 +464,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         if ui is not None:
             ui.info(message)
 
+    def _ui_warn(message: str) -> None:
+        if ui is not None:
+            ui.warn(message)
+
     def _ui_done(message: str) -> None:
         if ui is not None:
             ui.done(message)
@@ -919,6 +923,18 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "pair_scoring": pair_score_runtime_meta,
     }
     write_json(preflight, preflight_path)
+    clamping_meta = dict(pair_score_runtime_meta.get("numeric_clamping", {}) or {})
+    if bool(clamping_meta.get("clamped")):
+        _ui_warn(
+            "Applied numeric clamping to pair scores: "
+            f"events={int(clamping_meta.get('events', 0))} | "
+            f"cosine_non_finite={int(clamping_meta.get('cosine_non_finite_count', 0))} | "
+            f"cosine_below_min={int(clamping_meta.get('cosine_below_min_count', 0))} | "
+            f"cosine_above_max={int(clamping_meta.get('cosine_above_max_count', 0))} | "
+            f"distance_non_finite={int(clamping_meta.get('distance_non_finite_count', 0))} | "
+            f"distance_below_min={int(clamping_meta.get('distance_below_min_count', 0))} | "
+            f"distance_above_max={int(clamping_meta.get('distance_above_max_count', 0))}"
+        )
     _ui_done(
         f"pair_count={_format_count(len(pairs))} | "
         f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', len(pairs))))} | "

@@ -347,6 +347,94 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     assert round(float(payload["split_high_sim_rate_probe_delta"]), 6) == -0.07
 
 
+def test_write_compare_infer_to_baseline_is_partition_aware(tmp_path: Path):
+    metrics_root = tmp_path / "metrics"
+    baseline_dir = metrics_root / "baseline"
+    current_dir = metrics_root / "current"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    current_dir.mkdir(parents=True, exist_ok=True)
+
+    write_json({"metric_scope": "infer", "counts": {"ads_mentions": 4, "ads_clusters": 2}}, baseline_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"metric_scope": "infer", "counts": {"ads_mentions": 4, "ads_clusters": 2}}, current_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"go": True, "warnings": []}, baseline_dir / "05_go_no_go_infer_sources.json")
+    write_json({"go": True, "warnings": []}, current_dir / "05_go_no_go_infer_sources.json")
+
+    pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m2", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m3", "block_key": "blk.a", "author_uid_local": "blk.a::1"},
+            {"mention_id": "m4", "block_key": "blk.b", "author_uid_local": "blk.b::0"},
+        ]
+    ).to_parquet(baseline_dir / "mention_clusters.parquet", index=False)
+    pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "blk.a", "author_uid_local": "blk.a::1"},
+            {"mention_id": "m2", "block_key": "blk.a", "author_uid_local": "blk.a::1"},
+            {"mention_id": "m3", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m4", "block_key": "blk.b", "author_uid_local": "blk.b::0"},
+        ]
+    ).to_parquet(current_dir / "mention_clusters.parquet", index=False)
+
+    out = current_dir / "99_compare_infer_to_baseline.json"
+    write_compare_infer_to_baseline(
+        baseline_run_id="baseline",
+        current_run_id="current",
+        run_stage="infer_sources",
+        metrics_root=metrics_root,
+        output_path=out,
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["mention_cluster_compare_status"] == "ok"
+    assert payload["mention_cluster_changed_mentions"] == 0
+    assert payload["mention_cluster_changed_blocks"] == 0
+    assert payload["mention_cluster_top_changed_blocks"] == []
+
+
+def test_write_compare_infer_to_baseline_detects_real_block_partition_drift(tmp_path: Path):
+    metrics_root = tmp_path / "metrics"
+    baseline_dir = metrics_root / "baseline"
+    current_dir = metrics_root / "current"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    current_dir.mkdir(parents=True, exist_ok=True)
+
+    write_json({"metric_scope": "infer", "counts": {"ads_mentions": 4, "ads_clusters": 2}}, baseline_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"metric_scope": "infer", "counts": {"ads_mentions": 4, "ads_clusters": 1}}, current_dir / "05_stage_metrics_infer_sources.json")
+    write_json({"go": True, "warnings": []}, baseline_dir / "05_go_no_go_infer_sources.json")
+    write_json({"go": True, "warnings": []}, current_dir / "05_go_no_go_infer_sources.json")
+
+    pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m2", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m3", "block_key": "blk.a", "author_uid_local": "blk.a::1"},
+            {"mention_id": "m4", "block_key": "blk.b", "author_uid_local": "blk.b::0"},
+        ]
+    ).to_parquet(baseline_dir / "mention_clusters.parquet", index=False)
+    pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m2", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m3", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m4", "block_key": "blk.b", "author_uid_local": "blk.b::0"},
+        ]
+    ).to_parquet(current_dir / "mention_clusters.parquet", index=False)
+
+    out = current_dir / "99_compare_infer_to_baseline.json"
+    write_compare_infer_to_baseline(
+        baseline_run_id=baseline_dir,
+        current_run_id=current_dir,
+        run_stage="infer_sources",
+        metrics_root=metrics_root,
+        output_path=out,
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["mention_cluster_compare_status"] == "ok"
+    assert payload["mention_cluster_changed_mentions"] == 1
+    assert payload["mention_cluster_changed_blocks"] == 1
+    assert payload["mention_cluster_top_changed_blocks"][0]["block_key"] == "blk.a"
+
+
 def test_legacy_compare_dispatches_to_scope_specific_writer(tmp_path: Path):
     metrics_root = tmp_path / "metrics"
     current_dir = metrics_root / "cur"

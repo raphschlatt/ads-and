@@ -329,18 +329,21 @@ def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
         ]
     )
 
-    with pytest.warns(RuntimeWarning, match="numeric clamping"):
-        out = infer_pairs.score_pairs_with_checkpoint(
-            mentions=mentions,
-            pairs=pairs,
-            chars2vec=np.zeros((2, 1), dtype=np.float32),
-            text_emb=np.zeros((2, 1), dtype=np.float32),
-            checkpoint_path="checkpoint.pt",
-            device="cpu",
-        )
+    out, runtime_meta = infer_pairs.score_pairs_with_checkpoint(
+        mentions=mentions,
+        pairs=pairs,
+        chars2vec=np.zeros((2, 1), dtype=np.float32),
+        text_emb=np.zeros((2, 1), dtype=np.float32),
+        checkpoint_path="checkpoint.pt",
+        device="cpu",
+        return_runtime_meta=True,
+    )
 
     assert float(out["cosine_sim"].iloc[0]) == pytest.approx(1.0)
     assert float(out["distance"].iloc[0]) == pytest.approx(0.0)
+    assert runtime_meta["numeric_clamping"]["clamped"] is True
+    assert runtime_meta["numeric_clamping"]["events"] == 1
+    assert runtime_meta["numeric_clamping"]["cosine_above_max_count"] == 1
 
 
 def test_encode_mentions_cuda_path_materializes_batches_on_cpu_without_torch_cat():

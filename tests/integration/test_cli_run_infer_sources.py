@@ -209,6 +209,16 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "pair_scoring_strategy": "preencoded_mentions",
             "mention_storage_device": "cpu",
             "cuda_oom_fallback_used": False,
+            "numeric_clamping": {
+                "clamped": False,
+                "events": 0,
+                "cosine_non_finite_count": 0,
+                "cosine_below_min_count": 0,
+                "cosine_above_max_count": 0,
+                "distance_non_finite_count": 0,
+                "distance_below_min_count": 0,
+                "distance_above_max_count": 0,
+            },
         }
         if empty_chunked_score_return and isinstance(pairs, (str, Path)) and not _kwargs.get("return_scores", True):
             empty = pd.DataFrame(columns=out.columns)
@@ -564,3 +574,148 @@ def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_
     preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
     assert seen["cluster_pair_scores_rows"] > 0
     assert int(preflight["runtime"]["pair_building"]["pairs_written"]) == int(seen["cluster_pair_scores_rows"])
+
+
+def test_cli_run_infer_sources_emits_single_aggregated_pair_clamp_warning(monkeypatch, tmp_path: Path, capsys):
+    publications_path, references_path = _write_dataset(tmp_path, with_references=True)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+
+    def _score_with_clamp_meta(mentions, pairs, output_path=None, **_kwargs):
+        if isinstance(pairs, (str, Path)):
+            pairs_df = pd.read_parquet(pairs)
+        else:
+            pairs_df = pairs
+        out = pairs_df[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
+        out["cosine_sim"] = 0.9
+        out["distance"] = 0.1
+        if output_path is not None:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            out.to_parquet(output_path, index=False)
+        meta = {
+            "requested_device": "cpu",
+            "resolved_device": "cpu",
+            "fallback_reason": None,
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": "fp32",
+            "pair_scoring_strategy": "preencoded_mentions",
+            "mention_storage_device": "cpu",
+            "cuda_oom_fallback_used": False,
+            "numeric_clamping": {
+                "clamped": True,
+                "events": 3,
+                "cosine_non_finite_count": 0,
+                "cosine_below_min_count": 0,
+                "cosine_above_max_count": 11,
+                "distance_non_finite_count": 0,
+                "distance_below_min_count": 0,
+                "distance_above_max_count": 0,
+            },
+        }
+        return (out, meta) if _kwargs.get("return_runtime_meta") else out
+
+    monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score_with_clamp_meta)
+
+    output_root = tmp_path / "out_warn"
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-sources",
+            "--publications-path",
+            str(publications_path),
+            "--references-path",
+            str(references_path),
+            "--output-root",
+            str(output_root),
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            str(bundle_dir),
+        ]
+    )
+    args.func(args)
+    captured = capsys.readouterr()
+
+    assert captured.err.count("WARN Applied numeric clamping to pair scores:") == 1
+    assert "RuntimeWarning: Applied numeric clamping" not in captured.err
+
+
+def test_cli_compare_infer_baseline_writes_deep_compare_report(tmp_path: Path, capsys):
+    metrics_root = tmp_path / "exports"
+    baseline_dir = metrics_root / "baseline_run"
+    current_dir = metrics_root / "current_run"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    current_dir.mkdir(parents=True, exist_ok=True)
+
+    with (baseline_dir / "05_stage_metrics_infer_sources.json").open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metric_scope": "infer",
+                "run_id": "baseline_internal",
+                "counts": {"ads_mentions": 3, "ads_clusters": 2, "ads_cluster_assignments": 3},
+                "singleton_ratio": 0.2,
+                "split_high_sim_rate_probe": 0.1,
+                "merged_low_conf_rate_probe": 0.2,
+                "source_export": {"coverage_rate": 1.0},
+            },
+            handle,
+            indent=2,
+        )
+    with (current_dir / "05_stage_metrics_infer_sources.json").open("w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "metric_scope": "infer",
+                "run_id": "current_internal",
+                "counts": {"ads_mentions": 3, "ads_clusters": 1, "ads_cluster_assignments": 3},
+                "singleton_ratio": 0.1,
+                "split_high_sim_rate_probe": 0.05,
+                "merged_low_conf_rate_probe": 0.25,
+                "source_export": {"coverage_rate": 1.0},
+            },
+            handle,
+            indent=2,
+        )
+    with (baseline_dir / "05_go_no_go_infer_sources.json").open("w", encoding="utf-8") as handle:
+        json.dump({"go": True, "warnings": []}, handle, indent=2)
+    with (current_dir / "05_go_no_go_infer_sources.json").open("w", encoding="utf-8") as handle:
+        json.dump({"go": True, "warnings": []}, handle, indent=2)
+    pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m2", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m3", "block_key": "blk.a", "author_uid_local": "blk.a::1"},
+        ]
+    ).to_parquet(baseline_dir / "mention_clusters.parquet", index=False)
+    pd.DataFrame(
+        [
+            {"mention_id": "m1", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m2", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+            {"mention_id": "m3", "block_key": "blk.a", "author_uid_local": "blk.a::0"},
+        ]
+    ).to_parquet(current_dir / "mention_clusters.parquet", index=False)
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "compare-infer-baseline",
+            "--baseline-run-id",
+            "baseline_run",
+            "--current-run-id",
+            "current_run",
+            "--metrics-root",
+            str(metrics_root),
+            "--no-progress",
+        ]
+    )
+    payload = args.func(args)
+    captured = capsys.readouterr()
+
+    assert payload["mention_cluster_changed_mentions"] == 1
+    assert payload["mention_cluster_changed_blocks"] == 1
+    assert (current_dir / "99_compare_infer_to_baseline.json").exists()
+    payload_stdout = json.loads(captured.out)
+    assert payload_stdout["output_path"].endswith("99_compare_infer_to_baseline.json")

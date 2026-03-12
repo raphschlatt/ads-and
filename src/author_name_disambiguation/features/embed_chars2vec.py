@@ -267,13 +267,13 @@ def generate_chars2vec_embeddings(
 
         with _filter_known_library_stderr(enabled=quiet_libraries):
             model = chars2vec.load_model(model_name)
-            setattr(model, "keras", chars2vec.keras)
-            emb = _vectorize_words_silently(
-                model,
-                names,
-                batch_size=32,
-                show_progress=show_progress,
-            )
+        setattr(model, "keras", chars2vec.keras)
+        emb = _vectorize_words_silently(
+            model,
+            names,
+            batch_size=32,
+            show_progress=show_progress,
+        )
         cleanup_error = _cleanup_tensorflow_runtime(model)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:

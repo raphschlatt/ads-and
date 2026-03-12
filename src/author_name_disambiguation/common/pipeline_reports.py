@@ -624,6 +624,158 @@ def _delta(current_value: Any, baseline_value: Any) -> float | None:
         return None
 
 
+def _resolve_compare_dir(root: Path, run_ref: str | Path) -> Path:
+    candidate = Path(run_ref)
+    if candidate.exists():
+        return candidate.resolve()
+    return (root / str(run_ref)).resolve()
+
+
+def _load_cluster_compare_frame(path: Path) -> tuple[pd.DataFrame | None, str | None, str | None]:
+    if not path.exists():
+        return None, None, "missing_artifact"
+    try:
+        sample = pd.read_parquet(path, columns=["mention_id", "block_key"])
+    except Exception as exc:
+        return None, None, f"read_failed:{exc!r}"
+
+    uid_col = "author_uid_local" if "author_uid_local" in sample.columns else None
+    if uid_col is None:
+        try:
+            probe = pd.read_parquet(path, columns=["author_uid_local"])
+            uid_col = "author_uid_local" if "author_uid_local" in probe.columns else None
+        except Exception:
+            uid_col = None
+    if uid_col is None:
+        try:
+            probe = pd.read_parquet(path, columns=["author_uid"])
+            uid_col = "author_uid" if "author_uid" in probe.columns else None
+        except Exception:
+            uid_col = None
+    if uid_col is None:
+        return None, None, "missing_uid_column"
+
+    try:
+        frame = pd.read_parquet(path, columns=["mention_id", "block_key", uid_col])
+    except Exception as exc:
+        return None, None, f"read_failed:{exc!r}"
+    return frame, uid_col, None
+
+
+def _partition_compare_clusters(
+    *,
+    baseline_dir: Path,
+    current_dir: Path,
+) -> dict[str, Any]:
+    baseline_frame, baseline_uid_col, baseline_err = _load_cluster_compare_frame(baseline_dir / "mention_clusters.parquet")
+    current_frame, current_uid_col, current_err = _load_cluster_compare_frame(current_dir / "mention_clusters.parquet")
+    if baseline_err is not None or current_err is not None:
+        return {
+            "status": "unavailable",
+            "baseline_error": baseline_err,
+            "current_error": current_err,
+            "uid_column": None,
+            "total_mentions_compared": None,
+            "changed_mentions": None,
+            "changed_blocks": None,
+            "missing_in_current": None,
+            "missing_in_baseline": None,
+            "top_changed_blocks": [],
+        }
+
+    uid_col = baseline_uid_col if baseline_uid_col == current_uid_col else "author_uid_local"
+    if uid_col != baseline_uid_col or uid_col != current_uid_col:
+        return {
+            "status": "unavailable",
+            "baseline_error": f"baseline_uid_column={baseline_uid_col}",
+            "current_error": f"current_uid_column={current_uid_col}",
+            "uid_column": None,
+            "total_mentions_compared": None,
+            "changed_mentions": None,
+            "changed_blocks": None,
+            "missing_in_current": None,
+            "missing_in_baseline": None,
+            "top_changed_blocks": [],
+        }
+
+    baseline_frame = baseline_frame.rename(columns={uid_col: "cluster_uid"})
+    current_frame = current_frame.rename(columns={uid_col: "cluster_uid"})
+    merged = baseline_frame.merge(
+        current_frame,
+        on="mention_id",
+        how="outer",
+        suffixes=("_baseline", "_current"),
+        indicator=True,
+    )
+    missing_in_current = int((merged["_merge"] == "left_only").sum())
+    missing_in_baseline = int((merged["_merge"] == "right_only").sum())
+
+    common = merged[merged["_merge"] == "both"].copy()
+    exact_drift = common[
+        (common["block_key_baseline"] != common["block_key_current"])
+        | (common["cluster_uid_baseline"] != common["cluster_uid_current"])
+    ]
+    candidate_blocks: set[str] = set()
+    candidate_blocks.update(str(v) for v in exact_drift["block_key_baseline"].dropna().astype(str).tolist())
+    candidate_blocks.update(str(v) for v in exact_drift["block_key_current"].dropna().astype(str).tolist())
+    candidate_blocks.update(str(v) for v in merged.loc[merged["_merge"] == "left_only", "block_key_baseline"].dropna().astype(str).tolist())
+    candidate_blocks.update(str(v) for v in merged.loc[merged["_merge"] == "right_only", "block_key_current"].dropna().astype(str).tolist())
+
+    drift_blocks: list[dict[str, Any]] = []
+    drift_mention_ids: set[str] = set()
+    for block_key in sorted(candidate_blocks):
+        baseline_block = baseline_frame[baseline_frame["block_key"].astype(str) == str(block_key)]
+        current_block = current_frame[current_frame["block_key"].astype(str) == str(block_key)]
+        baseline_parts = {frozenset(g["mention_id"].astype(str).tolist()) for _, g in baseline_block.groupby("cluster_uid")}
+        current_parts = {frozenset(g["mention_id"].astype(str).tolist()) for _, g in current_block.groupby("cluster_uid")}
+        if baseline_parts == current_parts:
+            continue
+        block_compare = baseline_block.merge(
+            current_block,
+            on="mention_id",
+            how="outer",
+            suffixes=("_baseline", "_current"),
+            indicator=True,
+        )
+        changed_mentions = int(
+            (
+                (block_compare["_merge"] != "both")
+                | (block_compare["cluster_uid_baseline"] != block_compare["cluster_uid_current"])
+                | (block_compare["block_key_baseline"] != block_compare["block_key_current"])
+            ).sum()
+        )
+        changed_mask = (
+            (block_compare["_merge"] != "both")
+            | (block_compare["cluster_uid_baseline"] != block_compare["cluster_uid_current"])
+            | (block_compare["block_key_baseline"] != block_compare["block_key_current"])
+        )
+        drift_mention_ids.update(block_compare.loc[changed_mask, "mention_id"].dropna().astype(str).tolist())
+        drift_blocks.append(
+            {
+                "block_key": str(block_key),
+                "mentions": int(len(pd.unique(pd.concat([baseline_block["mention_id"], current_block["mention_id"]])))),
+                "baseline_clusters": int(baseline_block["cluster_uid"].nunique()),
+                "current_clusters": int(current_block["cluster_uid"].nunique()),
+                "changed_mentions": int(changed_mentions),
+            }
+        )
+
+    drift_blocks.sort(key=lambda row: (-int(row["changed_mentions"]), str(row["block_key"])))
+    changed_mentions_total = int(len(drift_mention_ids))
+    return {
+        "status": "ok",
+        "baseline_error": None,
+        "current_error": None,
+        "uid_column": str(uid_col),
+        "total_mentions_compared": int(len(common)),
+        "changed_mentions": int(changed_mentions_total),
+        "changed_blocks": int(len(drift_blocks)),
+        "missing_in_current": int(missing_in_current),
+        "missing_in_baseline": int(missing_in_baseline),
+        "top_changed_blocks": drift_blocks[:10],
+    }
+
+
 def write_compare_train_to_baseline(
     *,
     baseline_run_id: str,
@@ -694,8 +846,8 @@ def write_compare_infer_to_baseline(
     output_path: str | Path,
 ) -> Path:
     root = Path(metrics_root)
-    baseline_dir = root / baseline_run_id
-    current_dir = root / current_run_id
+    baseline_dir = _resolve_compare_dir(root, baseline_run_id)
+    current_dir = _resolve_compare_dir(root, current_run_id)
 
     baseline_stage = _safe_load_json(baseline_dir / f"05_stage_metrics_{run_stage}.json")
     current_stage = _safe_load_json(current_dir / f"05_stage_metrics_{run_stage}.json") or {}
@@ -713,11 +865,19 @@ def write_compare_infer_to_baseline(
     merged_low_conf_rate_probe_current = current_stage.get("merged_low_conf_rate_probe")
     baseline_source_export = (baseline_stage or {}).get("source_export") or {}
     current_source_export = current_stage.get("source_export") or {}
+    cluster_compare = _partition_compare_clusters(
+        baseline_dir=baseline_dir,
+        current_dir=current_dir,
+    )
 
     payload = {
         "compare_scope": "infer",
         "baseline_run_id": str(baseline_run_id),
         "current_run_id": str(current_run_id),
+        "baseline_dir": str(baseline_dir),
+        "current_dir": str(current_dir),
+        "baseline_stage_run_id": (baseline_stage or {}).get("run_id"),
+        "current_stage_run_id": current_stage.get("run_id"),
         "baseline_stage_metrics_exists": bool(baseline_stage is not None),
         "go_baseline": (baseline_go or {}).get("go"),
         "go_current": current_go.get("go"),
@@ -768,6 +928,16 @@ def write_compare_infer_to_baseline(
             current_source_export.get("coverage_rate"),
             baseline_source_export.get("coverage_rate"),
         ),
+        "mention_cluster_compare_status": cluster_compare.get("status"),
+        "mention_cluster_compare_uid_column": cluster_compare.get("uid_column"),
+        "mention_cluster_compare_total_mentions": cluster_compare.get("total_mentions_compared"),
+        "mention_cluster_changed_mentions": cluster_compare.get("changed_mentions"),
+        "mention_cluster_changed_blocks": cluster_compare.get("changed_blocks"),
+        "mention_cluster_missing_in_current": cluster_compare.get("missing_in_current"),
+        "mention_cluster_missing_in_baseline": cluster_compare.get("missing_in_baseline"),
+        "mention_cluster_top_changed_blocks": cluster_compare.get("top_changed_blocks", []),
+        "mention_cluster_compare_baseline_error": cluster_compare.get("baseline_error"),
+        "mention_cluster_compare_current_error": cluster_compare.get("current_error"),
     }
     return write_json(payload, output_path)
 
