@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from author_name_disambiguation.common.io_schema import save_parquet
@@ -170,7 +172,9 @@ def build_source_author_assignments(
     uid_namespace: str | None,
     output_path: str | Path | None = None,
     return_author_entities: bool = False,
-) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    return_runtime_meta: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame] | tuple[pd.DataFrame, dict[str, Any]] | tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    build_started_at = perf_counter()
     exploded_frames = [_explode_source_authors(publications), _explode_source_authors(references)]
     out = pd.concat(exploded_frames, ignore_index=True) if exploded_frames else pd.DataFrame()
     if len(out) == 0:
@@ -210,7 +214,9 @@ def build_source_author_assignments(
     out.loc[~fallback_mask & is_canonical_row, "assignment_kind"] = "canonical"
     out["canonical_mention_id"] = out["mention_id"].where(~fallback_mask, fallback_canonical_id)
 
+    assignments_ready_at = perf_counter()
     author_entities = _compute_author_entities(out)
+    author_entities_seconds = perf_counter() - assignments_ready_at
     out = out.merge(
         author_entities[["author_uid", "author_display_name"]],
         on="author_uid",
@@ -226,7 +232,17 @@ def build_source_author_assignments(
 
     if output_path is not None:
         save_parquet(out, output_path, index=False)
-    return (out, author_entities) if return_author_entities else out
+    runtime_meta = {
+        "build_assignments_seconds": float(assignments_ready_at - build_started_at),
+        "build_author_entities_seconds": float(author_entities_seconds),
+    }
+    if return_author_entities and return_runtime_meta:
+        return out, author_entities, runtime_meta
+    if return_author_entities:
+        return out, author_entities
+    if return_runtime_meta:
+        return out, runtime_meta
+    return out
 
 
 def build_author_entities(assignments: pd.DataFrame, output_path: str | Path | None = None) -> pd.DataFrame:
@@ -251,6 +267,38 @@ def _finalize_source_stats(stats: dict[str, Any]) -> dict[str, Any]:
     authors_total = int(stats["authors_total"])
     stats["coverage_rate"] = float(stats["authors_mapped"] / max(1, authors_total))
     return stats
+
+
+def _normalize_source_authors(value: Any) -> list[str]:
+    return split_author_field(value)
+
+
+def _aggregate_assignments_for_source(assignments: pd.DataFrame, source_type: str) -> pd.DataFrame:
+    subset = assignments[assignments["source_type"] == source_type].copy()
+    if len(subset) == 0:
+        return pd.DataFrame(
+            columns=["source_row_idx", "AuthorUID", "AuthorDisplayName", "mapped_count", "authors_fallback"]
+        )
+
+    subset = subset.sort_values(["source_row_idx", "author_idx"], kind="stable").reset_index(drop=True)
+    author_uid_lists = subset.groupby("source_row_idx", sort=False)["author_uid"].agg(list).rename("AuthorUID")
+    display_name_lists = (
+        subset.groupby("source_row_idx", sort=False)["author_display_name"].agg(list).rename("AuthorDisplayName")
+    )
+    mapped_count = subset.groupby("source_row_idx", sort=False).size().rename("mapped_count")
+    fallback_count = (
+        (subset["assignment_kind"] == "fallback_unmatched")
+        .groupby(subset["source_row_idx"], sort=False)
+        .sum()
+        .astype(np.int64)
+        .rename("authors_fallback")
+    )
+    return (
+        pd.concat([author_uid_lists, display_name_lists, mapped_count, fallback_count], axis=1)
+        .reset_index()
+        .sort_values("source_row_idx", kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def _assignment_rows_by_source(assignments: pd.DataFrame, source_type: str) -> dict[int, pd.DataFrame]:
@@ -336,35 +384,67 @@ def _export_source_file_parquet(
     input_path: Path,
     output_path: Path,
     assignments: pd.DataFrame,
-) -> dict[str, Any]:
+    source_frame: pd.DataFrame | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     stats = _source_export_stats()
-    grouped = _assignment_rows_by_source(assignments, source_type)
-    frame = pd.read_parquet(input_path)
+    reread_started_at = perf_counter()
+    if source_frame is None:
+        frame = pd.read_parquet(input_path)
+        source_reread_seconds = perf_counter() - reread_started_at
+        mirror_mode = "parquet_reread"
+    else:
+        frame = source_frame.copy()
+        source_reread_seconds = 0.0
+        mirror_mode = "parquet_frame_reuse"
 
-    author_uid_rows: list[list[str]] = []
-    display_name_rows: list[list[str]] = []
-    for row_idx, row in enumerate(frame.itertuples(index=False)):
-        authors = _get_record_authors(row._asdict())
-        group = grouped.get(row_idx)
-        author_uids, display_names, authors_fallback = _resolve_export_row_assignments(
-            source_type=source_type,
-            row_idx=int(row_idx),
-            authors=authors,
-            group=group,
+    mirror_started_at = perf_counter()
+    assignments_agg = _aggregate_assignments_for_source(assignments, source_type)
+    out = frame.reset_index(drop=True).copy()
+    out["source_row_idx"] = np.arange(len(out), dtype=np.int64)
+    author_col = "Author" if "Author" in out.columns else "author" if "author" in out.columns else None
+    if author_col is None:
+        out["__authors"] = [[] for _ in range(len(out))]
+    else:
+        out["__authors"] = out[author_col].map(_normalize_source_authors)
+    out["__expected_author_count"] = out["__authors"].map(len).astype(np.int64)
+    out = out.merge(assignments_agg, on="source_row_idx", how="left")
+    out["mapped_count"] = pd.to_numeric(out["mapped_count"], errors="coerce").fillna(0).astype(np.int64)
+    out["authors_fallback"] = pd.to_numeric(out["authors_fallback"], errors="coerce").fillna(0).astype(np.int64)
+
+    authored_mask = out["__expected_author_count"] > 0
+    missing_mask = authored_mask & out["AuthorUID"].isna()
+    if bool(missing_mask.any()):
+        row_idx = int(out.loc[missing_mask, "source_row_idx"].iloc[0])
+        raise RuntimeError(f"Missing source assignments for {source_type}[{row_idx}].")
+
+    mismatch_mask = authored_mask & (out["mapped_count"] != out["__expected_author_count"])
+    if bool(mismatch_mask.any()):
+        row = out.loc[mismatch_mask].iloc[0]
+        raise RuntimeError(
+            f"Assignment length mismatch for {source_type}[{int(row['source_row_idx'])}]: "
+            f"expected {int(row['__expected_author_count'])} authors, got {int(row['mapped_count'])}."
         )
 
-        author_uid_rows.append(author_uids)
-        display_name_rows.append(display_names)
-        stats["rows_total"] += 1
-        stats["authors_total"] += len(author_uids)
-        stats["authors_mapped"] += len(author_uids)
-        stats["authors_fallback"] += authors_fallback
+    empty_list_mask = out["AuthorUID"].isna()
+    if bool(empty_list_mask.any()):
+        empty_index = out.index[empty_list_mask]
+        out.loc[empty_index, "AuthorUID"] = pd.Series([[] for _ in range(len(empty_index))], index=empty_index, dtype=object)
+        out.loc[empty_index, "AuthorDisplayName"] = pd.Series(
+            [[] for _ in range(len(empty_index))], index=empty_index, dtype=object
+        )
 
-    out = frame.copy()
-    out["AuthorUID"] = author_uid_rows
-    out["AuthorDisplayName"] = display_name_rows
+    stats["rows_total"] = int(len(out))
+    stats["authors_total"] = int(out["__expected_author_count"].sum())
+    stats["authors_mapped"] = int(out["mapped_count"].sum())
+    stats["authors_fallback"] = int(out["authors_fallback"].sum())
+
+    out = out.drop(columns=["source_row_idx", "__authors", "__expected_author_count", "mapped_count", "authors_fallback"])
     save_parquet(out, output_path, index=False)
-    return _finalize_source_stats(stats)
+    return _finalize_source_stats(stats), {
+        "mirror_seconds": float(perf_counter() - mirror_started_at),
+        "source_reread_seconds": float(source_reread_seconds),
+        "mirror_mode": mirror_mode,
+    }
 
 
 def export_source_mirrored_outputs(
@@ -374,16 +454,29 @@ def export_source_mirrored_outputs(
     references_path: str | Path | None,
     publications_output_path: str | Path,
     references_output_path: str | Path | None = None,
-) -> dict[str, Any]:
+    publications_frame: pd.DataFrame | None = None,
+    references_frame: pd.DataFrame | None = None,
+    return_runtime_meta: bool = False,
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, Any]]:
+    runtime_meta = {
+        "mirror_publications_seconds": 0.0,
+        "mirror_references_seconds": 0.0,
+        "source_reread_seconds": 0.0,
+        "mirror_mode": None,
+    }
     pubs_in = Path(publications_path)
     pubs_out = Path(publications_output_path)
     if pubs_in.suffix.lower() == ".parquet":
-        pubs_stats = _export_source_file_parquet(
+        pubs_stats, pubs_runtime = _export_source_file_parquet(
             source_type="publication",
             input_path=pubs_in,
             output_path=pubs_out,
             assignments=assignments,
+            source_frame=publications_frame,
         )
+        runtime_meta["mirror_publications_seconds"] = float(pubs_runtime["mirror_seconds"])
+        runtime_meta["source_reread_seconds"] += float(pubs_runtime["source_reread_seconds"])
+        runtime_meta["mirror_mode"] = pubs_runtime["mirror_mode"]
     else:
         pubs_stats = _export_source_file_json(
             source_type="publication",
@@ -391,6 +484,7 @@ def export_source_mirrored_outputs(
             output_path=pubs_out,
             assignments=assignments,
         )
+        runtime_meta["mirror_mode"] = "json_streaming"
 
     refs_stats = _source_export_stats()
     refs_present = references_path is not None and references_output_path is not None
@@ -398,11 +492,19 @@ def export_source_mirrored_outputs(
         refs_in = Path(references_path)
         refs_out = Path(references_output_path)
         if refs_in.suffix.lower() == ".parquet":
-            refs_stats = _export_source_file_parquet(
+            refs_stats, refs_runtime = _export_source_file_parquet(
                 source_type="reference",
                 input_path=refs_in,
                 output_path=refs_out,
                 assignments=assignments,
+                source_frame=references_frame,
+            )
+            runtime_meta["mirror_references_seconds"] = float(refs_runtime["mirror_seconds"])
+            runtime_meta["source_reread_seconds"] += float(refs_runtime["source_reread_seconds"])
+            runtime_meta["mirror_mode"] = (
+                runtime_meta["mirror_mode"]
+                if runtime_meta["mirror_mode"] == refs_runtime["mirror_mode"]
+                else "mixed"
             )
         else:
             refs_stats = _export_source_file_json(
@@ -411,12 +513,17 @@ def export_source_mirrored_outputs(
                 output_path=refs_out,
                 assignments=assignments,
             )
+            runtime_meta["mirror_mode"] = (
+                runtime_meta["mirror_mode"]
+                if runtime_meta["mirror_mode"] == "json_streaming"
+                else "mixed"
+            )
 
     authors_total = int(pubs_stats["authors_total"] + refs_stats["authors_total"])
     authors_mapped = int(pubs_stats["authors_mapped"] + refs_stats["authors_mapped"])
     authors_unmapped = int(pubs_stats["authors_unmapped"] + refs_stats["authors_unmapped"])
     authors_fallback = int(pubs_stats["authors_fallback"] + refs_stats["authors_fallback"])
-    return {
+    qc = {
         "publications": pubs_stats,
         "references": refs_stats,
         "references_present": bool(refs_present),
@@ -427,3 +534,6 @@ def export_source_mirrored_outputs(
         "authors_fallback": authors_fallback,
         "coverage_rate": float(authors_mapped / max(1, authors_total)),
     }
+    if return_runtime_meta:
+        return qc, runtime_meta
+    return qc

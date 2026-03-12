@@ -227,6 +227,46 @@ def test_export_source_mirrored_outputs_supports_parquet(tmp_path: Path):
     assert list(refs_out_df.loc[0, "AuthorUID"]) == ["set::blk.r.0", "set::src.reference.0.1"]
 
 
+def test_export_source_mirrored_outputs_reuses_in_memory_parquet_frames(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    refs_path = tmp_path / "references.parquet"
+    pubs_out = tmp_path / "publications_disambiguated.parquet"
+    refs_out = tmp_path / "references_disambiguated.parquet"
+
+    pubs_df = pd.DataFrame(
+        [
+            {"Bibcode": "bib1", "Author": ["Doe J", "Roe A"], "Title_en": "T1"},
+            {"Bibcode": "bib2", "Author": ["Doe J."], "Title_en": "T2"},
+        ]
+    )
+    refs_df = pd.DataFrame(
+        [
+            {"Bibcode": "bib3", "Author": ["Ref X", "Ref Y"], "Title_en": "R1"},
+        ]
+    )
+    pubs_df.to_parquet(pubs_path, index=False)
+    refs_df.to_parquet(refs_path, index=False)
+
+    qc, runtime = export_source_mirrored_outputs(
+        assignments=_assignments(),
+        publications_path=pubs_path,
+        references_path=refs_path,
+        publications_output_path=pubs_out,
+        references_output_path=refs_out,
+        publications_frame=pubs_df,
+        references_frame=refs_df,
+        return_runtime_meta=True,
+    )
+
+    pubs_out_df = pd.read_parquet(pubs_out)
+    refs_out_df = pd.read_parquet(refs_out)
+    assert list(pubs_out_df.loc[0, "AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
+    assert list(refs_out_df.loc[0, "AuthorUID"]) == ["set::blk.r.0", "set::src.reference.0.1"]
+    assert qc["authors_total"] == 5
+    assert runtime["mirror_mode"] == "parquet_frame_reuse"
+    assert runtime["source_reread_seconds"] == 0.0
+
+
 def test_export_source_mirrored_outputs_keeps_authorless_rows_with_empty_lists(tmp_path: Path):
     pubs_path = tmp_path / "publications.parquet"
     pubs_out = tmp_path / "publications_disambiguated.parquet"

@@ -224,13 +224,15 @@ def test_cluster_eps_block_policy_disabled_uses_base_eps(monkeypatch):
         [
             {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
             {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "a3", "block_key": "blk.a", "author_raw": "A, A", "year": 2002},
             {"mention_id": "b1", "block_key": "blk.b", "author_raw": "B, B", "year": 2000},
             {"mention_id": "b2", "block_key": "blk.b", "author_raw": "B, B", "year": 2001},
+            {"mention_id": "b3", "block_key": "blk.b", "author_raw": "B, B", "year": 2002},
         ]
     )
     pair_scores = pd.DataFrame(
-        _complete_block_pair_scores("blk.a", ["a1", "a2"])
-        + _complete_block_pair_scores("blk.b", ["b1", "b2"])
+        _complete_block_pair_scores("blk.a", ["a1", "a2", "a3"])
+        + _complete_block_pair_scores("blk.b", ["b1", "b2", "b3"])
     )
     cfg = {
         "eps": 0.35,
@@ -268,7 +270,7 @@ def test_cluster_eps_block_policy_disabled_uses_base_eps(monkeypatch):
         return_meta=True,
     )
 
-    assert len(clusters) == 4
+    assert len(clusters) == 6
     assert seen_eps == [0.35, 0.35]
     assert meta["eps_base"] == 0.35
     assert meta["eps_block_policy_enabled"] is False
@@ -276,7 +278,7 @@ def test_cluster_eps_block_policy_disabled_uses_base_eps(monkeypatch):
 
 
 def test_cluster_eps_block_policy_applies_buckets_and_clamp(monkeypatch):
-    small_ids = [f"s{i}" for i in range(2)]
+    small_ids = [f"s{i}" for i in range(3)]
     mid_ids = [f"m{i}" for i in range(12)]
     big_ids = [f"b{i}" for i in range(66)]
 
@@ -464,6 +466,77 @@ def test_cluster_blockwise_dbscan_cpu_sharding_matches_sequential():
     seq_m = seq.sort_values("mention_id").reset_index(drop=True)[["mention_id", "author_uid"]]
     par_m = par.sort_values("mention_id").reset_index(drop=True)[["mention_id", "author_uid"]]
     pd.testing.assert_frame_equal(seq_m, par_m)
+
+
+def test_cluster_blockwise_dbscan_two_point_fast_path_matches_dbscan():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        [
+            {"pair_id": "a1__a2", "mention_id_1": "a1", "mention_id_2": "a2", "block_key": "blk.a", "distance": 0.4}
+        ]
+    )
+    cfg = {"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
+
+    clusters = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        backend="sklearn_cpu",
+    )
+
+    assert list(clusters.sort_values("mention_id")["author_uid"]) == ["blk.a::0", "blk.a::1"]
+
+
+def test_cluster_backend_auto_prefers_cpu_for_small_workloads(monkeypatch):
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        [
+            {"pair_id": "a1__a2", "mention_id_1": "a1", "mention_id_2": "a2", "block_key": "blk.a", "distance": 0.05}
+        ]
+    )
+    cfg = {"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
+    seen = {"gpu_called": False}
+
+    monkeypatch.setattr(
+        "author_name_disambiguation.approaches.nand.cluster._resolve_cluster_backend",
+        lambda backend, metric: {
+            "requested": backend,
+            "effective": "cuml_gpu",
+            "reason": "forced-test",
+            "cuml_available": True,
+            "metric": metric,
+        },
+    )
+
+    def _gpu(*args, **kwargs):
+        seen["gpu_called"] = True
+        return np.asarray([0, 0], dtype=np.int64)
+
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster._run_dbscan_cuml", _gpu)
+
+    clusters, meta = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        backend="auto",
+        return_meta=True,
+    )
+
+    assert len(clusters) == 2
+    assert meta["cluster_backend_requested"] == "auto"
+    assert meta["cluster_backend_effective"] == "sklearn_cpu"
+    assert meta["cluster_backend_reason"] == "auto_small_workload_cpu"
+    assert seen["gpu_called"] is False
 
 
 def test_cluster_backend_gpu_failure_falls_back_to_cpu(monkeypatch):

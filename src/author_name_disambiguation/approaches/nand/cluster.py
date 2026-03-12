@@ -6,6 +6,7 @@ import unicodedata
 import warnings
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -36,6 +37,17 @@ _SURNAME_PARTICLES = {
     "van",
     "von",
 }
+_BLOCK_SIZE_HIST_BUCKETS = [
+    ("1", 1, 1),
+    ("2", 2, 2),
+    ("3-4", 3, 4),
+    ("5-8", 5, 8),
+    ("9-16", 9, 16),
+    ("17-32", 17, 32),
+    ("33-64", 33, 64),
+    ("65+", 65, None),
+]
+_LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
 
 
 def _ascii_fold(text: str) -> str:
@@ -516,11 +528,45 @@ def _run_dbscan_cuml(dist: np.ndarray, eps: float, min_samples: int, metric: str
     import cupy as cp  # type: ignore
     from cuml.cluster import DBSCAN as CuMLDBSCAN  # type: ignore
 
+    global _LAST_CUML_TIMINGS
+    transfer_started_at = perf_counter()
     x_gpu = cp.asarray(dist)
+    transfer_seconds = perf_counter() - transfer_started_at
     model = CuMLDBSCAN(eps=float(eps), min_samples=int(min_samples), metric=str(metric))
+    fit_started_at = perf_counter()
     labels_gpu = model.fit_predict(x_gpu)
     labels = cp.asnumpy(labels_gpu)
+    fit_seconds = perf_counter() - fit_started_at
+    _LAST_CUML_TIMINGS = {
+        "gpu_transfer_seconds": float(transfer_seconds),
+        "dbscan_seconds": float(fit_seconds),
+    }
     return np.asarray(labels, dtype=np.int64)
+
+
+def _cluster_two_point_block(dist: np.ndarray, eps: float, min_samples: int) -> np.ndarray:
+    edge_distance = float(dist[0, 1])
+    if edge_distance <= float(eps):
+        if int(min_samples) <= 2:
+            return np.asarray([0, 0], dtype=np.int64)
+        return np.asarray([-1, -1], dtype=np.int64)
+    if int(min_samples) <= 1:
+        return np.asarray([0, 1], dtype=np.int64)
+    return np.asarray([-1, -1], dtype=np.int64)
+
+
+def _build_block_size_histogram(entries: list[dict[str, Any]]) -> dict[str, int]:
+    hist = {label: 0 for label, _, _ in _BLOCK_SIZE_HIST_BUCKETS}
+    for entry in entries:
+        size = int(entry["size"])
+        for label, min_size, max_size in _BLOCK_SIZE_HIST_BUCKETS:
+            if size < int(min_size):
+                continue
+            if max_size is not None and size > int(max_size):
+                continue
+            hist[label] += 1
+            break
+    return {label: int(count) for label, count in hist.items() if count > 0}
 
 
 def _cluster_single_block(
@@ -533,7 +579,7 @@ def _cluster_single_block(
     metric: str,
     constraints: Dict[str, Any],
     backend: str,
-) -> tuple[list[dict[str, str]], dict[str, int]]:
+) -> tuple[list[dict[str, str]], dict[str, int], dict[str, Any]]:
     sanitize_totals = {
         "corrected_blocks": 0,
         "non_finite_count": 0,
@@ -542,16 +588,36 @@ def _cluster_single_block(
         "asymmetry_pairs": 0,
         "diag_reset_count": 0,
     }
+    timing = {
+        "block_key": str(block_key),
+        "block_size": int(len(block_mentions)),
+        "pair_rows": int(len(block_scores)),
+        "distance_matrix_seconds": 0.0,
+        "constraints_seconds": 0.0,
+        "sanitize_seconds": 0.0,
+        "dbscan_seconds": 0.0,
+        "gpu_transfer_seconds": 0.0,
+        "total_seconds": 0.0,
+        "backend": str(backend),
+    }
+    block_started_at = perf_counter()
 
     block_mentions = block_mentions.reset_index(drop=True)
     if len(block_mentions) == 1:
         m = str(block_mentions.iloc[0]["mention_id"])
         rows = [{"mention_id": m, "block_key": str(block_key), "author_uid": f"{block_key}::0"}]
-        return rows, sanitize_totals
+        timing["total_seconds"] = float(perf_counter() - block_started_at)
+        return rows, sanitize_totals, timing
 
+    distance_started_at = perf_counter()
     dist, _ = _build_distance_matrix(block_mentions, block_scores)
+    timing["distance_matrix_seconds"] = float(perf_counter() - distance_started_at)
+    constraints_started_at = perf_counter()
     dist = _apply_constraints(dist, block_mentions, constraints)
+    timing["constraints_seconds"] = float(perf_counter() - constraints_started_at)
+    sanitize_started_at = perf_counter()
     dist, sanitize_meta = sanitize_precomputed_distance_matrix(dist)
+    timing["sanitize_seconds"] = float(perf_counter() - sanitize_started_at)
     if sanitize_meta["corrected"]:
         sanitize_totals["corrected_blocks"] += 1
     sanitize_totals["non_finite_count"] += int(sanitize_meta["non_finite_count"])
@@ -561,22 +627,32 @@ def _cluster_single_block(
     sanitize_totals["diag_reset_count"] += int(sanitize_meta["diag_reset_count"])
 
     backend_clean = str(backend).strip().lower()
-    if backend_clean == "cuml_gpu":
+    dbscan_started_at = perf_counter()
+    if len(block_mentions) == 2:
+        labels = _cluster_two_point_block(dist=dist, eps=eps, min_samples=min_samples)
+        timing["dbscan_seconds"] = float(perf_counter() - dbscan_started_at)
+    elif backend_clean == "cuml_gpu":
+        global _LAST_CUML_TIMINGS
+        _LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
         labels = _run_dbscan_cuml(dist=dist, eps=eps, min_samples=min_samples, metric=metric)
+        timing["gpu_transfer_seconds"] = float(_LAST_CUML_TIMINGS.get("gpu_transfer_seconds", 0.0))
+        timing["dbscan_seconds"] = float(_LAST_CUML_TIMINGS.get("dbscan_seconds", 0.0))
     else:
         model = DBSCAN(eps=float(eps), min_samples=int(min_samples), metric=str(metric))
         labels = model.fit_predict(dist)
+        timing["dbscan_seconds"] = float(perf_counter() - dbscan_started_at)
 
     rows: list[dict[str, str]] = []
     for mention_id, label in zip(block_mentions["mention_id"].astype(str).tolist(), np.asarray(labels).tolist()):
         uid = f"{block_key}::{int(label)}"
         rows.append({"mention_id": mention_id, "block_key": str(block_key), "author_uid": uid})
 
-    return rows, sanitize_totals
+    timing["total_seconds"] = float(perf_counter() - block_started_at)
+    return rows, sanitize_totals, timing
 
 
 def _cluster_worker(payload: dict[str, Any]) -> dict[str, Any]:
-    rows, sanitize = _cluster_single_block(
+    rows, sanitize, timing = _cluster_single_block(
         block_key=payload["block_key"],
         block_mentions=payload["block_mentions"],
         block_scores=payload["block_scores"],
@@ -589,6 +665,7 @@ def _cluster_worker(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "rows": rows,
         "sanitize": sanitize,
+        "timing": timing,
         "block_key": payload["block_key"],
         "matrix_bytes": int(payload["matrix_bytes"]),
     }
@@ -677,9 +754,10 @@ def _cluster_entries_sequential(
     constraints: Dict[str, Any],
     backend: str,
     show_progress: bool,
-) -> tuple[list[dict[str, str]], dict[str, int]]:
+) -> tuple[list[dict[str, str]], dict[str, int], list[dict[str, Any]]]:
     rows: list[dict[str, str]] = []
     sanitize_rows: list[dict[str, int]] = []
+    timing_rows: list[dict[str, Any]] = []
 
     iterator = iter_progress(
         entries,
@@ -690,7 +768,7 @@ def _cluster_entries_sequential(
     )
 
     for entry in iterator:
-        block_rows, sanitize = _cluster_single_block(
+        block_rows, sanitize, timing = _cluster_single_block(
             block_key=entry["block_key"],
             block_mentions=entry["mentions"],
             block_scores=entry["scores"],
@@ -702,8 +780,9 @@ def _cluster_entries_sequential(
         )
         rows.extend(block_rows)
         sanitize_rows.append(sanitize)
+        timing_rows.append(timing)
 
-    return rows, _aggregate_sanitize_totals(sanitize_rows)
+    return rows, _aggregate_sanitize_totals(sanitize_rows), timing_rows
 
 
 def cluster_blockwise_dbscan(
@@ -727,6 +806,7 @@ def cluster_blockwise_dbscan(
     constraints = cluster_config.get("constraints", {})
     eps_block_policy = _normalize_eps_block_policy(cluster_config)
 
+    build_entries_started_at = perf_counter()
     entries, eps_block_policy_summary = _build_block_entries(
         mentions=mentions,
         pair_scores=pair_scores,
@@ -735,12 +815,21 @@ def cluster_blockwise_dbscan(
         eps_max=eps_max,
         eps_block_policy=eps_block_policy,
     )
+    build_entries_seconds = perf_counter() - build_entries_started_at
     total_pairs_est = int(sum(int(e["pair_est"]) for e in entries))
     n_blocks = int(len(entries))
+    block_sizes = np.asarray([int(e["size"]) for e in entries], dtype=np.int64)
+    block_p95 = float(np.percentile(block_sizes, 95)) if len(block_sizes) else 0.0
 
     backend_info = _resolve_cluster_backend(backend=backend, metric=metric)
     backend_requested = str(backend_info["requested"])
     backend_effective = str(backend_info["effective"])
+    if backend_requested == "auto" and backend_effective == "cuml_gpu":
+        if total_pairs_est < 1_000_000 or block_p95 <= 4.0:
+            backend_effective = "sklearn_cpu"
+            backend_info = dict(backend_info)
+            backend_info["effective"] = "sklearn_cpu"
+            backend_info["reason"] = "auto_small_workload_cpu"
 
     if backend_requested == "cuml_gpu" and backend_effective != "cuml_gpu":
         warnings.warn(
@@ -777,11 +866,12 @@ def cluster_blockwise_dbscan(
 
     rows: list[dict[str, str]]
     sanitize_totals: dict[str, int]
+    timing_rows: list[dict[str, Any]] = []
 
     # GPU backend runs in-process (single-device path).
     if backend_effective == "cuml_gpu":
         try:
-            rows, sanitize_totals = _cluster_entries_sequential(
+            rows, sanitize_totals, timing_rows = _cluster_entries_sequential(
                 entries=entries,
                 eps=eps,
                 min_samples=min_samples,
@@ -799,7 +889,7 @@ def cluster_blockwise_dbscan(
                 RuntimeWarning,
             )
             backend_effective = "sklearn_cpu"
-            rows, sanitize_totals = _cluster_entries_sequential(
+            rows, sanitize_totals, timing_rows = _cluster_entries_sequential(
                 entries=entries,
                 eps=eps,
                 min_samples=min_samples,
@@ -810,7 +900,7 @@ def cluster_blockwise_dbscan(
             )
     else:
         if (not sharding_on) or workers_effective <= 1 or len(entries) <= 1:
-            rows, sanitize_totals = _cluster_entries_sequential(
+            rows, sanitize_totals, timing_rows = _cluster_entries_sequential(
                 entries=entries,
                 eps=eps,
                 min_samples=min_samples,
@@ -843,9 +933,10 @@ def cluster_blockwise_dbscan(
 
             rows = []
             sanitize_rows: list[dict[str, int]] = []
+            timing_rows = []
 
             if oversize_entries:
-                seq_rows, seq_sanitize = _cluster_entries_sequential(
+                seq_rows, seq_sanitize, seq_timing_rows = _cluster_entries_sequential(
                     entries=oversize_entries,
                     eps=eps,
                     min_samples=min_samples,
@@ -856,6 +947,7 @@ def cluster_blockwise_dbscan(
                 )
                 rows.extend(seq_rows)
                 sanitize_rows.append(seq_sanitize)
+                timing_rows.extend(seq_timing_rows)
 
             if parallel_entries:
                 # Largest matrices first to improve tail latency and make memory pressure explicit.
@@ -913,6 +1005,7 @@ def cluster_blockwise_dbscan(
                                 result = dict(fut.result())
                                 rows.extend(result.get("rows", []))
                                 sanitize_rows.append(dict(result.get("sanitize", {})))
+                                timing_rows.append(dict(result.get("timing", {})))
 
             sanitize_totals = _aggregate_sanitize_totals(sanitize_rows)
 
@@ -944,6 +1037,17 @@ def cluster_blockwise_dbscan(
     if output_path is not None:
         save_parquet(out, output_path, index=False)
 
+    timing_rows = [row for row in timing_rows if row]
+    top_slow_blocks = sorted(
+        timing_rows,
+        key=lambda row: (-float(row.get("total_seconds", 0.0)), str(row.get("block_key", ""))),
+    )[:10]
+    distance_matrix_seconds_total = float(sum(float(row.get("distance_matrix_seconds", 0.0)) for row in timing_rows))
+    constraints_seconds_total = float(sum(float(row.get("constraints_seconds", 0.0)) for row in timing_rows))
+    sanitize_seconds_total = float(sum(float(row.get("sanitize_seconds", 0.0)) for row in timing_rows))
+    dbscan_seconds_total = float(sum(float(row.get("dbscan_seconds", 0.0)) for row in timing_rows))
+    gpu_transfer_seconds_total = float(sum(float(row.get("gpu_transfer_seconds", 0.0)) for row in timing_rows))
+
     meta = {
         "eps_base": float(eps),
         "eps_block_policy_enabled": bool(eps_block_policy.get("enabled", False)),
@@ -960,6 +1064,15 @@ def cluster_blockwise_dbscan(
         "cpu_min_pairs_per_worker": int(min_pairs_per_worker),
         "ram_budget_bytes": None if ram_budget_bytes is None else int(ram_budget_bytes),
         "total_pairs_est": int(total_pairs_est),
+        "block_p95": float(block_p95),
+        "block_size_histogram": _build_block_size_histogram(entries),
+        "build_entries_seconds": float(build_entries_seconds),
+        "distance_matrix_seconds_total": distance_matrix_seconds_total,
+        "constraints_seconds_total": constraints_seconds_total,
+        "sanitize_seconds_total": sanitize_seconds_total,
+        "dbscan_seconds_total": dbscan_seconds_total,
+        "gpu_transfer_seconds_total": gpu_transfer_seconds_total,
+        "top_slow_blocks": top_slow_blocks,
         "sanitize_totals": sanitize_totals,
     }
     out.attrs["cluster_meta"] = meta

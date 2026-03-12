@@ -251,14 +251,24 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             out.to_parquet(output_path, index=False)
         if bool(_kwargs.get("return_meta")):
             return out, {
+                "build_entries_seconds": 0.01,
                 "cluster_backend_requested": str(_kwargs.get("backend", "auto")),
                 "cluster_backend_effective": "sklearn_cpu",
+                "cluster_backend_reason": "test",
                 "cpu_sharding_mode": str(_kwargs.get("sharding_mode", "auto")),
                 "cpu_sharding_enabled": str(_kwargs.get("sharding_mode", "auto")) != "off",
                 "cpu_workers_requested": "auto" if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
                 "cpu_workers_effective": 4 if _kwargs.get("num_workers") is None else int(_kwargs["num_workers"]),
                 "ram_budget_bytes": int(_kwargs["ram_budget_bytes"]) if _kwargs.get("ram_budget_bytes") is not None else None,
                 "total_pairs_est": int(len(pair_scores)),
+                "block_p95": 2.0,
+                "block_size_histogram": {"1": 1, "2": 2},
+                "distance_matrix_seconds_total": 0.01,
+                "constraints_seconds_total": 0.0,
+                "sanitize_seconds_total": 0.0,
+                "dbscan_seconds_total": 0.01,
+                "gpu_transfer_seconds_total": 0.0,
+                "top_slow_blocks": [],
             }
         return out
 
@@ -332,17 +342,23 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert refs_df.loc[0, "AuthorUID"][1].startswith("my_ads_2026::blk.r.1")
     assert "author_display_name" in entities.columns
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
+    assert context["runtime"]["load_inputs"]["read_publications_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert context["runtime"]["specter"]["fallback_reason"] == "torch_cuda_unavailable"
     assert context["runtime"]["pair_building"]["cpu_workers_effective"] == 4
     assert context["runtime"]["clustering"]["cpu_workers_effective"] == 4
     assert preflight["runtime"]["chars2vec"]["tensorflow_cleanup_attempted"] is True
+    assert preflight["runtime"]["load_inputs"]["explode_mentions_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
     assert preflight["runtime"]["clustering"]["cpu_sharding_enabled"] is True
+    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_frame_reuse"
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
+    assert stage_metrics["runtime"]["load_inputs"]["deduplicate_seconds"] >= 0.0
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
+    assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
+    assert stage_metrics["runtime"]["export"]["source_reread_seconds"] == 0.0
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
     assert "START Bootstrap" in captured.err
     assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err

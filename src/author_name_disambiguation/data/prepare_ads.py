@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from author_name_disambiguation.common.io_schema import MENTION_REQUIRED_COLUMNS, save_parquet, validate_columns
@@ -125,6 +127,100 @@ def _pick_embedding(record: dict[str, Any]) -> list[float] | None:
     return None
 
 
+def _is_present_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and pd.isna(value):
+        return False
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
+        return any(
+            item is not None and not (isinstance(item, float) and pd.isna(item)) and str(item).strip()
+            for item in value
+        )
+    return bool(str(value).strip())
+
+
+def _normalize_optional_list_or_scalar_value(value: Any) -> Any:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
+        return [None if item is None else str(item).strip() for item in value]
+    text = str(value).strip()
+    return text or None
+
+
+def _normalize_embedding_value(value: Any) -> list[float] | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
+        values = [float(item) for item in value]
+        return values or None
+    return None
+
+
+def _coalesce_text_columns(frame: pd.DataFrame, keys: Iterable[str]) -> pd.Series:
+    result = pd.Series("", index=frame.index, dtype=object)
+    remaining = pd.Series(True, index=frame.index, dtype=bool)
+    for key in keys:
+        if key not in frame.columns:
+            continue
+        candidate = frame[key]
+        if candidate.dtype != object:
+            candidate = candidate.astype(object)
+        candidate = candidate.fillna("").astype(str).str.strip()
+        take_mask = remaining & candidate.ne("")
+        if bool(take_mask.any()):
+            result.loc[take_mask] = candidate.loc[take_mask]
+            remaining.loc[take_mask] = False
+    return result
+
+
+def _coalesce_object_columns(frame: pd.DataFrame, keys: Iterable[str]) -> pd.Series:
+    result = pd.Series([None] * len(frame), index=frame.index, dtype=object)
+    remaining = pd.Series(True, index=frame.index, dtype=bool)
+    for key in keys:
+        if key not in frame.columns:
+            continue
+        candidate = frame[key]
+        take_mask = remaining & candidate.map(_is_present_value)
+        if bool(take_mask.any()):
+            result.loc[take_mask] = candidate.loc[take_mask]
+            remaining.loc[take_mask] = False
+    return result
+
+
+def _normalize_ads_parquet_frame(raw_frame: pd.DataFrame, source_type: str) -> pd.DataFrame:
+    bibcode = _coalesce_text_columns(raw_frame, ["Bibcode", "bibcode"])
+    authors_raw = _coalesce_object_columns(raw_frame, ["Author", "author"])
+    authors = authors_raw.map(split_author_field)
+    title = _coalesce_text_columns(raw_frame, ["Title_en", "Title", "title"])
+    abstract = _coalesce_text_columns(raw_frame, ["Abstract_en", "Abstract", "abstract"])
+    year = _coalesce_object_columns(raw_frame, ["Year", "year"]).map(parse_year)
+    aff = _coalesce_object_columns(raw_frame, ["Affiliation", "Affilliation", "aff"]).map(
+        _normalize_optional_list_or_scalar_value
+    )
+    precomputed_embedding = _coalesce_object_columns(raw_frame, ["precomputed_embedding", "embedding"]).map(
+        _normalize_embedding_value
+    )
+
+    out = pd.DataFrame(
+        {
+            "bibcode": bibcode,
+            "title": title,
+            "abstract": abstract,
+            "year": year,
+            "aff": aff,
+            "authors": authors,
+            "source_type": str(source_type),
+            "source_row_idx": np.arange(len(raw_frame), dtype=np.int64),
+            "precomputed_embedding": precomputed_embedding,
+        }
+    )
+    out = out[out["bibcode"].astype(str).str.strip() != ""].copy()
+    out = out[out["authors"].map(bool)].copy()
+    return out.reset_index(drop=True)
+
+
 def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str, Any] | None:
     source_row_idx = int(record.get("_source_row_idx", 0))
     bibcode = str(record.get("Bibcode") or record.get("bibcode") or "").strip()
@@ -153,31 +249,62 @@ def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str,
     }
 
 
-def load_ads_records(path: str | Path, source_type: str) -> pd.DataFrame:
+def load_ads_records(
+    path: str | Path,
+    source_type: str,
+    *,
+    return_raw_source: bool = False,
+    return_meta: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame | None, dict[str, Any]]:
     resolved = Path(path).expanduser().resolve()
     if not resolved.exists():
         raise FileNotFoundError(f"Input file not found: {resolved}")
 
-    rows: list[dict[str, Any]] = []
-    for record in _iter_ads_records(resolved):
-        normalized = _normalize_ads_record(record, source_type=source_type)
-        if normalized is not None:
-            rows.append(normalized)
+    read_started_at = perf_counter()
+    normalize_started_at = None
+    raw_source: pd.DataFrame | None = None
 
-    return pd.DataFrame(
-        rows,
-        columns=[
-            "bibcode",
-            "title",
-            "abstract",
-            "year",
-            "aff",
-            "authors",
-            "source_type",
-            "source_row_idx",
-            "precomputed_embedding",
-        ],
-    )
+    if resolved.suffix.lower() == ".parquet":
+        raw_source = pd.read_parquet(resolved)
+        read_seconds = perf_counter() - read_started_at
+        normalize_started_at = perf_counter()
+        out = _normalize_ads_parquet_frame(raw_source, source_type=source_type)
+        normalize_seconds = perf_counter() - normalize_started_at
+        mode = "parquet_vectorized"
+    else:
+        rows: list[dict[str, Any]] = []
+        normalize_started_at = perf_counter()
+        for record in _iter_ads_records(resolved):
+            normalized = _normalize_ads_record(record, source_type=source_type)
+            if normalized is not None:
+                rows.append(normalized)
+        read_seconds = 0.0
+        normalize_seconds = perf_counter() - normalize_started_at
+        out = pd.DataFrame(
+            rows,
+            columns=[
+                "bibcode",
+                "title",
+                "abstract",
+                "year",
+                "aff",
+                "authors",
+                "source_type",
+                "source_row_idx",
+                "precomputed_embedding",
+            ],
+        )
+        mode = "record_iter"
+
+    meta = {
+        "mode": mode,
+        "read_seconds": float(read_seconds),
+        "normalize_seconds": float(normalize_seconds),
+        "rows": int(len(out)),
+    }
+    if return_meta:
+        return out, (raw_source if return_raw_source else None), meta
+    return out
 
 
 def deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame) -> pd.DataFrame:
@@ -204,28 +331,36 @@ def deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame
             ]
         )
 
-    all_records = all_records.sort_values(["bibcode", "_priority", "source_row_idx"]).reset_index(drop=True)
+    all_records = all_records.sort_values(["bibcode", "_priority", "source_row_idx"], kind="stable").reset_index(drop=True)
+    grouped = all_records.groupby("bibcode", sort=False)
 
-    dedup_rows: list[dict[str, Any]] = []
-    for bibcode, group in all_records.groupby("bibcode", sort=False):
-        first = group.iloc[0].to_dict()
-        source_set = set(group["source_type"].dropna().astype(str).tolist())
-        for field in ["title", "abstract", "year", "aff", "precomputed_embedding", "authors"]:
-            current = first.get(field)
-            if current in (None, "", []) or (field == "year" and pd.isna(current)):
-                for _, row in group.iterrows():
-                    candidate = row.get(field)
-                    if candidate not in (None, "", []) and not (field == "year" and pd.isna(candidate)):
-                        first[field] = candidate
-                        break
+    first_rows = all_records.drop_duplicates(subset=["bibcode"], keep="first").copy()
+    first_rows["source_type"] = "ads"
+    has_publication = grouped["source_type"].transform(lambda s: bool((s.astype(str) == "publication").any()))
+    has_reference = grouped["source_type"].transform(lambda s: bool((s.astype(str) == "reference").any()))
+    first_rows["source_type"] = np.select(
+        [
+            has_publication.loc[first_rows.index].to_numpy(dtype=bool)
+            & has_reference.loc[first_rows.index].to_numpy(dtype=bool),
+            has_publication.loc[first_rows.index].to_numpy(dtype=bool),
+            has_reference.loc[first_rows.index].to_numpy(dtype=bool),
+        ],
+        ["publication+reference", "publication", "reference"],
+        default="ads",
+    )
 
-        first["bibcode"] = bibcode
-        first["source_type"] = "+".join(sorted(source_set)) if source_set else "ads"
-        first["canonical_source_type"] = str(group.iloc[0]["source_type"])
-        first["canonical_source_row_idx"] = int(group.iloc[0]["source_row_idx"])
-        dedup_rows.append(first)
+    for field in ["title", "abstract", "year", "aff", "precomputed_embedding", "authors"]:
+        candidate = all_records[field]
+        if field == "year":
+            valid = candidate.notna()
+        else:
+            valid = candidate.map(_is_present_value)
+        first_valid = candidate.where(valid, None).groupby(all_records["bibcode"], sort=False).transform("first")
+        first_rows[field] = first_valid.loc[first_rows.index].to_list()
 
-    out = pd.DataFrame(dedup_rows)
+    first_rows["canonical_source_type"] = all_records.loc[first_rows.index, "source_type"].astype(str).to_list()
+    first_rows["canonical_source_row_idx"] = all_records.loc[first_rows.index, "source_row_idx"].astype(int).to_list()
+    out = first_rows
     keep_cols = [
         "bibcode",
         "title",
@@ -245,24 +380,63 @@ def deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame
 def prepare_ads_source_data(
     publications_path: str | Path,
     references_path: str | Path | None = None,
+    *,
+    return_raw_sources: bool = False,
+    return_runtime_meta: bool = False,
 ) -> dict[str, pd.DataFrame]:
-    publications = load_ads_records(publications_path, source_type="publication")
-    references = (
-        pd.DataFrame(columns=publications.columns.tolist())
-        if references_path is None
-        else load_ads_records(references_path, source_type="reference")
+    pubs_result = load_ads_records(
+        publications_path,
+        source_type="publication",
+        return_raw_source=return_raw_sources,
+        return_meta=True,
     )
+    publications, raw_publications, pubs_meta = pubs_result
+    if references_path is None:
+        references = pd.DataFrame(columns=publications.columns.tolist())
+        raw_references = None
+        refs_meta = {"mode": "not_present", "read_seconds": 0.0, "normalize_seconds": 0.0, "rows": 0}
+    else:
+        refs_result = load_ads_records(
+            references_path,
+            source_type="reference",
+            return_raw_source=return_raw_sources,
+            return_meta=True,
+        )
+        references, raw_references, refs_meta = refs_result
+
+    deduplicate_started_at = perf_counter()
     canonical_records = deduplicate_ads_records(publications, references)
+    deduplicate_seconds = perf_counter() - deduplicate_started_at
+
+    explode_started_at = perf_counter()
     mentions = explode_records_to_mentions(canonical_records, source_type_default="ads")
+    explode_mentions_seconds = perf_counter() - explode_started_at
     if len(mentions) == 0:
         raise ValueError("No source mentions created. Check input files and author parsing.")
     validate_columns(mentions, MENTION_REQUIRED_COLUMNS, "source_mentions")
-    return {
+    runtime_meta = {
+        "read_publications_seconds": float(pubs_meta["read_seconds"]),
+        "read_references_seconds": float(refs_meta["read_seconds"]),
+        "normalize_seconds": float(pubs_meta["normalize_seconds"]) + float(refs_meta["normalize_seconds"]),
+        "normalize_publications_seconds": float(pubs_meta["normalize_seconds"]),
+        "normalize_references_seconds": float(refs_meta["normalize_seconds"]),
+        "deduplicate_seconds": float(deduplicate_seconds),
+        "explode_mentions_seconds": float(explode_mentions_seconds),
+        "publications_mode": pubs_meta["mode"],
+        "references_mode": refs_meta["mode"],
+    }
+    result = {
         "publications": publications,
         "references": references,
         "canonical_records": canonical_records,
         "mentions": mentions,
     }
+    if return_raw_sources:
+        result["raw_publications"] = raw_publications
+        result["raw_references"] = raw_references
+    if return_runtime_meta:
+        result["runtime"] = runtime_meta
+    return result
 
 
 def normalize_ads_mentions(

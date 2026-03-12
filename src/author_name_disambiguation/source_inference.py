@@ -622,11 +622,18 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     prepared = prepare_ads_source_data(
         publications_path=request.publications_path,
         references_path=request.references_path,
+        return_raw_sources=True,
+        return_runtime_meta=True,
     )
     publications = prepared["publications"]
     references = prepared["references"]
     canonical_records = prepared["canonical_records"]
     full_mentions = prepared["mentions"]
+    raw_publications = prepared.get("raw_publications")
+    raw_references = prepared.get("raw_references")
+    load_inputs_runtime = dict(prepared.get("runtime", {}) or {})
+    context_payload["runtime"] = {"load_inputs": load_inputs_runtime}
+    write_json(context_payload, context_path)
     _ui_done(
         "Loaded "
         f"publications={_format_count(len(publications))} "
@@ -799,6 +806,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
 
     preflight["runtime"] = {
+        "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
     }
@@ -902,6 +910,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             pair_scores = read_parquet(pair_scores_path)
 
     preflight["runtime"] = {
+        "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
@@ -962,6 +971,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_registry_path=uid_registry_path,
     )
     preflight["runtime"] = {
+        "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
@@ -983,6 +993,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _ui_info(f"writing {result_paths['publications_disambiguated'].name}")
     if result_paths["references_disambiguated"] is not None:
         _ui_info(f"writing {result_paths['references_disambiguated'].name}")
+    export_runtime_meta: dict[str, Any] = {}
     assignments_result = build_source_author_assignments(
         publications=publications,
         references=references,
@@ -992,12 +1003,18 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_namespace=uid_namespace,
         output_path=result_paths["source_author_assignments"],
         return_author_entities=True,
+        return_runtime_meta=True,
     )
-    if isinstance(assignments_result, tuple) and len(assignments_result) == 2:
+    if isinstance(assignments_result, tuple) and len(assignments_result) == 3:
+        assignments, author_entities, export_build_runtime = assignments_result
+        export_runtime_meta.update(dict(export_build_runtime))
+    elif isinstance(assignments_result, tuple) and len(assignments_result) == 2:
         assignments, author_entities = assignments_result
     else:
         assignments = assignments_result
         author_entities = build_author_entities(assignments)
+        export_runtime_meta["build_assignments_seconds"] = 0.0
+        export_runtime_meta["build_author_entities_seconds"] = 0.0
     save_parquet(author_entities, result_paths["author_entities"], index=False)
     clusters = clusters.merge(
         author_entities[["author_uid", "author_display_name"]],
@@ -1006,14 +1023,32 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     save_parquet(clusters, result_paths["mention_clusters"], index=False)
 
-    source_export_qc = export_source_mirrored_outputs(
+    source_export_result = export_source_mirrored_outputs(
         assignments=assignments,
         publications_path=request.publications_path,
         references_path=request.references_path,
         publications_output_path=result_paths["publications_disambiguated"],
         references_output_path=result_paths["references_disambiguated"],
+        publications_frame=raw_publications,
+        references_frame=raw_references,
+        return_runtime_meta=True,
     )
+    if isinstance(source_export_result, tuple) and len(source_export_result) == 2:
+        source_export_qc, export_mirror_runtime = source_export_result
+        export_runtime_meta.update(dict(export_mirror_runtime))
+    else:
+        source_export_qc = source_export_result
     write_json(source_export_qc, source_export_qc_path)
+    preflight["runtime"] = {
+        "load_inputs": load_inputs_runtime,
+        "chars2vec": dict(chars_meta),
+        "specter": text_runtime_meta,
+        "pair_building": pair_meta,
+        "pair_scoring": pair_score_runtime_meta,
+        "clustering": cluster_runtime_meta,
+        "export": export_runtime_meta,
+    }
+    write_json(preflight, preflight_path)
 
     cluster_qc = build_cluster_qc(
         pair_scores=pair_scores,
@@ -1037,22 +1072,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "cluster_config_used": cluster_cfg_used,
         "cluster_runtime": cluster_runtime_meta,
         "runtime": {
+            "load_inputs": load_inputs_runtime,
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
             "pair_scoring": pair_score_runtime_meta,
             "clustering": cluster_runtime_meta,
+            "export": export_runtime_meta,
         },
         "precomputed_embeddings": precomputed_embeddings,
         "uid_resolution": uid_mode_meta,
     }
     write_json(cluster_used_payload, cluster_cfg_used_path)
     context_payload["runtime"] = {
+        "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
+        "export": export_runtime_meta,
     }
     context_payload["precomputed_embeddings"] = precomputed_embeddings
     write_json(context_payload, context_path)
@@ -1101,11 +1140,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_upper_bound=preflight.get("pair_upper_bound"),
         source_export_qc=source_export_qc,
         runtime={
+            "load_inputs": load_inputs_runtime,
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
             "pair_scoring": pair_score_runtime_meta,
             "clustering": cluster_runtime_meta,
+            "export": export_runtime_meta,
         },
         precomputed_embeddings=precomputed_embeddings,
     )
