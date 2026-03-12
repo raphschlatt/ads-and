@@ -99,9 +99,42 @@ The source-mirrored outputs preserve all input fields and add:
 - `AuthorUID`
 - `AuthorDisplayName`
 
+## Baseline And Compare
+
+The canonical inference baseline is tracked in:
+
+- `docs/baselines/infer_ads_full_run_20260305_v21_fix4.json`
+
+Current keep-set for large inference artifacts:
+
+- `artifacts/exports/bench_full_v21_fix4`
+- `artifacts/exports/bench_mid_v21_fix4`
+- `artifacts/exports/infer_ads_full_20260305_full_20260310T134713Z`
+- `artifacts/exports/infer_ads_full_20260305_full_20260310T134713Z.run.log`
+
+The historical full reference remains for provenance. New comparisons should use the current baseline:
+
+```bash
+author-name-disambiguation compare-infer-baseline \
+  --baseline-run-id bench_full_v21_fix4 \
+  --current-run-id <new_run_dir_name> \
+  --metrics-root artifacts/exports
+```
+
+This writes:
+
+- `99_compare_infer_to_baseline.json`
+
+The compare report includes:
+
+- stage/count deltas from `05_stage_metrics_infer_sources.json`
+- coverage/go-no-go deltas
+- partition-aware `mention_clusters` drift, not just raw UID-string diffs
+
 ## Notes
 
 - The public inference path does not accept `model_run_id`.
 - The package does not expect repo-relative workspace discovery at runtime.
 - Packaged defaults are used when `cluster_config` and `gates_config` are omitted.
 - Aborted runs should be cleaned per `output_root`; no shared cache cleanup is done automatically.
+- Large historical inference artifacts outside the documented keep-set are expected to be removed after baseline freeze.

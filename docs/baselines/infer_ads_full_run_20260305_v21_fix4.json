@@ -65,6 +65,7 @@
   ],
   "artifact_keep_set": [
     "infer_ads_full_20260305_full_20260310T134713Z",
+    "infer_ads_full_20260305_full_20260310T134713Z.run.log",
     "bench_full_v21_fix4",
     "bench_mid_v21_fix4"
   ]
