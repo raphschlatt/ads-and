@@ -563,7 +563,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     max_pairs_per_block = infer_overrides.get("max_pairs_per_block", model_info["run_cfg"].get("max_pairs_per_block"))
     max_pairs_per_block = None if max_pairs_per_block is None else int(max_pairs_per_block)
     score_batch_size = int(infer_overrides.get("score_batch_size", 8192))
-    specter_batch_size = int(infer_overrides.get("specter_batch_size", 32))
+    specter_batch_size_override = infer_overrides.get("specter_batch_size")
+    specter_batch_size = None if specter_batch_size_override is None else int(specter_batch_size_override)
     specter_precision_mode = str(infer_overrides.get("specter_precision_mode", "auto")).strip().lower()
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
     score_chunked_threshold = int(infer_overrides.get("score_chunked_threshold", 500_000))
@@ -757,10 +758,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     text_embeddings_started_at = perf_counter()
     _ui_start("Text embeddings")
     text_cache_requested = text_path.exists() and not bool(request.force)
+    specter_batch_size_label = "auto" if specter_batch_size is None else _format_count(specter_batch_size)
     _ui_info(
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
         f"precomputed={_format_count(precomputed_embeddings['mentions']['precomputed_embedding_count'])} | "
-        f"batch_size={_format_count(specter_batch_size)} | device={str(request.device)} | "
+        f"batch_size={specter_batch_size_label} | device={str(request.device)} | "
         f"precision={specter_precision_mode}"
     )
     text_result = get_or_create_specter_embeddings(

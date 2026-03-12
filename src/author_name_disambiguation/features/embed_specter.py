@@ -4,6 +4,7 @@ from contextlib import nullcontext
 import hashlib
 import logging
 import os
+from time import perf_counter
 import warnings
 from pathlib import Path
 from typing import Any, Iterable
@@ -11,7 +12,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from author_name_disambiguation.common.cli_ui import iter_progress
+from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 
@@ -89,6 +90,94 @@ def _autocast_context(torch, precision_mode: str):
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return nullcontext()
     return nullcontext()
+
+
+def _resolve_cuda_total_memory_bytes(torch, device: str) -> int | None:
+    if not str(device).startswith("cuda"):
+        return None
+    try:
+        device_obj = torch.device(device)
+        device_index = device_obj.index
+        if device_index is None and hasattr(torch.cuda, "current_device"):
+            device_index = int(torch.cuda.current_device())
+        if device_index is None:
+            device_index = 0
+        props = torch.cuda.get_device_properties(device_index)
+        total_memory = getattr(props, "total_memory", None)
+        if total_memory is None:
+            return None
+        return int(total_memory)
+    except Exception:
+        return None
+
+
+def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> tuple[int | None, int]:
+    requested = None if batch_size is None else max(1, int(batch_size))
+    if requested is not None:
+        return requested, requested
+    if not str(device).startswith("cuda"):
+        return None, 16
+
+    total_memory = _resolve_cuda_total_memory_bytes(torch, device)
+    if total_memory is None:
+        return None, 32
+    if total_memory >= 40 * 1024**3:
+        return None, 128
+    if total_memory >= 12 * 1024**3:
+        return None, 64
+    return None, 32
+
+
+def _is_cuda_oom(torch, exc: BaseException) -> bool:
+    oom_type = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(exc, oom_type):
+        return True
+    text = str(exc).lower()
+    return "out of memory" in text and "cuda" in text
+
+
+def _best_effort_clear_cuda_cache(torch) -> None:
+    try:
+        if hasattr(torch, "cuda") and hasattr(torch.cuda, "empty_cache"):
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _base_runtime_meta(
+    *,
+    requested_device: str,
+    resolved_device: str | None,
+    effective_precision_mode: str | None,
+    requested_batch_size: int | None,
+    effective_batch_size: int | None,
+    fallback_reason: str | None,
+    torch_version: str | None,
+    torch_cuda_version: str | None,
+    torch_cuda_available: bool | None,
+    cuda_probe_error: str | None,
+    model_to_cuda_error: str | None,
+) -> dict[str, Any]:
+    return {
+        "cache_hit": False,
+        "requested_device": str(requested_device),
+        "resolved_device": resolved_device,
+        "fallback_reason": fallback_reason,
+        "torch_version": torch_version,
+        "torch_cuda_version": torch_cuda_version,
+        "torch_cuda_available": torch_cuda_available,
+        "cuda_probe_error": cuda_probe_error,
+        "model_to_cuda_error": model_to_cuda_error,
+        "effective_precision_mode": effective_precision_mode,
+        "requested_batch_size": None if requested_batch_size is None else int(requested_batch_size),
+        "effective_batch_size": None if effective_batch_size is None else int(effective_batch_size),
+        "oom_retry_count": 0,
+        "batches_total": 0,
+        "tokenize_seconds_total": 0.0,
+        "host_to_device_seconds_total": 0.0,
+        "forward_seconds_total": 0.0,
+        "device_to_host_seconds_total": 0.0,
+    }
 
 
 def summarize_precomputed_embeddings(
@@ -214,7 +303,7 @@ def generate_specter_embeddings(
     text_backend: str = "transformers",
     text_adapter_name: str | None = None,
     text_adapter_alias: str = "specter2",
-    batch_size: int = 16,
+    batch_size: int | None = None,
     max_length: int = 256,
     device: str = "auto",
     precision_mode: str = "auto",
@@ -225,7 +314,6 @@ def generate_specter_embeddings(
     reuse_model: bool = True,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
-    batch_size = max(1, int(batch_size))
     titles = mentions["title"].fillna("").astype(str).tolist()
     abstracts = mentions["abstract"].fillna("").astype(str).tolist()
     texts = [_to_text(t, a) for t, a in zip(titles, abstracts)]
@@ -248,17 +336,20 @@ def generate_specter_embeddings(
     if len(texts) == 0:
         empty = np.zeros((0, _SPECTER_DIM), dtype=np.float32)
         meta = {
-            "cache_hit": False,
             "generation_mode": "empty",
-            "requested_device": str(device),
-            "resolved_device": None,
-            "fallback_reason": None,
-            "torch_version": None,
-            "torch_cuda_version": None,
-            "torch_cuda_available": None,
-            "cuda_probe_error": None,
-            "model_to_cuda_error": None,
-            "effective_precision_mode": None,
+            **_base_runtime_meta(
+                requested_device=str(device),
+                resolved_device=None,
+                effective_precision_mode=None,
+                requested_batch_size=None if batch_size is None else int(batch_size),
+                effective_batch_size=None,
+                fallback_reason=None,
+                torch_version=None,
+                torch_cuda_version=None,
+                torch_cuda_available=None,
+                cuda_probe_error=None,
+                model_to_cuda_error=None,
+            ),
             **precomputed_summary,
         }
         return (empty, meta) if return_meta else empty
@@ -266,17 +357,20 @@ def generate_specter_embeddings(
     if precomputed_summary["precomputed_embedding_count"] == len(texts):
         emb = np.vstack([item for item in precomputed_vectors if item is not None]).astype(np.float32)
         meta = {
-            "cache_hit": False,
             "generation_mode": "precomputed_only",
-            "requested_device": str(device),
-            "resolved_device": None,
-            "fallback_reason": None,
-            "torch_version": None,
-            "torch_cuda_version": None,
-            "torch_cuda_available": None,
-            "cuda_probe_error": None,
-            "model_to_cuda_error": None,
-            "effective_precision_mode": None,
+            **_base_runtime_meta(
+                requested_device=str(device),
+                resolved_device=None,
+                effective_precision_mode=None,
+                requested_batch_size=None if batch_size is None else int(batch_size),
+                effective_batch_size=None,
+                fallback_reason=None,
+                torch_version=None,
+                torch_cuda_version=None,
+                torch_cuda_available=None,
+                cuda_probe_error=None,
+                model_to_cuda_error=None,
+            ),
             **precomputed_summary,
         }
         return (emb, meta) if return_meta else emb
@@ -295,27 +389,31 @@ def generate_specter_embeddings(
         for idx in missing_indices:
             out[idx] = _hash_stub_embedding(texts[idx], dim=_SPECTER_DIM)
         meta = {
-            "cache_hit": False,
             "generation_mode": "precomputed_plus_stub"
             if precomputed_summary["precomputed_embedding_count"]
             else "stub_only",
-            "requested_device": str(device),
-            "resolved_device": None,
-            "fallback_reason": "torch_missing_stub_fallback",
-            "torch_version": None,
-            "torch_cuda_version": None,
-            "torch_cuda_available": None,
-            "cuda_probe_error": repr(exc),
-            "model_to_cuda_error": None,
-            "effective_precision_mode": None,
+            **_base_runtime_meta(
+                requested_device=str(device),
+                resolved_device=None,
+                effective_precision_mode=None,
+                requested_batch_size=None if batch_size is None else int(batch_size),
+                effective_batch_size=None,
+                fallback_reason="torch_missing_stub_fallback",
+                torch_version=None,
+                torch_cuda_version=None,
+                torch_cuda_available=None,
+                cuda_probe_error=repr(exc),
+                model_to_cuda_error=None,
+            ),
             **precomputed_summary,
         }
         return (out, meta) if return_meta else out
 
     _configure_hf_noise(quiet_libraries)
 
-    requested_device = device
+    requested_device = str(device)
     device, runtime_meta = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
+    requested_batch_size, effective_batch_size = _resolve_specter_batch_size(torch, batch_size, device)
 
     tokenizer, model = _load_specter_components(
         model_name=model_name,
@@ -334,6 +432,7 @@ def generate_specter_embeddings(
                 runtime_meta=runtime_meta,
                 exc=exc,
             )
+            requested_batch_size, effective_batch_size = _resolve_specter_batch_size(torch, batch_size, device)
             model.to(device)
         else:
             raise
@@ -348,39 +447,97 @@ def generate_specter_embeddings(
 
     vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
     vectors_for_indices = sorted(vectors_for_indices, key=lambda idx: (len(texts[idx]), idx))
-    total = (len(vectors_for_indices) + batch_size - 1) // batch_size
-    starts = iter_progress(
-        range(0, len(vectors_for_indices), batch_size),
-        total=total,
-        label="SPECTER batches",
-        enabled=show_progress,
-        unit="batch",
-    )
-    with torch.no_grad():
-        for start in starts:
-            batch_indices = vectors_for_indices[start : start + batch_size]
-            chunk = [texts[idx] for idx in batch_indices]
-            enc = tokenizer(
-                chunk,
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
-            enc = {k: v.to(device) for k, v in enc.items()}
-            with _autocast_context(torch, effective_precision_mode):
-                batch_out = model(**enc)
-            cls = batch_out.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32)
-            out[np.asarray(batch_indices, dtype=np.int64)] = cls
-
     meta = {
-        **runtime_meta,
-        "cache_hit": False,
-        "generation_mode": "precomputed_plus_model"
-        if precomputed_summary["precomputed_embedding_count"]
-        else "model_only",
-        **precomputed_summary,
+        **_base_runtime_meta(
+            requested_device=requested_device,
+            resolved_device=device,
+            effective_precision_mode=effective_precision_mode,
+            requested_batch_size=requested_batch_size,
+            effective_batch_size=effective_batch_size,
+            fallback_reason=runtime_meta.get("fallback_reason"),
+            torch_version=runtime_meta.get("torch_version"),
+            torch_cuda_version=runtime_meta.get("torch_cuda_version"),
+            torch_cuda_available=runtime_meta.get("torch_cuda_available"),
+            cuda_probe_error=runtime_meta.get("cuda_probe_error"),
+            model_to_cuda_error=runtime_meta.get("model_to_cuda_error"),
+        ),
     }
+    if len(vectors_for_indices) > 0:
+        start = 0
+        with loop_progress(
+            total=len(vectors_for_indices),
+            label="SPECTER texts",
+            enabled=show_progress,
+            unit="text",
+        ) as tracker:
+            with torch.inference_mode():
+                while start < len(vectors_for_indices):
+                    while True:
+                        current_batch_size = min(int(meta["effective_batch_size"]), len(vectors_for_indices) - start)
+                        batch_indices = vectors_for_indices[start : start + current_batch_size]
+                        chunk = [texts[idx] for idx in batch_indices]
+                        try:
+                            tokenize_started_at = perf_counter()
+                            enc = tokenizer(
+                                chunk,
+                                padding=True,
+                                truncation=True,
+                                max_length=max_length,
+                                return_tensors="pt",
+                            )
+                            meta["tokenize_seconds_total"] += perf_counter() - tokenize_started_at
+
+                            host_to_device_started_at = perf_counter()
+                            enc = {k: v.to(device) for k, v in enc.items()}
+                            meta["host_to_device_seconds_total"] += perf_counter() - host_to_device_started_at
+
+                            forward_started_at = perf_counter()
+                            with _autocast_context(torch, effective_precision_mode):
+                                batch_out = model(**enc)
+                            cls_tensor = batch_out.last_hidden_state[:, 0, :].detach()
+                            meta["forward_seconds_total"] += perf_counter() - forward_started_at
+
+                            device_to_host_started_at = perf_counter()
+                            cls = cls_tensor.to("cpu", dtype=torch.float32).numpy()
+                            meta["device_to_host_seconds_total"] += perf_counter() - device_to_host_started_at
+                            out[np.asarray(batch_indices, dtype=np.int64)] = cls.astype(np.float32, copy=False)
+                            meta["batches_total"] += 1
+                            start += current_batch_size
+                            tracker.update(current_batch_size)
+                            break
+                        except Exception as exc:
+                            if not str(device).startswith("cuda") or not _is_cuda_oom(torch, exc):
+                                raise
+                            _best_effort_clear_cuda_cache(torch)
+                            if int(meta["effective_batch_size"]) > 16:
+                                meta["oom_retry_count"] += 1
+                                meta["effective_batch_size"] = max(16, int(meta["effective_batch_size"]) // 2)
+                                continue
+                            if requested_device.strip().lower() == "auto":
+                                meta["oom_retry_count"] += 1
+                                meta["fallback_reason"] = "cuda_oom_cpu_fallback"
+                                device = "cpu"
+                                model.to(device)
+                                _best_effort_clear_cuda_cache(torch)
+                                effective_precision_mode = _resolve_effective_precision_mode(
+                                    torch=torch,
+                                    precision_mode=precision_mode,
+                                    device=device,
+                                )
+                                meta["resolved_device"] = device
+                                meta["effective_precision_mode"] = effective_precision_mode
+                                meta["effective_batch_size"] = 16
+                                continue
+                            raise
+
+    meta.update(
+        {
+            "generation_mode": "precomputed_plus_model"
+            if precomputed_summary["precomputed_embedding_count"]
+            else "model_only",
+            **precomputed_summary,
+        }
+    )
     return (out.astype(np.float32), meta) if return_meta else out.astype(np.float32)
 
 
@@ -392,7 +549,7 @@ def get_or_create_specter_embeddings(
     text_backend: str = "transformers",
     text_adapter_name: str | None = None,
     text_adapter_alias: str = "specter2",
-    batch_size: int = 16,
+    batch_size: int | None = None,
     max_length: int = 256,
     device: str = "auto",
     precision_mode: str = "auto",
@@ -418,19 +575,23 @@ def get_or_create_specter_embeddings(
         )
         if cached is not None:
             meta = {
-                "cache_hit": True,
                 "generation_mode": "cache",
-                "requested_device": str(device),
-                "resolved_device": None,
-                "fallback_reason": None,
-                "torch_version": None,
-                "torch_cuda_version": None,
-                "torch_cuda_available": None,
-                "cuda_probe_error": None,
-                "model_to_cuda_error": None,
-                "effective_precision_mode": None,
+                **_base_runtime_meta(
+                    requested_device=str(device),
+                    resolved_device=None,
+                    effective_precision_mode=None,
+                    requested_batch_size=None if batch_size is None else int(batch_size),
+                    effective_batch_size=None,
+                    fallback_reason=None,
+                    torch_version=None,
+                    torch_cuda_version=None,
+                    torch_cuda_available=None,
+                    cuda_probe_error=None,
+                    model_to_cuda_error=None,
+                ),
                 **precomputed_summary,
             }
+            meta["cache_hit"] = True
             return (cached, meta) if return_meta else cached
 
     emb_result = generate_specter_embeddings(

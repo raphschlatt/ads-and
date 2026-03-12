@@ -307,7 +307,63 @@ def load_ads_records(
     return out
 
 
-def deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame) -> pd.DataFrame:
+def _empty_canonical_records_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "bibcode",
+            "title",
+            "abstract",
+            "year",
+            "aff",
+            "authors",
+            "source_type",
+            "source_row_idx",
+            "precomputed_embedding",
+            "canonical_source_type",
+            "canonical_source_row_idx",
+        ]
+    )
+
+
+def _deduplicate_value_is_valid(field: str, value: Any) -> bool:
+    if field == "year":
+        return bool(pd.notna(value))
+    return _is_present_value(value)
+
+
+def _finalize_deduplicated_group(accumulator: dict[str, Any]) -> dict[str, Any]:
+    has_publication = bool(accumulator["has_publication"])
+    has_reference = bool(accumulator["has_reference"])
+    if has_publication and has_reference:
+        source_type = "publication+reference"
+    elif has_publication:
+        source_type = "publication"
+    elif has_reference:
+        source_type = "reference"
+    else:
+        source_type = "ads"
+
+    return {
+        "bibcode": accumulator["bibcode"],
+        "title": accumulator["title"],
+        "abstract": accumulator["abstract"],
+        "year": accumulator["year"],
+        "aff": accumulator["aff"],
+        "authors": accumulator["authors"],
+        "source_type": source_type,
+        "source_row_idx": accumulator["source_row_idx"],
+        "precomputed_embedding": accumulator["precomputed_embedding"],
+        "canonical_source_type": accumulator["canonical_source_type"],
+        "canonical_source_row_idx": accumulator["canonical_source_row_idx"],
+    }
+
+
+def deduplicate_ads_records(
+    publications: pd.DataFrame,
+    references: pd.DataFrame,
+    *,
+    return_meta: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
     pub = publications.copy()
     ref = references.copy()
     pub["_priority"] = 0
@@ -315,66 +371,85 @@ def deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame
 
     all_records = pd.concat([pub, ref], ignore_index=True)
     if len(all_records) == 0:
-        return pd.DataFrame(
-            columns=[
-                "bibcode",
-                "title",
-                "abstract",
-                "year",
-                "aff",
-                "authors",
-                "source_type",
-                "source_row_idx",
-                "precomputed_embedding",
-                "canonical_source_type",
-                "canonical_source_row_idx",
-            ]
-        )
+        empty = _empty_canonical_records_frame()
+        meta = {
+            "deduplicate_mode": "single_pass_sorted",
+            "input_record_count": 0,
+            "duplicate_bibcode_count": 0,
+            "max_records_per_bibcode": 0,
+        }
+        return (empty, meta) if return_meta else empty
 
     all_records = all_records.sort_values(["bibcode", "_priority", "source_row_idx"], kind="stable").reset_index(drop=True)
-    grouped = all_records.groupby("bibcode", sort=False)
+    fields = ["title", "abstract", "year", "aff", "precomputed_embedding", "authors"]
+    bibcodes = all_records["bibcode"].astype(str).tolist()
+    source_types = all_records["source_type"].astype(str).tolist()
+    source_row_indices = all_records["source_row_idx"].astype(np.int64).tolist()
+    values = {field: all_records[field].tolist() for field in fields}
 
-    first_rows = all_records.drop_duplicates(subset=["bibcode"], keep="first").copy()
-    first_rows["source_type"] = "ads"
-    has_publication = grouped["source_type"].transform(lambda s: bool((s.astype(str) == "publication").any()))
-    has_reference = grouped["source_type"].transform(lambda s: bool((s.astype(str) == "reference").any()))
-    first_rows["source_type"] = np.select(
-        [
-            has_publication.loc[first_rows.index].to_numpy(dtype=bool)
-            & has_reference.loc[first_rows.index].to_numpy(dtype=bool),
-            has_publication.loc[first_rows.index].to_numpy(dtype=bool),
-            has_reference.loc[first_rows.index].to_numpy(dtype=bool),
-        ],
-        ["publication+reference", "publication", "reference"],
-        default="ads",
-    )
+    output_rows: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    current_count = 0
+    duplicate_bibcode_count = 0
+    max_records_per_bibcode = 0
 
-    for field in ["title", "abstract", "year", "aff", "precomputed_embedding", "authors"]:
-        candidate = all_records[field]
-        if field == "year":
-            valid = candidate.notna()
+    def _flush() -> None:
+        nonlocal current, current_count, duplicate_bibcode_count, max_records_per_bibcode
+        if current is None:
+            return
+        output_rows.append(_finalize_deduplicated_group(current))
+        if current_count > 1:
+            duplicate_bibcode_count += 1
+        if current_count > max_records_per_bibcode:
+            max_records_per_bibcode = current_count
+        current = None
+        current_count = 0
+
+    for idx, bibcode in enumerate(bibcodes):
+        source_type = source_types[idx]
+        source_row_idx = int(source_row_indices[idx])
+        if current is None or bibcode != current["bibcode"]:
+            _flush()
+            current = {
+                "bibcode": bibcode,
+                "title": None,
+                "abstract": None,
+                "year": None,
+                "aff": None,
+                "authors": None,
+                "source_type": source_type,
+                "source_row_idx": source_row_idx,
+                "precomputed_embedding": None,
+                "canonical_source_type": source_type,
+                "canonical_source_row_idx": source_row_idx,
+                "has_publication": source_type == "publication",
+                "has_reference": source_type == "reference",
+            }
+            current_count = 1
         else:
-            valid = candidate.map(_is_present_value)
-        first_valid = candidate.where(valid, None).groupby(all_records["bibcode"], sort=False).transform("first")
-        first_rows[field] = first_valid.loc[first_rows.index].to_list()
+            current_count += 1
+            if source_type == "publication":
+                current["has_publication"] = True
+            elif source_type == "reference":
+                current["has_reference"] = True
 
-    first_rows["canonical_source_type"] = all_records.loc[first_rows.index, "source_type"].astype(str).to_list()
-    first_rows["canonical_source_row_idx"] = all_records.loc[first_rows.index, "source_row_idx"].astype(int).to_list()
-    out = first_rows
-    keep_cols = [
-        "bibcode",
-        "title",
-        "abstract",
-        "year",
-        "aff",
-        "authors",
-        "source_type",
-        "source_row_idx",
-        "precomputed_embedding",
-        "canonical_source_type",
-        "canonical_source_row_idx",
-    ]
-    return out[keep_cols]
+        for field in fields:
+            if current[field] is not None:
+                continue
+            candidate = values[field][idx]
+            if _deduplicate_value_is_valid(field, candidate):
+                current[field] = candidate
+
+    _flush()
+
+    out = pd.DataFrame.from_records(output_rows, columns=_empty_canonical_records_frame().columns)
+    meta = {
+        "deduplicate_mode": "single_pass_sorted",
+        "input_record_count": int(len(all_records)),
+        "duplicate_bibcode_count": int(duplicate_bibcode_count),
+        "max_records_per_bibcode": int(max_records_per_bibcode),
+    }
+    return (out, meta) if return_meta else out
 
 
 def prepare_ads_source_data(
@@ -405,7 +480,8 @@ def prepare_ads_source_data(
         references, raw_references, refs_meta = refs_result
 
     deduplicate_started_at = perf_counter()
-    canonical_records = deduplicate_ads_records(publications, references)
+    deduplicate_result = deduplicate_ads_records(publications, references, return_meta=True)
+    canonical_records, deduplicate_meta = deduplicate_result
     deduplicate_seconds = perf_counter() - deduplicate_started_at
 
     explode_started_at = perf_counter()
@@ -421,6 +497,7 @@ def prepare_ads_source_data(
         "normalize_publications_seconds": float(pubs_meta["normalize_seconds"]),
         "normalize_references_seconds": float(refs_meta["normalize_seconds"]),
         "deduplicate_seconds": float(deduplicate_seconds),
+        **dict(deduplicate_meta),
         "explode_mentions_seconds": float(explode_mentions_seconds),
         "publications_mode": pubs_meta["mode"],
         "references_mode": refs_meta["mode"],

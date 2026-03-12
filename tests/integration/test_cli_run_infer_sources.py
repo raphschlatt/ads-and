@@ -142,6 +142,14 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "cuda_probe_error": None,
                 "model_to_cuda_error": None,
                 "effective_precision_mode": None,
+                "requested_batch_size": _kwargs.get("batch_size"),
+                "effective_batch_size": _kwargs.get("batch_size"),
+                "oom_retry_count": 0,
+                "batches_total": 0,
+                "tokenize_seconds_total": 0.0,
+                "host_to_device_seconds_total": 0.0,
+                "forward_seconds_total": 0.0,
+                "device_to_host_seconds_total": 0.0,
                 "column_present": False,
                 "precomputed_embedding_count": 0,
                 "recomputed_embedding_count": len(mentions),
@@ -162,6 +170,14 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "cuda_probe_error": None,
             "model_to_cuda_error": None,
             "effective_precision_mode": str(_kwargs.get("precision_mode", "auto")),
+            "requested_batch_size": _kwargs.get("batch_size"),
+            "effective_batch_size": _kwargs.get("batch_size"),
+            "oom_retry_count": 0,
+            "batches_total": max(0, len(mentions)),
+            "tokenize_seconds_total": 0.0,
+            "host_to_device_seconds_total": 0.0,
+            "forward_seconds_total": 0.0,
+            "device_to_host_seconds_total": 0.0,
             "column_present": False,
             "precomputed_embedding_count": 0,
             "recomputed_embedding_count": len(mentions),
@@ -356,6 +372,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert stage_metrics["runtime"]["load_inputs"]["deduplicate_seconds"] >= 0.0
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
+    assert "requested_batch_size" in stage_metrics["runtime"]["specter"]
+    assert "effective_batch_size" in stage_metrics["runtime"]["specter"]
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] == 0.0
@@ -446,6 +464,7 @@ def test_cli_run_infer_sources_passes_specter_overrides(monkeypatch, tmp_path: P
     assert seen["specter_kwargs"]["precision_mode"] == "amp_bf16"
     assert seen["specter_kwargs"]["reuse_model"] is False
     assert preflight["runtime"]["specter"]["effective_precision_mode"] == "amp_bf16"
+    assert preflight["runtime"]["specter"]["requested_batch_size"] == 48
 
 
 def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):
