@@ -121,7 +121,9 @@ def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> t
     total_memory = _resolve_cuda_total_memory_bytes(torch, device)
     if total_memory is None:
         return None, 32
-    if total_memory >= 40 * 1024**3:
+    if total_memory >= 70 * 1024**3:
+        return None, 256
+    if total_memory >= 24 * 1024**3:
         return None, 128
     if total_memory >= 12 * 1024**3:
         return None, 64
@@ -177,7 +179,84 @@ def _base_runtime_meta(
         "host_to_device_seconds_total": 0.0,
         "forward_seconds_total": 0.0,
         "device_to_host_seconds_total": 0.0,
+        "token_count_total": 0,
+        "max_sequence_length_observed": 0,
+        "mean_sequence_length_observed": 0.0,
+        "device_to_host_flushes": 0,
     }
+
+
+def _safe_pin_memory(tensor: Any) -> Any:
+    pin = getattr(tensor, "pin_memory", None)
+    if pin is None or not callable(pin):
+        return tensor
+    try:
+        return pin()
+    except Exception:
+        return tensor
+
+
+def _move_tensor_to_device(tensor: Any, device: str, *, non_blocking: bool) -> Any:
+    mover = getattr(tensor, "to", None)
+    if mover is None or not callable(mover):
+        return tensor
+    try:
+        return mover(device, non_blocking=non_blocking)
+    except TypeError:
+        return mover(device)
+
+
+def _encoding_to_device(enc: dict[str, Any], device: str) -> dict[str, Any]:
+    on_cuda = str(device).startswith("cuda")
+    moved: dict[str, Any] = {}
+    for key, value in enc.items():
+        tensor = value
+        if on_cuda:
+            tensor = _safe_pin_memory(tensor)
+        moved[key] = _move_tensor_to_device(tensor, device, non_blocking=on_cuda)
+    return moved
+
+
+def _observed_token_stats(enc: dict[str, Any]) -> tuple[int, int, int]:
+    mask = enc.get("attention_mask")
+    if mask is not None and hasattr(mask, "sum") and hasattr(mask, "shape"):
+        lengths = mask.sum(dim=1)
+        token_total = int(lengths.sum().item())
+        max_sequence_length = int(mask.shape[1]) if len(mask.shape) >= 2 else int(lengths.max().item())
+        observed_count = int(mask.shape[0]) if len(mask.shape) >= 1 else int(lengths.numel())
+        return token_total, max_sequence_length, observed_count
+
+    input_ids = enc.get("input_ids")
+    if input_ids is not None and hasattr(input_ids, "shape") and len(input_ids.shape) >= 2:
+        batch_size = int(input_ids.shape[0])
+        seq_len = int(input_ids.shape[1])
+        return batch_size * seq_len, seq_len, batch_size
+    return 0, 0, 0
+
+
+def _flush_pending_cls_batches(
+    *,
+    torch_module: Any,
+    pending_tensors: list[Any],
+    pending_indices: list[np.ndarray],
+    out: np.ndarray,
+    meta: dict[str, Any],
+) -> None:
+    if not pending_tensors:
+        return
+    device_to_host_started_at = perf_counter()
+    if len(pending_tensors) == 1:
+        cls_tensor = pending_tensors[0]
+        batch_indices = pending_indices[0]
+    else:
+        cls_tensor = torch_module.cat(pending_tensors, dim=0)
+        batch_indices = np.concatenate(pending_indices, axis=0)
+    cls = cls_tensor.to("cpu", dtype=torch_module.float32).numpy()
+    meta["device_to_host_seconds_total"] += perf_counter() - device_to_host_started_at
+    meta["device_to_host_flushes"] += 1
+    out[batch_indices] = cls.astype(np.float32, copy=False)
+    pending_tensors.clear()
+    pending_indices.clear()
 
 
 def summarize_precomputed_embeddings(
@@ -462,8 +541,12 @@ def generate_specter_embeddings(
             model_to_cuda_error=runtime_meta.get("model_to_cuda_error"),
         ),
     }
+    observed_sequence_count = 0
+    device_to_host_flush_batch_count = 4 if str(device).startswith("cuda") else 1
     if len(vectors_for_indices) > 0:
         start = 0
+        pending_cls_tensors: list[Any] = []
+        pending_index_batches: list[np.ndarray] = []
         with loop_progress(
             total=len(vectors_for_indices),
             label="SPECTER texts",
@@ -486,9 +569,16 @@ def generate_specter_embeddings(
                                 return_tensors="pt",
                             )
                             meta["tokenize_seconds_total"] += perf_counter() - tokenize_started_at
+                            token_count, max_sequence_length, observed_count = _observed_token_stats(enc)
+                            meta["token_count_total"] += int(token_count)
+                            meta["max_sequence_length_observed"] = max(
+                                int(meta["max_sequence_length_observed"]),
+                                int(max_sequence_length),
+                            )
+                            observed_sequence_count += int(observed_count)
 
                             host_to_device_started_at = perf_counter()
-                            enc = {k: v.to(device) for k, v in enc.items()}
+                            enc = _encoding_to_device(enc, device)
                             meta["host_to_device_seconds_total"] += perf_counter() - host_to_device_started_at
 
                             forward_started_at = perf_counter()
@@ -497,10 +587,16 @@ def generate_specter_embeddings(
                             cls_tensor = batch_out.last_hidden_state[:, 0, :].detach()
                             meta["forward_seconds_total"] += perf_counter() - forward_started_at
 
-                            device_to_host_started_at = perf_counter()
-                            cls = cls_tensor.to("cpu", dtype=torch.float32).numpy()
-                            meta["device_to_host_seconds_total"] += perf_counter() - device_to_host_started_at
-                            out[np.asarray(batch_indices, dtype=np.int64)] = cls.astype(np.float32, copy=False)
+                            pending_cls_tensors.append(cls_tensor)
+                            pending_index_batches.append(np.asarray(batch_indices, dtype=np.int64))
+                            if len(pending_cls_tensors) >= int(device_to_host_flush_batch_count):
+                                _flush_pending_cls_batches(
+                                    torch_module=torch,
+                                    pending_tensors=pending_cls_tensors,
+                                    pending_indices=pending_index_batches,
+                                    out=out,
+                                    meta=meta,
+                                )
                             meta["batches_total"] += 1
                             start += current_batch_size
                             tracker.update(current_batch_size)
@@ -508,6 +604,13 @@ def generate_specter_embeddings(
                         except Exception as exc:
                             if not str(device).startswith("cuda") or not _is_cuda_oom(torch, exc):
                                 raise
+                            _flush_pending_cls_batches(
+                                torch_module=torch,
+                                pending_tensors=pending_cls_tensors,
+                                pending_indices=pending_index_batches,
+                                out=out,
+                                meta=meta,
+                            )
                             _best_effort_clear_cuda_cache(torch)
                             if int(meta["effective_batch_size"]) > 16:
                                 meta["oom_retry_count"] += 1
@@ -524,11 +627,22 @@ def generate_specter_embeddings(
                                     precision_mode=precision_mode,
                                     device=device,
                                 )
+                                device_to_host_flush_batch_count = 1
                                 meta["resolved_device"] = device
                                 meta["effective_precision_mode"] = effective_precision_mode
                                 meta["effective_batch_size"] = 16
                                 continue
                             raise
+                _flush_pending_cls_batches(
+                    torch_module=torch,
+                    pending_tensors=pending_cls_tensors,
+                    pending_indices=pending_index_batches,
+                    out=out,
+                    meta=meta,
+                )
+
+    if observed_sequence_count > 0:
+        meta["mean_sequence_length_observed"] = float(meta["token_count_total"]) / float(observed_sequence_count)
 
     meta.update(
         {

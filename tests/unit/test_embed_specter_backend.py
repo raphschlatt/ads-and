@@ -160,6 +160,10 @@ def test_generate_specter_embeddings_length_batches_and_cpu_auto_precision(monke
     assert meta["requested_batch_size"] == 2
     assert meta["effective_batch_size"] == 2
     assert meta["batches_total"] == 2
+    assert meta["token_count_total"] == 3
+    assert meta["max_sequence_length_observed"] == 1
+    assert meta["mean_sequence_length_observed"] == 1.0
+    assert meta["device_to_host_flushes"] == 2
 
 
 def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.MonkeyPatch):
@@ -171,12 +175,12 @@ def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(80 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
-    assert effective == 128
+    assert effective == 256
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(24 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
-    assert effective == 64
+    assert effective == 128
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(8 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
@@ -232,6 +236,47 @@ class _OomBackoffModel:
         out = torch.zeros((batch_size, 1, 768), dtype=torch.float32)
         out[:, 0, 0] = input_ids.tensor[:, 0].to(torch.float32)
         return SimpleNamespace(last_hidden_state=out)
+
+
+def test_generate_specter_embeddings_flushes_cuda_batches_in_order(monkeypatch: pytest.MonkeyPatch):
+    tokenizer = _OomBackoffTokenizer()
+    model = _OomBackoffModel(max_cuda_batch_size=64)
+    monkeypatch.setattr(embed_specter, "_load_specter_components", lambda **_kwargs: (tokenizer, model))
+    monkeypatch.setattr(
+        embed_specter,
+        "resolve_torch_device",
+        lambda torch_module, device, runtime_label: (
+            "cuda:0",
+            {
+                "requested_device": str(device),
+                "resolved_device": "cuda:0",
+                "fallback_reason": None,
+                "torch_version": getattr(torch_module, "__version__", None),
+                "torch_cuda_version": getattr(getattr(torch_module, "version", None), "cuda", None),
+                "torch_cuda_available": True,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+            },
+        ),
+    )
+
+    mentions = pd.DataFrame({"title": [f"x{idx}" for idx in range(9)], "abstract": [""] * 9})
+    out, meta = embed_specter.generate_specter_embeddings(
+        mentions=mentions,
+        batch_size=2,
+        device="auto",
+        precision_mode="fp32",
+        return_meta=True,
+    )
+
+    assert out.shape == (9, 768)
+    np.testing.assert_allclose(out[:, 0], np.array([2.0] * 9, dtype=np.float32))
+    assert meta["resolved_device"] == "cuda:0"
+    assert meta["batches_total"] == 5
+    assert meta["device_to_host_flushes"] == 2
+    assert meta["token_count_total"] == 9
+    assert meta["max_sequence_length_observed"] == 1
+    assert meta["mean_sequence_length_observed"] == 1.0
 
 
 def test_generate_specter_embeddings_reduces_batch_size_on_cuda_oom(monkeypatch: pytest.MonkeyPatch):

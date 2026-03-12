@@ -150,6 +150,10 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "host_to_device_seconds_total": 0.0,
                 "forward_seconds_total": 0.0,
                 "device_to_host_seconds_total": 0.0,
+                "token_count_total": 0,
+                "max_sequence_length_observed": 0,
+                "mean_sequence_length_observed": 0.0,
+                "device_to_host_flushes": 0,
                 "column_present": False,
                 "precomputed_embedding_count": 0,
                 "recomputed_embedding_count": len(mentions),
@@ -178,6 +182,10 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "host_to_device_seconds_total": 0.0,
             "forward_seconds_total": 0.0,
             "device_to_host_seconds_total": 0.0,
+            "token_count_total": int(len(mentions)),
+            "max_sequence_length_observed": 1,
+            "mean_sequence_length_observed": 1.0,
+            "device_to_host_flushes": max(0, len(mentions)),
             "column_present": False,
             "precomputed_embedding_count": 0,
             "recomputed_embedding_count": len(mentions),
@@ -258,6 +266,17 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "cpu_min_pairs_per_worker": int(_kwargs.get("min_pairs_per_worker", 1)),
             "ram_budget_bytes": int(_kwargs["ram_budget_bytes"]) if _kwargs.get("ram_budget_bytes") is not None else None,
             "total_pairs_est": int(len(out)),
+            "group_blocks_seconds": 0.0,
+            "partition_shards_seconds": 0.0,
+            "oversize_sequential_seconds": 0.0,
+            "worker_submit_seconds": 0.0,
+            "worker_collect_seconds": 0.0,
+            "merge_shards_seconds": 0.0,
+            "final_readback_seconds": 0.0,
+            "worker_compute_seconds_total": 0.0,
+            "worker_flush_seconds_total": 0.0,
+            "top_slow_blocks": [],
+            "block_size_histogram": {"2": 1, "3": 1},
         }
         return (out, meta) if _kwargs.get("return_meta") else out
 
@@ -384,7 +403,11 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
     assert "requested_batch_size" in stage_metrics["runtime"]["specter"]
     assert "effective_batch_size" in stage_metrics["runtime"]["specter"]
+    assert "device_to_host_flushes" in stage_metrics["runtime"]["specter"]
+    assert "token_count_total" in stage_metrics["runtime"]["specter"]
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
+    assert "group_blocks_seconds" in stage_metrics["runtime"]["pair_building"]
+    assert "top_slow_blocks" in stage_metrics["runtime"]["pair_building"]
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] == 0.0
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0

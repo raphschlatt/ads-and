@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import multiprocessing as mp
 import tempfile
+from time import perf_counter
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -296,21 +298,95 @@ def _block_weight(n: int, max_pairs_per_block: Optional[int]) -> int:
     return int(pairs)
 
 
+def _new_pair_buffer() -> dict[str, list[Any]]:
+    return {
+        "pair_id": [],
+        "mention_id_1": [],
+        "mention_id_2": [],
+        "block_key": [],
+        "split": [],
+        "label": [],
+    }
+
+
+def _buffer_len(buffer_rows: dict[str, list[Any]]) -> int:
+    return int(len(buffer_rows["pair_id"]))
+
+
+def _buffer_clear(buffer_rows: dict[str, list[Any]]) -> None:
+    for values in buffer_rows.values():
+        values.clear()
+
+
+def _buffer_extend(dest: dict[str, list[Any]], src: dict[str, list[Any]]) -> None:
+    for key, values in src.items():
+        dest[key].extend(values)
+
+
+def _buffer_to_frame(buffer_rows: dict[str, list[Any]]) -> pd.DataFrame:
+    return pd.DataFrame(buffer_rows, columns=["pair_id", "mention_id_1", "mention_id_2", "block_key", "split", "label"])
+
+
+def _append_pair_row(
+    buffer_rows: dict[str, list[Any]],
+    *,
+    pair_id: str,
+    mention_id_1: str,
+    mention_id_2: str,
+    block_key: str,
+    split: str,
+    label: int | None,
+) -> None:
+    buffer_rows["pair_id"].append(pair_id)
+    buffer_rows["mention_id_1"].append(mention_id_1)
+    buffer_rows["mention_id_2"].append(mention_id_2)
+    buffer_rows["block_key"].append(block_key)
+    buffer_rows["split"].append(split)
+    buffer_rows["label"].append(label)
+
+
+def _prepare_block_arrays(block: pd.DataFrame) -> dict[str, Any]:
+    n = int(len(block))
+    mention_ids = block["mention_id"].map(str).to_numpy(dtype=object, copy=False)
+    if "bibcode" in block.columns:
+        bibcodes = block["bibcode"].fillna("").astype(str).str.strip().to_numpy(dtype=object, copy=False)
+    else:
+        bibcodes = None
+    if "split" in block.columns:
+        splits = block["split"].map(str).to_numpy(dtype=object, copy=False)
+    else:
+        splits = np.full(n, "inference", dtype=object)
+    orcids = block["orcid"].to_numpy(dtype=object, copy=False) if "orcid" in block.columns else None
+    return {
+        "mention_ids": mention_ids,
+        "bibcodes": bibcodes,
+        "splits": splits,
+        "orcids": orcids,
+    }
+
+
+def _record_top_slow_block(top_blocks: list[dict[str, Any]], block_meta: dict[str, Any], limit: int = 20) -> None:
+    top_blocks.append(block_meta)
+    top_blocks.sort(key=lambda row: (-float(row["wall_seconds"]), str(row["block_key"])))
+    if len(top_blocks) > int(limit):
+        del top_blocks[int(limit) :]
+
+
 def _flush_pair_buffer(
     *,
-    buffer_rows: list[dict[str, Any]],
+    buffer_rows: dict[str, list[Any]],
     output: Path | None,
     writer_holder: dict[str, Any],
-    return_rows: list[dict[str, Any]] | None,
+    return_rows: dict[str, list[Any]] | None,
 ) -> int:
-    if not buffer_rows:
+    if _buffer_len(buffer_rows) == 0:
         return 0
 
-    chunk_df = pd.DataFrame(buffer_rows)
+    chunk_df = _buffer_to_frame(buffer_rows)
     written = int(len(chunk_df))
 
     if return_rows is not None:
-        return_rows.extend(buffer_rows)
+        _buffer_extend(return_rows, buffer_rows)
 
     if output is not None:
         try:
@@ -330,7 +406,7 @@ def _flush_pair_buffer(
                 table = table.cast(writer_holder["schema"])
             writer_holder["writer"].write_table(table)
 
-    buffer_rows.clear()
+    _buffer_clear(buffer_rows)
     return written
 
 
@@ -354,80 +430,114 @@ def _execute_pair_blocks(
         if output.exists():
             output.unlink()
 
-    rows: list[dict[str, Any]] = [] if return_pairs else []
+    rows = _new_pair_buffer() if return_pairs else None
     keep_rows = rows if return_pairs else None
-    buffer_rows: list[dict[str, Any]] = []
+    buffer_rows = _new_pair_buffer()
 
     same_publication_pairs_skipped = 0
     pairs_written = 0
     writer_holder: dict[str, Any] = {"writer": None, "schema": None}
+    flush_seconds_total = 0.0
+    worker_compute_seconds_total = 0.0
+    top_slow_blocks: list[dict[str, Any]] = []
 
     for block_key, block in blocks:
         n = len(block)
         if n < 2:
             continue
 
+        block_started_at = perf_counter()
         pair_weight = _block_weight(n, max_pairs_per_block=max_pairs_per_block)
         rng = np.random.default_rng(_seed_for_block(seed, str(block_key)))
+        block_arrays = _prepare_block_arrays(block)
+        mention_ids = block_arrays["mention_ids"]
+        bibcodes = block_arrays["bibcodes"]
+        splits = block_arrays["splits"]
+        orcids = block_arrays["orcids"]
+        block_flush_seconds = 0.0
+        block_pairs_emitted = 0
+        block_same_publication_pairs_skipped = 0
         for i, j in _iter_pair_indices(n=n, max_pairs_per_block=max_pairs_per_block, rng=rng):
-            r1 = block.iloc[i]
-            r2 = block.iloc[j]
-
-            if exclude_same_bibcode and "bibcode" in block.columns:
-                b1 = r1.get("bibcode")
-                b2 = r2.get("bibcode")
-                if pd.notna(b1) and pd.notna(b2) and str(b1).strip() and str(b2).strip() and str(b1) == str(b2):
+            if exclude_same_bibcode and bibcodes is not None:
+                b1 = str(bibcodes[i])
+                b2 = str(bibcodes[j])
+                if b1 and b2 and b1 == b2:
                     same_publication_pairs_skipped += 1
+                    block_same_publication_pairs_skipped += 1
                     continue
 
-            split1 = str(r1.get("split", "inference"))
-            split2 = str(r2.get("split", "inference"))
+            split1 = str(splits[i])
+            split2 = str(splits[j])
             if require_same_split and split1 != split2:
                 continue
 
             split = split1 if split1 == split2 else "mixed"
             label = None
-            if "orcid" in block.columns:
-                o1, o2 = r1.get("orcid"), r2.get("orcid")
+            if orcids is not None:
+                o1 = orcids[i]
+                o2 = orcids[j]
                 if pd.notna(o1) and pd.notna(o2) and str(o1).strip() and str(o2).strip():
                     label = int(str(o1) == str(o2))
 
             if labeled_only and label is None:
                 continue
 
-            m1 = str(r1["mention_id"])
-            m2 = str(r2["mention_id"])
-            buffer_rows.append(
-                {
-                    "pair_id": _pair_id(m1, m2),
-                    "mention_id_1": m1,
-                    "mention_id_2": m2,
-                    "block_key": str(block_key),
-                    "split": split,
-                    "label": label,
-                }
+            m1 = str(mention_ids[i])
+            m2 = str(mention_ids[j])
+            _append_pair_row(
+                buffer_rows,
+                pair_id=_pair_id(m1, m2),
+                mention_id_1=m1,
+                mention_id_2=m2,
+                block_key=str(block_key),
+                split=split,
+                label=label,
             )
+            block_pairs_emitted += 1
 
-            if len(buffer_rows) >= max(1, int(chunk_rows)):
-                pairs_written += _flush_pair_buffer(
+            if _buffer_len(buffer_rows) >= max(1, int(chunk_rows)):
+                flush_started_at = perf_counter()
+                written = _flush_pair_buffer(
                     buffer_rows=buffer_rows,
                     output=output,
                     writer_holder=writer_holder,
                     return_rows=keep_rows,
                 )
+                flush_elapsed = perf_counter() - flush_started_at
+                pairs_written += written
+                flush_seconds_total += flush_elapsed
+                block_flush_seconds += flush_elapsed
+        block_wall_seconds = perf_counter() - block_started_at
+        worker_compute_seconds_total += max(0.0, block_wall_seconds - block_flush_seconds)
+        _record_top_slow_block(
+            top_slow_blocks,
+            {
+                "block_key": str(block_key),
+                "block_size": int(n),
+                "pair_weight": int(pair_weight),
+                "pairs_written": int(block_pairs_emitted),
+                "same_publication_pairs_skipped": int(block_same_publication_pairs_skipped),
+                "wall_seconds": float(block_wall_seconds),
+            },
+        )
         if progress_callback is not None and pair_weight > 0:
             progress_callback(int(pair_weight))
 
-    pairs_written += _flush_pair_buffer(
+    final_flush_started_at = perf_counter()
+    written = _flush_pair_buffer(
         buffer_rows=buffer_rows,
         output=output,
         writer_holder=writer_holder,
         return_rows=keep_rows,
     )
+    final_flush_elapsed = perf_counter() - final_flush_started_at
+    pairs_written += written
+    flush_seconds_total += final_flush_elapsed
 
     if writer_holder.get("writer") is not None:
         writer_holder["writer"].close()
 
+    readback_seconds = 0.0
     if output is not None and not return_pairs:
         if pairs_written == 0:
             empty = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
@@ -435,16 +545,22 @@ def _execute_pair_blocks(
         pairs = None
     elif not return_pairs:
         pairs = None
-    elif output is not None and not rows and output.exists():
+    elif output is not None and keep_rows is not None and _buffer_len(keep_rows) == 0 and output.exists():
+        readback_started_at = perf_counter()
         pairs = pd.read_parquet(output)
+        readback_seconds = perf_counter() - readback_started_at
     else:
-        pairs = pd.DataFrame(rows)
+        pairs = _buffer_to_frame(keep_rows or _new_pair_buffer())
 
     meta: Dict[str, Any] = {
         "same_publication_pairs_skipped": int(same_publication_pairs_skipped),
         "pairs_written": int(pairs_written),
         "chunk_rows": int(chunk_rows),
         "output_path": str(output) if output is not None else None,
+        "worker_compute_seconds_total": float(worker_compute_seconds_total),
+        "worker_flush_seconds_total": float(flush_seconds_total),
+        "top_slow_blocks": top_slow_blocks,
+        "readback_seconds": float(readback_seconds),
     }
     return pairs, meta
 
@@ -570,13 +686,16 @@ def build_pairs_within_blocks(
         mentions = mentions.copy()
         mentions["split"] = "inference"
 
+    group_blocks_started_at = perf_counter()
     grouped = mentions.groupby("block_key", sort=False)
     block_entries: list[dict[str, Any]] = []
+    block_size_histogram_counter: Counter[int] = Counter()
     for block_key, block in grouped:
         block = block.reset_index(drop=True)
         n = len(block)
         if n < 2:
             continue
+        block_size_histogram_counter[int(n)] += 1
         weight = _block_weight(n, max_pairs_per_block=max_pairs_per_block)
         block_entries.append(
             {
@@ -587,6 +706,7 @@ def build_pairs_within_blocks(
                 "ram_est_bytes": int(max(1, weight) * 160),
             }
         )
+    group_blocks_seconds = perf_counter() - group_blocks_started_at
 
     total_pairs_est = int(sum(int(e["pair_weight"]) for e in block_entries))
     n_blocks = int(len(block_entries))
@@ -640,6 +760,12 @@ def build_pairs_within_blocks(
             parallel_entries = [e for e in block_entries if str(e["block_key"]) not in oversize_set]
 
     sequential_fallback = (not sharding_on) or workers_effective <= 1 or len(parallel_entries) <= 1
+    partition_shards_seconds = 0.0
+    oversize_sequential_seconds = 0.0
+    worker_submit_seconds = 0.0
+    worker_collect_seconds = 0.0
+    merge_shards_seconds = 0.0
+    final_readback_seconds = 0.0
 
     with loop_progress(
         total=total_pairs_est,
@@ -664,21 +790,24 @@ def build_pairs_within_blocks(
                 return_pairs=return_pairs,
                 progress_callback=progress_update,
             )
+            final_readback_seconds = float(pair_meta.get("readback_seconds", 0.0))
         else:
             shard_count = int(min(workers_effective, len(parallel_entries)))
             progress_shard_count = int(min(len(parallel_entries), max(shard_count, shard_count * 8)))
+            partition_started_at = perf_counter()
             shards = _partition_block_entries(parallel_entries, num_shards=progress_shard_count)
-            collect_in_memory = output is None and return_pairs
+            partition_shards_seconds = perf_counter() - partition_started_at
+            collect_in_memory = False
 
             with tempfile.TemporaryDirectory(prefix="pair_shards_") as tmpdir:
                 tmp_root = Path(tmpdir)
                 shard_paths: list[Path] = []
                 shard_metas: list[dict[str, Any]] = []
-                shard_rows: list[dict[str, Any]] = []
 
                 if oversize_entries:
                     oversize_blocks = [(str(e["block_key"]), e["block"]) for e in oversize_entries]
                     oversize_out = None if collect_in_memory else tmp_root / "pairs_oversize.parquet"
+                    oversize_started_at = perf_counter()
                     _pairs_oversize, oversize_meta = _execute_pair_blocks(
                         blocks=oversize_blocks,
                         max_pairs_per_block=max_pairs_per_block,
@@ -692,15 +821,15 @@ def build_pairs_within_blocks(
                         return_pairs=collect_in_memory,
                         progress_callback=progress_update,
                     )
+                    oversize_sequential_seconds += perf_counter() - oversize_started_at
                     if oversize_out is not None:
                         shard_paths.append(oversize_out)
-                    if collect_in_memory and _pairs_oversize is not None and len(_pairs_oversize) > 0:
-                        shard_rows.extend(_pairs_oversize.to_dict(orient="records"))
                     shard_metas.append(oversize_meta)
 
                 ctx = mp.get_context("spawn")
                 futures = {}
                 with ProcessPoolExecutor(max_workers=shard_count, mp_context=ctx) as pool:
+                    submit_started_at = perf_counter()
                     for shard_idx, shard_blocks in enumerate(shards):
                         shard_out = None if collect_in_memory else tmp_root / f"pairs_shard_{shard_idx:04d}.parquet"
                         if shard_out is not None:
@@ -720,34 +849,52 @@ def build_pairs_within_blocks(
                             sum(_block_weight(len(block), max_pairs_per_block=max_pairs_per_block) for _, block in shard_blocks)
                         )
                         futures[pool.submit(_pair_worker, payload)] = shard_weight
+                    worker_submit_seconds += perf_counter() - submit_started_at
 
+                    collect_started_at = perf_counter()
                     for fut in as_completed(futures):
                         result = dict(fut.result())
                         shard_metas.append(dict(result.get("meta", {})))
-                        if collect_in_memory:
-                            shard_rows.extend(result.get("rows", []))
                         if progress_update is not None:
                             progress_update(int(futures[fut]))
+                    worker_collect_seconds += perf_counter() - collect_started_at
 
                 if collect_in_memory:
-                    pairs = pd.DataFrame(shard_rows)
-                    merged_rows = int(len(pairs))
+                    pairs = _pairs_oversize
+                    merged_rows = int(0 if pairs is None else len(pairs))
                     final_output = output
                 else:
                     if output is not None:
                         final_output = output
                     else:
                         final_output = tmp_root / "pairs_merged.parquet"
+                    merge_started_at = perf_counter()
                     merged_rows = _merge_parquet_shards(shard_paths=shard_paths, output_path=final_output)
+                    merge_shards_seconds += perf_counter() - merge_started_at
 
                 same_publication_pairs_skipped = int(
                     sum(int(m.get("same_publication_pairs_skipped", 0)) for m in shard_metas)
                 )
+                worker_compute_seconds_total = float(
+                    sum(float(m.get("worker_compute_seconds_total", 0.0) or 0.0) for m in shard_metas)
+                )
+                worker_flush_seconds_total = float(
+                    sum(float(m.get("worker_flush_seconds_total", 0.0) or 0.0) for m in shard_metas)
+                )
+                top_slow_blocks: list[dict[str, Any]] = []
+                for shard_meta in shard_metas:
+                    for block_meta in list(shard_meta.get("top_slow_blocks", []) or []):
+                        if isinstance(block_meta, dict):
+                            _record_top_slow_block(top_slow_blocks, dict(block_meta))
                 pair_meta = {
                     "same_publication_pairs_skipped": same_publication_pairs_skipped,
                     "pairs_written": int(merged_rows),
                     "chunk_rows": int(chunk_rows),
                     "output_path": None if final_output is None else str(final_output),
+                    "worker_compute_seconds_total": worker_compute_seconds_total,
+                    "worker_flush_seconds_total": worker_flush_seconds_total,
+                    "top_slow_blocks": top_slow_blocks,
+                    "readback_seconds": 0.0,
                 }
 
                 if collect_in_memory:
@@ -755,7 +902,10 @@ def build_pairs_within_blocks(
                 elif output is None and not return_pairs:
                     pairs = None
                 elif return_pairs:
+                    readback_started_at = perf_counter()
                     pairs = pd.read_parquet(final_output)
+                    final_readback_seconds += perf_counter() - readback_started_at
+                    pair_meta["readback_seconds"] = float(final_readback_seconds)
                 else:
                     pairs = None
 
@@ -775,6 +925,19 @@ def build_pairs_within_blocks(
         "cpu_min_pairs_per_worker": int(min_pairs_per_worker),
         "ram_budget_bytes": None if ram_budget_bytes is None else int(ram_budget_bytes),
         "total_pairs_est": int(total_pairs_est),
+        "group_blocks_seconds": float(group_blocks_seconds),
+        "partition_shards_seconds": float(partition_shards_seconds),
+        "oversize_sequential_seconds": float(oversize_sequential_seconds),
+        "worker_submit_seconds": float(worker_submit_seconds),
+        "worker_collect_seconds": float(worker_collect_seconds),
+        "merge_shards_seconds": float(merge_shards_seconds),
+        "final_readback_seconds": float(final_readback_seconds),
+        "worker_compute_seconds_total": float(pair_meta.get("worker_compute_seconds_total", 0.0) or 0.0),
+        "worker_flush_seconds_total": float(pair_meta.get("worker_flush_seconds_total", 0.0) or 0.0),
+        "top_slow_blocks": list(pair_meta.get("top_slow_blocks", []) or []),
+        "block_size_histogram": {
+            str(size): int(count) for size, count in sorted(block_size_histogram_counter.items(), key=lambda item: item[0])
+        },
     }
 
     if output is not None and not return_pairs and int(meta["pairs_written"]) == 0:

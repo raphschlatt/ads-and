@@ -140,6 +140,15 @@ def test_pair_builder_sharding_is_deterministic_across_worker_counts():
     rhs = pairs_4[key_cols].sort_values(key_cols).reset_index(drop=True)
     pd.testing.assert_frame_equal(lhs, rhs)
     assert meta_1["pairs_written"] == meta_4["pairs_written"]
+    for meta in (meta_1, meta_4):
+        assert meta["group_blocks_seconds"] >= 0.0
+        assert meta["worker_compute_seconds_total"] >= 0.0
+        assert meta["worker_flush_seconds_total"] >= 0.0
+        assert isinstance(meta["block_size_histogram"], dict)
+        assert isinstance(meta["top_slow_blocks"], list)
+        if meta["top_slow_blocks"]:
+            wall_seconds = [float(row["wall_seconds"]) for row in meta["top_slow_blocks"]]
+            assert wall_seconds == sorted(wall_seconds, reverse=True)
 
 
 def test_pair_builder_progress_tracks_pair_weights(monkeypatch):
