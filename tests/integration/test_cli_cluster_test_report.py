@@ -11,7 +11,12 @@ import pytest
 import yaml
 
 from author_name_disambiguation import cli
-from author_name_disambiguation.common.subset_artifacts import compute_lspo_source_fp, compute_subset_identity
+from author_name_disambiguation.common.subset_artifacts import (
+    LSPO_SOURCE_FP_SCHEME,
+    compute_lspo_source_fp,
+    compute_lspo_source_fp_legacy,
+    compute_subset_identity,
+)
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> Path:
@@ -133,7 +138,15 @@ def _make_configs(tmp_path: Path) -> dict[str, Path]:
     }
 
 
-def _write_train_artifacts(tmp_path: Path, cfg: dict[str, Any], model_run_id: str, subset_cache_key: str) -> None:
+def _write_train_artifacts(
+    tmp_path: Path,
+    cfg: dict[str, Any],
+    model_run_id: str,
+    subset_cache_key: str,
+    *,
+    lspo_source_fingerprint: str | None = None,
+    lspo_source_fingerprint_scheme: str | None = None,
+) -> None:
     metrics_dir = cfg["metrics_dir"] / model_run_id
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -196,10 +209,71 @@ def _write_train_artifacts(tmp_path: Path, cfg: dict[str, Any], model_run_id: st
                 "stage": "full",
                 "metric_scope": "train",
                 "subset_cache_key": subset_cache_key,
+                "lspo_source_fingerprint": lspo_source_fingerprint,
+                "lspo_source_fingerprint_scheme": lspo_source_fingerprint_scheme,
             },
             f,
             indent=2,
         )
+
+
+def _write_legacy_compat_artifacts(tmp_path: Path, cfg: dict[str, Any], metrics_dir: Path) -> None:
+    lspo_mentions = pd.read_parquet(Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet")
+    lspo_subset = cli.build_stage_subset(
+        lspo_mentions,
+        stage="full",
+        seed=int(cfg["run_payload"].get("seed", 11)),
+        target_mentions=cfg["run_payload"].get("subset_target_mentions"),
+        subset_sampling=cfg["run_payload"].get("subset_sampling", {}),
+    )
+    lspo_mentions_split, split_meta = cli.assign_lspo_splits(
+        lspo_subset,
+        seed=int(cfg["run_payload"].get("seed", 11)),
+        train_ratio=float(cfg["run_payload"]["split_assignment"]["train_ratio"]),
+        val_ratio=float(cfg["run_payload"]["split_assignment"]["val_ratio"]),
+        min_neg_val=int(cfg["run_payload"]["split_balance"]["min_neg_val"]),
+        min_neg_test=int(cfg["run_payload"]["split_balance"]["min_neg_test"]),
+        max_attempts=int(cfg["run_payload"]["split_balance"]["max_attempts"]),
+        return_meta=True,
+    )
+    pair_result = cli.build_pairs_within_blocks(
+        mentions=lspo_mentions_split,
+        max_pairs_per_block=cfg["run_payload"].get("max_pairs_per_block"),
+        seed=int(cfg["run_payload"].get("seed", 11)),
+        require_same_split=True,
+        labeled_only=False,
+        balance_train=True,
+        exclude_same_bibcode=True,
+        show_progress=False,
+        return_meta=True,
+    )
+    if isinstance(pair_result, tuple):
+        lspo_pairs, lspo_pair_build_meta = pair_result
+    else:
+        lspo_pairs = pair_result
+        lspo_pair_build_meta = {}
+    pairs_qc = cli.build_pairs_qc(
+        lspo_mentions=lspo_mentions_split,
+        lspo_pairs=lspo_pairs,
+        ads_pairs=pd.DataFrame(columns=cli.PAIR_REQUIRED_COLUMNS + ["label"]),
+        split_meta=split_meta,
+        lspo_pair_build_meta=lspo_pair_build_meta,
+        ads_pair_build_meta={},
+    )
+    with (metrics_dir / "01_subset_summary.json").open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "lspo_mentions": int(len(lspo_subset)),
+                "lspo_blocks": int(lspo_subset["block_key"].nunique()),
+                "lspo_block_size_p95": float(lspo_subset.groupby("block_key").size().quantile(0.95)),
+            },
+            f,
+            indent=2,
+        )
+    with (metrics_dir / "02_split_balance.json").open("w", encoding="utf-8") as f:
+        json.dump(split_meta, f, indent=2)
+    with (metrics_dir / "02_pairs_qc.json").open("w", encoding="utf-8") as f:
+        json.dump(pairs_qc, f, indent=2, default=int)
 
 
 def _apply_fast_mocks(monkeypatch) -> None:
@@ -234,7 +308,17 @@ def _apply_fast_mocks(monkeypatch) -> None:
                     "label": int(str(a.get("orcid", "")) == str(b.get("orcid", ""))),
                 }
             )
-        return pd.DataFrame(rows)
+        out = pd.DataFrame(rows)
+        if _kwargs.get("return_meta"):
+            return out, {
+                "exclude_same_bibcode": bool(_kwargs.get("exclude_same_bibcode", True)),
+                "same_publication_pairs_skipped": 0,
+                "balance_train": bool(_kwargs.get("balance_train", False)),
+                "pairs_written": int(len(out)),
+                "train_balance_before": {"pos": int((out["label"] == 1).sum()) if len(out) else 0, "neg": int((out["label"] == 0).sum()) if len(out) else 0},
+                "train_balance_after": {"pos": int((out["label"] == 1).sum()) if len(out) else 0, "neg": int((out["label"] == 0).sum()) if len(out) else 0},
+            }
+        return out
 
     def _chars(mentions, output_path, force_recompute=False, **_kwargs):
         p = Path(output_path)
@@ -329,7 +413,14 @@ def test_cli_run_cluster_test_report_writes_outputs(monkeypatch, tmp_path: Path)
     subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
 
     model_run_id = "full_20260218T111506Z_cli02681429"
-    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
@@ -349,6 +440,11 @@ def test_cli_run_cluster_test_report_writes_outputs(monkeypatch, tmp_path: Path)
     assert payload["cluster_config_override_path"] is None
     assert payload["override_ignored_fields"] == []
     assert payload["report_tag"] is None
+    assert payload["lspo_source_fingerprint"] == source_fp
+    assert payload["lspo_source_fingerprint_scheme"] == LSPO_SOURCE_FP_SCHEME
+    assert payload["subset_verification_mode"] == "strict"
+    assert payload["subset_cache_key_stable_computed"] == subset_identity.subset_tag
+    assert payload["subset_cache_key_legacy_computed"] is not None
     assert payload["seeds_expected"] == [1, 2]
     assert payload["seeds_evaluated"] == [1, 2]
     assert set(payload["variants"].keys()) == {"dbscan_no_constraints", "dbscan_with_constraints"}
@@ -369,7 +465,14 @@ def test_cli_run_cluster_test_report_override_requires_report_tag(monkeypatch, t
     source_fp = compute_lspo_source_fp(interim_lspo)
     subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
     model_run_id = "full_20260218T111506Z_cli02681429"
-    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
     _apply_fast_mocks(monkeypatch)
 
     override_cfg_path = tmp_path / "cfg" / "cluster_override.yaml"
@@ -409,7 +512,14 @@ def test_cli_run_cluster_test_report_override_writes_tagged_outputs(monkeypatch,
     source_fp = compute_lspo_source_fp(interim_lspo)
     subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
     model_run_id = "full_20260218T111506Z_cli02681429"
-    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
@@ -472,7 +582,14 @@ def test_cli_run_cluster_test_report_fails_when_lspo_raw_missing(monkeypatch, tm
     source_fp = compute_lspo_source_fp(interim_lspo)
     subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
     model_run_id = "full_20260218T111506Z_cli02681429"
-    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
@@ -495,7 +612,14 @@ def test_cli_run_cluster_test_report_fails_on_missing_checkpoint(monkeypatch, tm
     source_fp = compute_lspo_source_fp(interim_lspo)
     subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
     model_run_id = "full_20260218T111506Z_cli02681429"
-    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=subset_identity.subset_tag)
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
     _apply_fast_mocks(monkeypatch)
 
     ckpt = tmp_path / "artifacts" / "checkpoints" / model_run_id / f"{model_run_id}_seed2.pt"
@@ -518,10 +642,94 @@ def test_cli_run_cluster_test_report_fails_on_subset_key_mismatch(monkeypatch, t
     interim_lspo.parent.mkdir(parents=True, exist_ok=True)
     lspo_df.to_parquet(interim_lspo, index=False)
 
+    legacy_source_fp = compute_lspo_source_fp_legacy(interim_lspo)
+    legacy_subset_identity = compute_subset_identity(
+        run_cfg=cfg["run_payload"],
+        source_fp=legacy_source_fp,
+        sampler_version="v3",
+    )
     model_run_id = "full_20260218T111506Z_cli02681429"
-    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key="wrong_subset_key")
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=legacy_subset_identity.subset_tag)
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
     with pytest.raises(ValueError, match="Subset reproducibility check failed"):
         _run_report(parser, cfg, model_run_id=model_run_id)
+
+
+def test_cli_run_cluster_test_report_allows_legacy_lspo_compat(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    legacy_source_fp = compute_lspo_source_fp_legacy(interim_lspo)
+    legacy_subset_identity = compute_subset_identity(
+        run_cfg=cfg["run_payload"],
+        source_fp=legacy_source_fp,
+        sampler_version="v3",
+    )
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=legacy_subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+    _write_legacy_compat_artifacts(tmp_path, cfg, cfg["metrics_dir"] / model_run_id)
+
+    parser = cli.build_parser()
+    _run_report(
+        parser,
+        cfg,
+        model_run_id=model_run_id,
+        extra=["--allow-legacy-lspo-compat"],
+    )
+
+    payload = json.loads(((cfg["metrics_dir"] / model_run_id) / "06_clustering_test_report.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "ok"
+    assert payload["subset_verification_mode"] == "legacy_compat"
+    assert payload["subset_cache_key_expected"] == legacy_subset_identity.subset_tag
+    assert payload["subset_cache_key_stable_computed"] != payload["subset_cache_key_expected"]
+    assert payload["subset_cache_key_legacy_computed"] == legacy_subset_identity.subset_tag
+
+
+def test_cli_run_cluster_test_report_fails_legacy_compat_on_artifact_mismatch(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    legacy_source_fp = compute_lspo_source_fp_legacy(interim_lspo)
+    legacy_subset_identity = compute_subset_identity(
+        run_cfg=cfg["run_payload"],
+        source_fp=legacy_source_fp,
+        sampler_version="v3",
+    )
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(tmp_path, cfg, model_run_id, subset_cache_key=legacy_subset_identity.subset_tag)
+    _apply_fast_mocks(monkeypatch)
+    metrics_dir = cfg["metrics_dir"] / model_run_id
+    _write_legacy_compat_artifacts(tmp_path, cfg, metrics_dir)
+
+    pairs_qc_path = metrics_dir / "02_pairs_qc.json"
+    pairs_qc = json.loads(pairs_qc_path.read_text(encoding="utf-8"))
+    pairs_qc["lspo_pairs"] = int(pairs_qc["lspo_pairs"]) + 1
+    pairs_qc_path.write_text(json.dumps(pairs_qc, indent=2), encoding="utf-8")
+
+    parser = cli.build_parser()
+    with pytest.raises(ValueError, match="Legacy LSPO compatibility check failed"):
+        _run_report(
+            parser,
+            cfg,
+            model_run_id=model_run_id,
+            extra=["--allow-legacy-lspo-compat"],
+        )

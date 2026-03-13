@@ -130,6 +130,7 @@ def build_subset_summary(
     run_id: str,
     stage: str,
     source_fp: str,
+    source_fingerprint_scheme: str | None = None,
     subset_tag: str,
     cache_hit: bool,
     lspo_subset: pd.DataFrame,
@@ -146,6 +147,7 @@ def build_subset_summary(
         "run_id": str(run_id),
         "stage": str(stage),
         "source_fp": str(source_fp),
+        "source_fingerprint_scheme": None if source_fingerprint_scheme is None else str(source_fingerprint_scheme),
         "subset_tag": str(subset_tag),
         "cache_key": str(cache_key) if cache_key is not None else str(subset_tag),
         "cache_hit": bool(cache_hit),
@@ -388,6 +390,8 @@ def build_train_stage_metrics(
     split_meta: Mapping[str, Any] | None = None,
     eps_meta: Mapping[str, Any] | None = None,
     subset_cache_key: str | None = None,
+    lspo_source_fingerprint: str | None = None,
+    lspo_source_fingerprint_scheme: str | None = None,
     lspo_pairs_count: int | None = None,
 ) -> dict[str, Any]:
     split_meta = dict(split_meta or {})
@@ -432,6 +436,8 @@ def build_train_stage_metrics(
         "val_class_counts": train_manifest.get("best_val_class_counts", {}),
         "test_class_counts": train_manifest.get("best_test_class_counts", {}),
         "subset_cache_key": subset_cache_key,
+        "lspo_source_fingerprint": lspo_source_fingerprint,
+        "lspo_source_fingerprint_scheme": lspo_source_fingerprint_scheme,
         "lspo_pairs": lspo_pairs_total,
         "lspo_block_size_p95": lspo_block_size_p95,
         "max_possible_neg_total": max_possible_neg_total,

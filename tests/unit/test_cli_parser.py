@@ -9,6 +9,7 @@ def test_build_parser_exposes_only_public_commands():
     assert commands == {
         "run-train-stage",
         "run-infer-sources",
+        "compare-infer-baseline",
         "run-cluster-test-report",
         "export-model-bundle",
     }
@@ -225,6 +226,7 @@ def test_run_cluster_test_report_parser_defaults():
     assert args.score_batch_size == 8192
     assert args.cluster_config_override is None
     assert args.report_tag is None
+    assert args.allow_legacy_lspo_compat is False
     assert args.force is False
     assert args.progress is True
     assert args.quiet_libs is True
@@ -256,6 +258,7 @@ def test_run_cluster_test_report_parser_overrides():
             "cfg/cluster-override.yaml",
             "--report-tag",
             "tightened",
+            "--allow-legacy-lspo-compat",
             "--force",
             "--no-progress",
             "--verbose-libs",
@@ -267,6 +270,7 @@ def test_run_cluster_test_report_parser_overrides():
     assert args.score_batch_size == 4096
     assert args.cluster_config_override == "cfg/cluster-override.yaml"
     assert args.report_tag == "tightened"
+    assert args.allow_legacy_lspo_compat is True
     assert args.force is True
     assert args.progress is False
     assert args.quiet_libs is False

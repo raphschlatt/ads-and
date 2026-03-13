@@ -374,6 +374,8 @@ def test_cli_run_train_stage_smoke_stub(monkeypatch, tmp_path: Path):
     assert stage_metrics["counts"]["ads_mentions"] == 0
     assert stage_metrics["counts"]["ads_clusters"] == 0
     assert stage_metrics["split_balance_status"] == "ok"
+    assert stage_metrics["lspo_source_fingerprint"]
+    assert stage_metrics["lspo_source_fingerprint_scheme"] == "prepared_mentions_content_v1"
     go_payload = json.loads((metrics_dir / "05_go_no_go_smoke.json").read_text(encoding="utf-8"))
     assert "warnings" in go_payload
 

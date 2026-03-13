@@ -177,6 +177,8 @@ def test_build_train_metrics_and_compare(tmp_path: Path):
         split_meta=split_meta,
         eps_meta=eps_meta,
         subset_cache_key="smoke_seed11_target5000_cfg123_srcabc",
+        lspo_source_fingerprint="stable123",
+        lspo_source_fingerprint_scheme="prepared_mentions_content_v1",
         lspo_pairs_count=42,
     )
     assert stage_metrics["metric_scope"] == "train"
@@ -194,6 +196,8 @@ def test_build_train_metrics_and_compare(tmp_path: Path):
     assert stage_metrics["eps_diag_delta_f1"] == 0.021
     assert stage_metrics["precision_mode"] == "fp32"
     assert stage_metrics["subset_cache_key"] == "smoke_seed11_target5000_cfg123_srcabc"
+    assert stage_metrics["lspo_source_fingerprint"] == "stable123"
+    assert stage_metrics["lspo_source_fingerprint_scheme"] == "prepared_mentions_content_v1"
     assert stage_metrics["lspo_pairs"] == 42
     assert stage_metrics["max_possible_neg_total"] == 1234
     assert stage_metrics["required_neg_total"] == 400

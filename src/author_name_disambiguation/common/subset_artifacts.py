@@ -13,6 +13,22 @@ import pandas as pd
 from author_name_disambiguation.common.io_schema import read_parquet, save_parquet
 from author_name_disambiguation.common.cache_ops import resolve_shared_cache_root
 
+LSPO_SOURCE_FP_SCHEME = "prepared_mentions_content_v1"
+LSPO_SOURCE_FP_SCHEME_LEGACY = "file_stamp_v1"
+LSPO_SOURCE_FP_COLUMNS = (
+    "mention_id",
+    "bibcode",
+    "author_idx",
+    "author_raw",
+    "title",
+    "abstract",
+    "year",
+    "source_type",
+    "block_key",
+    "orcid",
+    "aff",
+)
+
 
 @dataclass(frozen=True)
 class SubsetIdentity:
@@ -58,6 +74,49 @@ def _file_stamp(path: Path) -> str:
     return f"{st.st_size}-{st.st_mtime_ns}"
 
 
+def _normalize_hash_scalar(value: Any) -> tuple[str, Any]:
+    if hasattr(value, "item") and not isinstance(value, (bytes, bytearray, str)):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+    if pd.isna(value):
+        return ("null", None)
+    if isinstance(value, bool):
+        return ("bool", bool(value))
+    if isinstance(value, int):
+        return ("int", int(value))
+    if isinstance(value, float):
+        return ("float", format(value, ".17g"))
+    if isinstance(value, (bytes, bytearray)):
+        return ("bytes", bytes(value).hex())
+    return ("str", str(value))
+
+
+def compute_lspo_source_fp_from_mentions(lspo_mentions: pd.DataFrame) -> str:
+    frame = lspo_mentions.reindex(columns=list(LSPO_SOURCE_FP_COLUMNS))
+    digest = hashlib.sha1()
+    digest.update(f"lspo:{LSPO_SOURCE_FP_SCHEME}".encode("utf-8"))
+    digest.update(b"\n")
+    digest.update(",".join(LSPO_SOURCE_FP_COLUMNS).encode("utf-8"))
+    digest.update(b"\n")
+    for row in frame.itertuples(index=False, name=None):
+        for value in row:
+            value_type, normalized = _normalize_hash_scalar(value)
+            cell = json.dumps(
+                {"t": value_type, "v": normalized},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            digest.update(str(len(cell)).encode("ascii"))
+            digest.update(b":")
+            digest.update(cell)
+            digest.update(b"|")
+        digest.update(b"\n")
+    return digest.hexdigest()[:12]
+
+
 def _normalize_subset_sampling(run_cfg: Mapping[str, Any]) -> dict[str, Any]:
     raw = run_cfg.get("subset_sampling") or {}
     if not isinstance(raw, Mapping):
@@ -69,6 +128,11 @@ def _normalize_subset_sampling(run_cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def compute_lspo_source_fp(lspo_interim_path: Path) -> str:
+    mentions = read_parquet(lspo_interim_path)
+    return compute_lspo_source_fp_from_mentions(mentions)
+
+
+def compute_lspo_source_fp_legacy(lspo_interim_path: Path) -> str:
     payload = f"lspo:{_file_stamp(lspo_interim_path)}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 

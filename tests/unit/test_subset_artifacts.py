@@ -1,12 +1,16 @@
 from pathlib import Path
+import os
 
 import pandas as pd
 
 from author_name_disambiguation.common.cache_ops import resolve_shared_cache_root
 from author_name_disambiguation.common.io_schema import save_parquet
 from author_name_disambiguation.common.subset_artifacts import (
+    LSPO_SOURCE_FP_SCHEME,
+    LSPO_SOURCE_FP_SCHEME_LEGACY,
     compute_ads_source_fp,
     compute_lspo_source_fp,
+    compute_lspo_source_fp_legacy,
     compute_source_fp,
     compute_subset_identity,
     load_subset_mentions,
@@ -62,6 +66,23 @@ def test_lspo_ads_source_fingerprints_are_separate(tmp_path: Path):
     ads_fp_2 = compute_ads_source_fp(ads)
     assert lspo_fp_2 != lspo_fp_1
     assert ads_fp_2 == ads_fp_1
+
+
+def test_lspo_source_fingerprint_ignores_file_touch(tmp_path: Path):
+    lspo = tmp_path / "lspo.parquet"
+    save_parquet(_mention_df("lspo"), lspo, index=False)
+
+    stable_fp_1 = compute_lspo_source_fp(lspo)
+    legacy_fp_1 = compute_lspo_source_fp_legacy(lspo)
+    st = lspo.stat()
+    os.utime(lspo, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    stable_fp_2 = compute_lspo_source_fp(lspo)
+    legacy_fp_2 = compute_lspo_source_fp_legacy(lspo)
+
+    assert LSPO_SOURCE_FP_SCHEME == "prepared_mentions_content_v1"
+    assert LSPO_SOURCE_FP_SCHEME_LEGACY == "file_stamp_v1"
+    assert stable_fp_1 == stable_fp_2
+    assert legacy_fp_1 != legacy_fp_2
 
 
 def test_subset_identity_changes_when_sampling_config_changes():

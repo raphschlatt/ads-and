@@ -50,8 +50,11 @@ from author_name_disambiguation.common.pipeline_reports import (
 )
 from author_name_disambiguation.common.run_report import evaluate_go_no_go, load_gate_config, write_go_no_go_report
 from author_name_disambiguation.common.subset_artifacts import (
+    LSPO_SOURCE_FP_SCHEME,
+    LSPO_SOURCE_FP_SCHEME_LEGACY,
     atomic_save_parquet,
     compute_lspo_source_fp,
+    compute_lspo_source_fp_legacy,
     compute_subset_identity,
     resolve_manifest_paths,
     resolve_shared_subset_paths,
@@ -733,6 +736,86 @@ def _resolve_train_seed_runs(train_manifest: dict[str, Any]) -> list[dict[str, A
     return seed_runs
 
 
+def _normalize_split_label_counts(value: Any) -> dict[str, dict[str, int]] | None:
+    if isinstance(value, dict):
+        out: dict[str, dict[str, int]] = {}
+        for split, row in value.items():
+            if not isinstance(row, dict):
+                continue
+            out[str(split)] = {
+                "pos": int(row.get("pos", 0)),
+                "neg": int(row.get("neg", 0)),
+                "labeled_pairs": int(row.get("labeled_pairs", 0)),
+            }
+        return out
+    if isinstance(value, list):
+        out = {}
+        for row in value:
+            if not isinstance(row, dict):
+                continue
+            split = str(row.get("split", "")).strip()
+            if split == "":
+                continue
+            out[split] = {
+                "pairs": int(row.get("pairs", 0)),
+                "labeled_pairs": int(row.get("labeled_pairs", 0)),
+                "pos": int(row.get("pos", 0)),
+                "neg": int(row.get("neg", 0)),
+            }
+        return out
+    return None
+
+
+def _snapshot_legacy_subset_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "lspo_mentions": int(payload.get("lspo_mentions", 0)),
+        "lspo_blocks": int(payload.get("lspo_blocks", 0)),
+        "lspo_block_size_p95": float(payload.get("lspo_block_size_p95", 0.0)),
+    }
+
+
+def _snapshot_legacy_split_balance(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": payload.get("status"),
+        "attempts": int(payload.get("attempts", 0)),
+        "min_neg_val": int(payload.get("min_neg_val", 0)),
+        "min_neg_test": int(payload.get("min_neg_test", 0)),
+        "required_neg_total": int(payload.get("required_neg_total", 0)),
+        "max_possible_neg_total": int(payload.get("max_possible_neg_total", 0)),
+        "train_ratio": float(payload.get("train_ratio", 0.0)),
+        "val_ratio": float(payload.get("val_ratio", 0.0)),
+        "test_ratio": float(payload.get("test_ratio", 0.0)),
+        "split_label_counts": _normalize_split_label_counts(payload.get("split_label_counts")),
+    }
+
+
+def _snapshot_legacy_pairs_qc(payload: dict[str, Any]) -> dict[str, Any]:
+    pair_build = dict(payload.get("lspo_pair_build", {}) or {})
+    return {
+        "orcid_leakage_groups": int(payload.get("orcid_leakage_groups", 0)),
+        "lspo_pairs": int(payload.get("lspo_pairs", 0)),
+        "split_label_counts": _normalize_split_label_counts(payload.get("split_label_counts")),
+        "lspo_pair_build": {
+            "exclude_same_bibcode": bool(pair_build.get("exclude_same_bibcode", False)),
+            "same_publication_pairs_skipped": int(pair_build.get("same_publication_pairs_skipped", 0)),
+            "balance_train": bool(pair_build.get("balance_train", False)),
+            "pairs_written": int(pair_build.get("pairs_written", 0)),
+            "train_balance_before": dict(pair_build.get("train_balance_before", {}) or {}),
+            "train_balance_after": dict(pair_build.get("train_balance_after", {}) or {}),
+        },
+    }
+
+
+def _collect_snapshot_mismatches(section: str, expected: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    for key in sorted(set(expected) | set(current)):
+        if expected.get(key) != current.get(key):
+            issues.append(
+                f"{section}.{key} mismatch: expected={expected.get(key)!r}, current={current.get(key)!r}"
+            )
+    return issues
+
+
 def _build_cluster_variant_config(base_cluster_cfg: dict[str, Any], *, enable_constraints: bool) -> dict[str, Any]:
     out = json.loads(json.dumps(base_cluster_cfg))
     constraints_cfg = dict(out.get("constraints", {}) or {})
@@ -1204,6 +1287,7 @@ def cmd_run_train_stage(args):
                 "run_stage": stage,
                 "pipeline_scope": "train",
                 "source_fp": subset_identity.source_fp,
+                "source_fingerprint_scheme": LSPO_SOURCE_FP_SCHEME,
                 "subset_target_mentions": run_cfg.get("subset_target_mentions"),
                 "health": cache_health,
                 "created_utc": datetime.now(timezone.utc).isoformat(),
@@ -1233,6 +1317,7 @@ def cmd_run_train_stage(args):
             run_id=run_id,
             stage=stage,
             source_fp=subset_identity.source_fp,
+            source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
             subset_tag=subset_identity.subset_tag,
             cache_key=subset_identity.subset_tag,
             cache_hit=cache_hit,
@@ -1603,6 +1688,8 @@ def cmd_run_train_stage(args):
                 split_meta=split_meta,
                 eps_meta=eps_meta,
                 subset_cache_key=subset_identity.subset_tag,
+                lspo_source_fingerprint=subset_identity.source_fp,
+                lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
                 lspo_pairs_count=int(len(lspo_pairs)),
             )
             write_json(stage_metrics, stage_metrics_path)
@@ -1767,6 +1854,18 @@ def cmd_run_cluster_test_report(args):
             raise ValueError(
                 f"subset_cache_key missing in {stage_metrics_path}; cannot verify reproducibility."
             )
+        expected_lspo_source_fingerprint_raw = stage_metrics.get("lspo_source_fingerprint")
+        expected_lspo_source_fingerprint = (
+            str(expected_lspo_source_fingerprint_raw).strip()
+            if expected_lspo_source_fingerprint_raw is not None
+            else None
+        ) or None
+        expected_lspo_source_fingerprint_scheme_raw = stage_metrics.get("lspo_source_fingerprint_scheme")
+        expected_lspo_source_fingerprint_scheme = (
+            str(expected_lspo_source_fingerprint_scheme_raw).strip()
+            if expected_lspo_source_fingerprint_scheme_raw is not None
+            else None
+        ) or None
 
         train_manifest = load_json(train_manifest_path)
         seed_runs = _resolve_train_seed_runs(train_manifest)
@@ -1837,16 +1936,17 @@ def cmd_run_cluster_test_report(args):
             )
 
         source_fp = compute_lspo_source_fp(lspo_mentions_path)
+        legacy_source_fp = compute_lspo_source_fp_legacy(lspo_mentions_path)
         subset_identity = compute_subset_identity(
             run_cfg=run_cfg,
             source_fp=source_fp,
             sampler_version=SUBSET_CACHE_VERSION,
         )
-        if subset_identity.subset_tag != expected_subset_cache_key:
-            raise ValueError(
-                "Subset reproducibility check failed: computed subset_cache_key does not match train stage metrics. "
-                f"computed={subset_identity.subset_tag}, expected={expected_subset_cache_key}."
-            )
+        legacy_subset_identity = compute_subset_identity(
+            run_cfg=run_cfg,
+            source_fp=legacy_source_fp,
+            sampler_version=SUBSET_CACHE_VERSION,
+        )
 
         lspo_subset = build_stage_subset(
             lspo_mentions,
@@ -1871,7 +1971,7 @@ def cmd_run_cluster_test_report(args):
                 f"split_meta={split_meta}"
             )
 
-        lspo_pairs = build_pairs_within_blocks(
+        pair_result = build_pairs_within_blocks(
             mentions=lspo_mentions_split,
             max_pairs_per_block=run_cfg.get("max_pairs_per_block"),
             seed=int(run_cfg.get("seed", 11)),
@@ -1880,9 +1980,90 @@ def cmd_run_cluster_test_report(args):
             balance_train=True,
             exclude_same_bibcode=bool(pair_build_cfg.get("exclude_same_bibcode", True)),
             show_progress=False,
+            return_meta=True,
         )
+        if isinstance(pair_result, tuple):
+            lspo_pairs, lspo_pair_build_meta = pair_result
+        else:
+            lspo_pairs = pair_result
+            lspo_pair_build_meta = {}
         if lspo_pairs is None:
             raise RuntimeError("Pair builder returned None during clustering report generation.")
+        empty_ads_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+        current_pairs_qc = build_pairs_qc(
+            lspo_mentions=lspo_mentions_split,
+            lspo_pairs=lspo_pairs,
+            ads_pairs=empty_ads_pairs,
+            split_meta=split_meta,
+            lspo_pair_build_meta=lspo_pair_build_meta,
+            ads_pair_build_meta={},
+        )
+
+        subset_verification_mode = "strict"
+        if subset_identity.subset_tag != expected_subset_cache_key:
+            legacy_mode_allowed = expected_lspo_source_fingerprint_scheme in (None, "", LSPO_SOURCE_FP_SCHEME_LEGACY)
+            if not args.allow_legacy_lspo_compat:
+                raise ValueError(
+                    "Subset reproducibility check failed: computed stable subset_cache_key does not match train stage metrics. "
+                    f"stable={subset_identity.subset_tag}, legacy={legacy_subset_identity.subset_tag}, "
+                    f"expected={expected_subset_cache_key}."
+                )
+            if not legacy_mode_allowed:
+                raise ValueError(
+                    "Legacy LSPO compatibility is only supported for model runs without stable LSPO fingerprint metadata. "
+                    f"expected_scheme={expected_lspo_source_fingerprint_scheme!r}."
+                )
+
+            subset_summary_path = metrics_dir / "01_subset_summary.json"
+            split_meta_expected_path = metrics_dir / "02_split_balance.json"
+            pairs_qc_expected_path = metrics_dir / "02_pairs_qc.json"
+            for required_path in [subset_summary_path, split_meta_expected_path, pairs_qc_expected_path]:
+                if not required_path.exists():
+                    raise FileNotFoundError(
+                        f"Legacy LSPO compatibility requires historical train artifact: {required_path}"
+                    )
+
+            expected_subset_summary = load_json(subset_summary_path)
+            expected_split_meta = load_json(split_meta_expected_path)
+            expected_pairs_qc = load_json(pairs_qc_expected_path)
+            current_subset_summary = {
+                "lspo_mentions": len(lspo_subset),
+                "lspo_blocks": int(lspo_subset["block_key"].nunique()) if "block_key" in lspo_subset.columns else 0,
+                "lspo_block_size_p95": float(lspo_subset.groupby("block_key").size().quantile(0.95))
+                if len(lspo_subset) and "block_key" in lspo_subset.columns
+                else 0.0,
+            }
+            compat_issues: list[str] = []
+            compat_issues.extend(
+                _collect_snapshot_mismatches(
+                    "subset_summary",
+                    _snapshot_legacy_subset_summary(expected_subset_summary),
+                    _snapshot_legacy_subset_summary(current_subset_summary),
+                )
+            )
+            compat_issues.extend(
+                _collect_snapshot_mismatches(
+                    "split_balance",
+                    _snapshot_legacy_split_balance(expected_split_meta),
+                    _snapshot_legacy_split_balance(split_meta),
+                )
+            )
+            compat_issues.extend(
+                _collect_snapshot_mismatches(
+                    "pairs_qc",
+                    _snapshot_legacy_pairs_qc(expected_pairs_qc),
+                    _snapshot_legacy_pairs_qc(current_pairs_qc),
+                )
+            )
+            if compat_issues:
+                preview = "; ".join(compat_issues[:6])
+                if len(compat_issues) > 6:
+                    preview = f"{preview}; ... ({len(compat_issues)} mismatches total)"
+                raise ValueError(
+                    "Legacy LSPO compatibility check failed: reconstructed subset artifacts do not match historical train artifacts. "
+                    f"{preview}"
+                )
+            subset_verification_mode = "legacy_compat"
 
         test_mentions = lspo_mentions_split[lspo_mentions_split["split"].astype(str) == "test"].reset_index(drop=True)
         test_pairs = lspo_pairs[
@@ -1894,7 +2075,11 @@ def cmd_run_cluster_test_report(args):
             )
         if len(test_pairs) == 0:
             raise RuntimeError("No labeled LSPO test pairs available for clustering benchmark.")
-        ui.done(f"Prepared LSPO test split ({len(test_mentions)} mentions, {len(test_pairs)} labeled pairs).")
+        ui.done(
+            "Prepared LSPO test split "
+            f"({len(test_mentions)} mentions, {len(test_pairs)} labeled pairs) "
+            f"| verification={subset_verification_mode}"
+        )
 
         ui.start("Build or load LSPO embeddings")
         rep_cfg = dict(model_cfg.get("representation", {}) or {})
@@ -2046,8 +2231,14 @@ def cmd_run_cluster_test_report(args):
                 "interim_lspo_mentions": str(lspo_mentions_path),
             },
             "lspo_source_fingerprint": subset_identity.source_fp,
+            "lspo_source_fingerprint_scheme": LSPO_SOURCE_FP_SCHEME,
+            "lspo_source_fingerprint_expected": expected_lspo_source_fingerprint,
+            "lspo_source_fingerprint_scheme_expected": expected_lspo_source_fingerprint_scheme,
+            "subset_verification_mode": subset_verification_mode,
             "subset_cache_key_expected": expected_subset_cache_key,
             "subset_cache_key_computed": subset_identity.subset_tag,
+            "subset_cache_key_stable_computed": subset_identity.subset_tag,
+            "subset_cache_key_legacy_computed": legacy_subset_identity.subset_tag,
             "seeds_expected": [int(row["seed"]) for row in seed_runs],
             "seeds_evaluated": sorted({int(row["seed"]) for row in per_seed_rows}),
             "selected_eps": float(selected_eps),
@@ -2173,6 +2364,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--score-batch-size", type=int, default=8192)
     sp.add_argument("--cluster-config-override", default=None)
     sp.add_argument("--report-tag", default=None)
+    sp.add_argument("--allow-legacy-lspo-compat", action="store_true")
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_cluster_test_report)
