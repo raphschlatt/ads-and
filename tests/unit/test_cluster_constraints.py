@@ -637,8 +637,6 @@ def test_cluster_backend_gpu_keeps_small_blocks_on_gpu_in_recovery_mode(monkeypa
     assert seen["cpu_sizes"] == []
     assert seen["gpu_sizes"] == [3, 9]
     assert meta["cluster_backend_effective"] == "cuml_gpu"
-    assert meta["small_block_cpu_threshold"] is None
-    assert meta["small_block_cpu_routed_blocks"] == 0
     assert meta["backend_block_counts"] == {"cuml_gpu": 2}
     assert meta["block_count_by_bucket"] == {"3-4": 1, "9-16": 1}
     assert "3-4" in meta["total_seconds_by_bucket"]

@@ -24,17 +24,17 @@ For the ADS full-source inference line, provenance is now anchored by two retain
 - historical full reference:
   - `artifacts/exports/infer_ads_full_20260305_full_20260310T134713Z`
 - current operational baseline:
-  - `artifacts/exports/bench_full_v21_fix4`
+  - `artifacts/exports/bench_full_v22_fix2`
 
 The contract for this retained pair is documented in:
 
-- `docs/baselines/infer_ads_full_run_20260305_v21_fix4.json`
+- `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
 
 That baseline manifest records:
 
-- the historical source run
-- the current baseline run
-- accepted drift between them
+- the promoted ADS baseline run
+- the model bundle and runtime metadata used for inference
 - the artifact keep-set used for workspace cleanup
+- optional compare metadata against the previous baseline
 
-Intermediate optimization runs are not part of long-term provenance once the baseline manifest and compare report exist.
+Intermediate optimization runs are not part of long-term provenance once the compare report exists and failed ADS candidates have been pruned to the JSON-only retention set.

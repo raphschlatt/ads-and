@@ -46,6 +46,12 @@ def _extract_variant_metrics(report: dict[str, Any], *, variant: str, label: str
 
 
 def _default_output(candidate_report: Path) -> Path:
+    stem = candidate_report.stem
+    prefix = "06_clustering_test_report__"
+    if stem.startswith(prefix):
+        tag = stem[len(prefix) :].strip()
+        if tag:
+            return candidate_report.parent / f"99_compare_cluster_report_to_baseline__{tag}.json"
     return candidate_report.parent / "99_compare_cluster_report_to_baseline.json"
 
 
@@ -58,7 +64,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--variant", default="dbscan_with_constraints")
     parser.add_argument("--min-delta-f1", type=float, default=0.0)
     parser.add_argument("--max-precision-drop", type=float, default=0.001)
-    parser.add_argument("--output", default=None, help="Output JSON path; defaults next to candidate report.")
+    parser.add_argument("--output-path", default=None, help="Output JSON path; defaults next to candidate report.")
+    parser.add_argument("--output", dest="output_path_legacy", default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -66,7 +73,8 @@ def main() -> int:
     args = _build_parser().parse_args()
     baseline_path = Path(args.baseline_report)
     candidate_path = Path(args.candidate_report)
-    output_path = Path(args.output) if args.output else _default_output(candidate_path)
+    output_arg = args.output_path if args.output_path is not None else args.output_path_legacy
+    output_path = Path(output_arg) if output_arg else _default_output(candidate_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     baseline = _load_json(baseline_path)

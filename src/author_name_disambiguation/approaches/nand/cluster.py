@@ -48,7 +48,6 @@ _BLOCK_SIZE_HIST_BUCKETS = [
     ("65+", 65, None),
 ]
 _LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
-_SMALL_BLOCK_CPU_THRESHOLD = 0
 
 
 def _ascii_fold(text: str) -> str:
@@ -580,16 +579,9 @@ def _resolve_block_backend(
     *,
     requested_backend: str,
     block_size: int,
-    small_block_cpu_threshold: int = _SMALL_BLOCK_CPU_THRESHOLD,
 ) -> tuple[str, str | None]:
-    backend_clean = str(requested_backend).strip().lower()
-    if (
-        backend_clean == "cuml_gpu"
-        and int(small_block_cpu_threshold) > 1
-        and int(block_size) <= int(small_block_cpu_threshold)
-    ):
-        return "sklearn_cpu", "small_block_cpu_threshold"
-    return backend_clean, None
+    del block_size
+    return str(requested_backend).strip().lower(), None
 
 
 def _cluster_single_block(
@@ -1083,14 +1075,6 @@ def cluster_blockwise_dbscan(
         dbscan_seconds_by_bucket[bucket_label] = float(
             dbscan_seconds_by_bucket.get(bucket_label, 0.0) + float(row.get("dbscan_seconds", 0.0))
         )
-    small_block_cpu_routed_blocks = int(
-        sum(1 for row in timing_rows if str(row.get("backend_reason", "")) == "small_block_cpu_threshold")
-    )
-    small_block_cpu_routed_pairs_est = int(
-        sum(int(entry.get("pair_est", 0)) for entry in entries if int(entry.get("size", 0)) <= _SMALL_BLOCK_CPU_THRESHOLD)
-        if backend_effective == "cuml_gpu"
-        else 0
-    )
     top_slow_blocks = sorted(
         timing_rows,
         key=lambda row: (-float(row.get("total_seconds", 0.0)), str(row.get("block_key", ""))),
@@ -1108,11 +1092,6 @@ def cluster_blockwise_dbscan(
         "cluster_backend_requested": backend_requested,
         "cluster_backend_effective": backend_effective,
         "cluster_backend_reason": backend_info.get("reason"),
-        "small_block_cpu_threshold": (
-            int(_SMALL_BLOCK_CPU_THRESHOLD) if backend_effective == "cuml_gpu" and _SMALL_BLOCK_CPU_THRESHOLD > 1 else None
-        ),
-        "small_block_cpu_routed_blocks": int(small_block_cpu_routed_blocks),
-        "small_block_cpu_routed_pairs_est": int(small_block_cpu_routed_pairs_est),
         "backend_block_counts": {str(key): int(value) for key, value in sorted(backend_block_counts.items())},
         "cpu_sharding_mode": str(sharding_mode),
         "cpu_sharding_enabled": bool(sharding_on and backend_effective == "sklearn_cpu"),

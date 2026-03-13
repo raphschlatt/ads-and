@@ -218,18 +218,17 @@ def _vectorize_words_silently(
     show_progress: bool,
 ) -> tuple[np.ndarray, dict[str, object]]:
     normalize_started_at = perf_counter()
-    normalized_words = np.asarray([str(w).lower() for w in words], dtype=object)
+    normalized_words = [str(w).lower() for w in words]
     normalize_seconds = float(perf_counter() - normalize_started_at)
 
     unique_started_at = perf_counter()
-    unique_words, inverse = np.unique(normalized_words, return_inverse=True)
+    unique_words = np.unique(normalized_words)
     unique_seconds = float(perf_counter() - unique_started_at)
 
     pad_seconds = 0.0
     predict_seconds = 0.0
-    missing_word_indexes = [idx for idx, word in enumerate(unique_words.tolist()) if word not in model.cache]
-    if missing_word_indexes:
-        missing_words = [str(unique_words[idx]) for idx in missing_word_indexes]
+    missing_words = [str(word) for word in unique_words.tolist() if word not in model.cache]
+    if missing_words:
         pad_started_at = perf_counter()
         embeddings_pad_seq = _pad_sequences(model, missing_words)
         pad_seconds = float(perf_counter() - pad_started_at)
@@ -243,12 +242,11 @@ def _vectorize_words_silently(
         )
         predict_seconds = float(perf_counter() - predict_started_at)
 
-        for idx, vector in zip(missing_word_indexes, np.asarray(missing_word_vectors, dtype=np.float32), strict=False):
-            model.cache[str(unique_words[idx])] = vector
+        for word, vector in zip(missing_words, np.asarray(missing_word_vectors, dtype=np.float32), strict=False):
+            model.cache[str(word)] = vector
 
     materialize_started_at = perf_counter()
-    unique_vectors = np.vstack([np.asarray(model.cache[str(word)], dtype=np.float32) for word in unique_words])
-    materialized = np.asarray(unique_vectors[inverse], dtype=np.float32)
+    materialized = np.asarray([model.cache[current_word] for current_word in normalized_words], dtype=np.float32)
     materialize_seconds = float(perf_counter() - materialize_started_at)
 
     meta = {

@@ -107,3 +107,54 @@ def test_compare_cluster_test_reports_fails_on_seed_mismatch(tmp_path: Path):
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     assert payload["passed"] is False
     assert any("seeds mismatch" in item for item in payload["failures"])
+
+
+def test_compare_cluster_test_reports_writes_tag_stable_default_output(tmp_path: Path):
+    baseline = tmp_path / "baseline_06.json"
+    candidate = tmp_path / "06_clustering_test_report__perf_pkg2_chars_v1.json"
+    _write_report(baseline, run_id="base_run", seeds=[1, 2, 3], status="ok", f1=0.9700, precision=0.9635)
+    _write_report(candidate, run_id="cand_run", seeds=[1, 2, 3], status="ok", f1=0.9710, precision=0.9635)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(_script_path()),
+            "--baseline-report",
+            str(baseline),
+            "--candidate-report",
+            str(candidate),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    out_path = candidate.parent / "99_compare_cluster_report_to_baseline__perf_pkg2_chars_v1.json"
+    assert out_path.exists()
+
+
+def test_compare_cluster_test_reports_honors_output_path_flag(tmp_path: Path):
+    baseline = tmp_path / "baseline_06.json"
+    candidate = tmp_path / "candidate_06.json"
+    custom_output = tmp_path / "custom_compare.json"
+    _write_report(baseline, run_id="base_run", seeds=[1, 2, 3], status="ok", f1=0.9700, precision=0.9635)
+    _write_report(candidate, run_id="cand_run", seeds=[1, 2, 3], status="ok", f1=0.9710, precision=0.9635)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(_script_path()),
+            "--baseline-report",
+            str(baseline),
+            "--candidate-report",
+            str(candidate),
+            "--output-path",
+            str(custom_output),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert custom_output.exists()

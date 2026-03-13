@@ -1,0 +1,77 @@
+{
+  "artifact_keep_set": [
+    "bench_full_v22_fix2"
+  ],
+  "canonical_baseline": {
+    "artifact_dir": "bench_full_v22_fix2",
+    "counts": {
+      "ads_blocks": 205680,
+      "ads_cluster_assignments": 1322725,
+      "ads_clusters": 231355,
+      "ads_mentions": 1322725
+    },
+    "model_bundle": "/home/ubuntu/Author_Name_Disambiguation/artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1",
+    "quality": {
+      "blockers": [],
+      "go": true,
+      "singleton_ratio": 0.501523632512805,
+      "source_coverage_rate": 1.0,
+      "warnings": [
+        "singleton_ratio"
+      ]
+    },
+    "run_id": "infer_sources_20260313T115559Z_35d736cd",
+    "runtime": {
+      "device": "auto",
+      "precision_mode": "fp32",
+      "specter_effective_batch_size": 256,
+      "specter_effective_precision_mode": "amp_bf16"
+    },
+    "runtime_seconds": {
+      "clustering.build_entries_seconds": 26.996221863199025,
+      "clustering.constraints_seconds_total": 44.96576934074983,
+      "clustering.dbscan_seconds_total": 331.7710236986168,
+      "clustering.distance_matrix_seconds_total": 112.62323485035449,
+      "clustering.gpu_transfer_seconds_total": 8.290617053397,
+      "clustering.sanitize_seconds_total": 7.005494360346347,
+      "export.build_assignments_seconds": 6.647595463786274,
+      "export.build_author_entities_seconds": 10.390555861406028,
+      "export.mirror_publications_seconds": 9.415625581983477,
+      "export.mirror_references_seconds": 16.646882427856326,
+      "export.source_reread_seconds": 0.0,
+      "load_inputs.deduplicate_seconds": 5.651515785139054,
+      "load_inputs.explode_mentions_seconds": 11.301112491637468,
+      "load_inputs.normalize_publications_seconds": 1.5341853299178183,
+      "load_inputs.normalize_references_seconds": 3.0854616896249354,
+      "load_inputs.normalize_seconds": 4.619647019542754,
+      "load_inputs.read_publications_seconds": 4.051008155103773,
+      "load_inputs.read_references_seconds": 4.43668218376115,
+      "pair_building.final_readback_seconds": 18.046358338091522,
+      "pair_building.group_blocks_seconds": 13.158923085778952,
+      "pair_building.merge_shards_seconds": 8.492707220371813,
+      "pair_building.oversize_sequential_seconds": 0.0,
+      "pair_building.partition_shards_seconds": 0.5651574940420687,
+      "pair_building.worker_collect_seconds": 30.285588594153523,
+      "pair_building.worker_compute_seconds_total": 126.50735020404682,
+      "pair_building.worker_flush_seconds_total": 44.447188762482256,
+      "pair_building.worker_submit_seconds": 0.3452416970394552,
+      "pair_scoring.feature_build_seconds": 0.8138024010695517,
+      "pair_scoring.mention_encode_seconds": 7.7126189060509205,
+      "pair_scoring.pair_score_seconds": 5.632953417021781,
+      "pair_scoring.pandas_conversion_seconds": 7.710270798765123,
+      "pair_scoring.parquet_read_seconds": 3.7883410253562033,
+      "pair_scoring.parquet_write_seconds": 23.46770481625572,
+      "specter.device_to_host_seconds_total": 84.69691428681836,
+      "specter.forward_seconds_total": 58.94472124380991,
+      "specter.host_to_device_seconds_total": 18.491615431383252,
+      "specter.tokenize_seconds_total": 462.590553924907
+    },
+    "source_model_run_id": "full_20260218T111506Z_cli02681429"
+  },
+  "comparison_to_previous_baseline": null,
+  "dataset_id": "ads_full_run_20260305",
+  "generated_utc": "2026-03-13T19:45:19Z",
+  "manifest_scope": "infer_baseline",
+  "manifest_version": 2,
+  "metrics_root": "artifacts/exports"
+}

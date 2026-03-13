@@ -101,22 +101,19 @@ The source-mirrored outputs preserve all input fields and add:
 
 ## Baseline And Compare
 
-The canonical inference baseline is tracked in:
+The current promoted ADS inference baseline is tracked in:
 
-- `docs/baselines/infer_ads_full_run_20260305_v21_fix4.json`
+- `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
 
 Current keep-set for large inference artifacts:
 
-- `artifacts/exports/bench_full_v21_fix4`
-- `artifacts/exports/bench_mid_v21_fix4`
-- `artifacts/exports/infer_ads_full_20260305_full_20260310T134713Z`
-- `artifacts/exports/infer_ads_full_20260305_full_20260310T134713Z.run.log`
+- `artifacts/exports/bench_full_v22_fix2`
 
-The historical full reference remains for provenance. New comparisons should use the current baseline:
+New comparisons should use the current baseline:
 
 ```bash
 author-name-disambiguation compare-infer-baseline \
-  --baseline-run-id bench_full_v21_fix4 \
+  --baseline-run-id bench_full_v22_fix2 \
   --current-run-id <new_run_dir_name> \
   --metrics-root artifacts/exports
 ```
@@ -130,6 +127,20 @@ The compare report includes:
 - stage/count deltas from `05_stage_metrics_infer_sources.json`
 - coverage/go-no-go deltas
 - partition-aware `mention_clusters` drift, not just raw UID-string diffs
+
+If a candidate is not promoted, keep the compare JSONs and prune the heavy parquet outputs:
+
+```bash
+python scripts/ops/prune_infer_run.py --run-dir artifacts/exports/<failed_run_dir>
+```
+
+If a candidate is promoted, write a new versioned baseline manifest:
+
+```bash
+python scripts/ops/write_infer_baseline_manifest.py \
+  --run-dir artifacts/exports/<promoted_run_dir> \
+  --manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json
+```
 
 ## Notes
 

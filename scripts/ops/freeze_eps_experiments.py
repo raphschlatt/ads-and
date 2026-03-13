@@ -285,7 +285,7 @@ def main() -> int:
             f"--variant {variant} "
             f"--min-delta-f1 {float(args.min_delta_f1)} "
             f"--max-precision-drop {float(args.max_precision_drop)} "
-            f"--output {compare_path}"
+            f"--output-path {compare_path}"
         )
 
         if gate_passed:
