@@ -579,7 +579,7 @@ def test_cluster_backend_gpu_failure_falls_back_to_cpu(monkeypatch):
     assert meta["cluster_backend_effective"] == "sklearn_cpu"
 
 
-def test_cluster_backend_gpu_routes_small_blocks_to_cpu(monkeypatch):
+def test_cluster_backend_gpu_keeps_small_blocks_on_gpu_in_recovery_mode(monkeypatch):
     small_ids = [f"s{i}" for i in range(3)]
     big_ids = [f"b{i}" for i in range(9)]
     mentions = pd.DataFrame(
@@ -634,9 +634,12 @@ def test_cluster_backend_gpu_routes_small_blocks_to_cpu(monkeypatch):
     )
 
     assert len(clusters) == len(mentions)
-    assert seen["cpu_sizes"] == [3]
-    assert seen["gpu_sizes"] == [9]
+    assert seen["cpu_sizes"] == []
+    assert seen["gpu_sizes"] == [3, 9]
     assert meta["cluster_backend_effective"] == "cuml_gpu"
-    assert meta["small_block_cpu_threshold"] == 8
-    assert meta["small_block_cpu_routed_blocks"] == 1
-    assert meta["backend_block_counts"] == {"cuml_gpu": 1, "sklearn_cpu": 1}
+    assert meta["small_block_cpu_threshold"] is None
+    assert meta["small_block_cpu_routed_blocks"] == 0
+    assert meta["backend_block_counts"] == {"cuml_gpu": 2}
+    assert meta["block_count_by_bucket"] == {"3-4": 1, "9-16": 1}
+    assert "3-4" in meta["total_seconds_by_bucket"]
+    assert "9-16" in meta["dbscan_seconds_by_bucket"]

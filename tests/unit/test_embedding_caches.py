@@ -251,9 +251,73 @@ def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkey
 
     assert out.shape == (70, 50)
     assert meta["generation_mode"] == "chars2vec"
+    assert meta["name_count"] == 70
+    assert meta["unique_name_count"] == 70
+    assert meta["wall_seconds"] >= 0.0
+    assert meta["generation_seconds"] >= 0.0
+    assert meta["model_load_seconds"] >= 0.0
+    assert meta["normalize_seconds"] >= 0.0
+    assert meta["unique_seconds"] >= 0.0
+    assert meta["pad_seconds"] >= 0.0
+    assert meta["predict_seconds"] >= 0.0
+    assert meta["materialize_seconds"] >= 0.0
     assert len(predict_calls) == 1
     assert predict_calls[0] == {"batch_size": 32, "verbose": 0, "callback_count": 1}
     assert progress_updates == [1, 1, 1]
+
+
+def test_generate_chars2vec_embeddings_restores_input_order_from_unique_inverse(monkeypatch: pytest.MonkeyPatch):
+    class _FakeEmbeddingModel:
+        def predict(self, inputs, batch_size=None, verbose=None, callbacks=None):
+            del batch_size, verbose, callbacks
+            total_rows = len(inputs[0])
+            out = np.zeros((total_rows, 50), dtype=np.float32)
+            for idx in range(total_rows):
+                out[idx, 0] = float(idx + 1)
+            return out
+
+    class _FakeModel:
+        def __init__(self):
+            self.cache: dict[str, np.ndarray] = {}
+            self.char_to_ix = {char: idx for idx, char in enumerate("abcdefghijklmnopqrstuvwxyz0123456789_")}
+            self.vocab_size = len(self.char_to_ix)
+            self.embedding_model = _FakeEmbeddingModel()
+
+    def _pad_sequences(sequences, maxlen=None):
+        del maxlen
+        max_length = max(seq.shape[0] for seq in sequences)
+        vocab_size = sequences[0].shape[1]
+        out = np.zeros((len(sequences), max_length, vocab_size), dtype=np.float32)
+        for idx, seq in enumerate(sequences):
+            out[idx, : seq.shape[0], :] = seq
+        return out
+
+    monkeypatch.setitem(
+        sys.modules,
+        "chars2vec",
+        SimpleNamespace(
+            load_model=lambda _model_name: _FakeModel(),
+            keras=SimpleNamespace(
+                preprocessing=SimpleNamespace(sequence=SimpleNamespace(pad_sequences=_pad_sequences)),
+                callbacks=SimpleNamespace(Callback=object),
+            ),
+        ),
+    )
+
+    names = ["Beta", "Alpha", "beta", "Gamma", "ALPHA"]
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=names,
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (5, 50)
+    assert meta["unique_name_count"] == 3
+    np.testing.assert_allclose(out[0], out[2])
+    np.testing.assert_allclose(out[1], out[4])
+    assert out[0, 0] != out[1, 0]
+    assert out[1, 0] != out[3, 0]
 
 
 def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_cleanup(monkeypatch: pytest.MonkeyPatch):
@@ -272,6 +336,7 @@ def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_clea
     assert meta["tensorflow_memory_growth_error"] is None
     assert meta["tensorflow_cleanup_attempted"] is True
     assert meta["tensorflow_cleanup_error"] is None
+    assert meta["wall_seconds"] >= meta["generation_seconds"] >= 0.0
     assert tf_state["memory_growth_calls"] == [("GPU:0", True)]
     assert tf_state["clear_calls"] == 1
 

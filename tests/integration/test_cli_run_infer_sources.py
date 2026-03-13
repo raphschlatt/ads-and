@@ -105,6 +105,17 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "cache_hit": True,
                 "generation_mode": "cache",
                 "name_count": int(len(mentions)),
+                "unique_name_count": int(len(mentions)),
+                "wall_seconds": 0.01,
+                "generation_seconds": 0.0,
+                "model_load_seconds": 0.0,
+                "normalize_seconds": 0.0,
+                "unique_seconds": 0.0,
+                "pad_seconds": 0.0,
+                "predict_seconds": 0.0,
+                "materialize_seconds": 0.0,
+                "cache_load_seconds": 0.01,
+                "cache_write_seconds": 0.0,
                 "tensorflow_memory_growth_enabled": None,
                 "tensorflow_memory_growth_error": None,
                 "tensorflow_cleanup_attempted": False,
@@ -117,6 +128,17 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "cache_hit": False,
             "generation_mode": "chars2vec",
             "name_count": int(len(mentions)),
+            "unique_name_count": int(len(mentions)),
+            "wall_seconds": 0.02,
+            "generation_seconds": 0.01,
+            "model_load_seconds": 0.001,
+            "normalize_seconds": 0.001,
+            "unique_seconds": 0.001,
+            "pad_seconds": 0.003,
+            "predict_seconds": 0.004,
+            "materialize_seconds": 0.001,
+            "cache_load_seconds": 0.0,
+            "cache_write_seconds": 0.01,
             "tensorflow_memory_growth_enabled": True,
             "tensorflow_memory_growth_error": None,
             "tensorflow_cleanup_attempted": True,
@@ -308,6 +330,9 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "total_pairs_est": int(len(pair_scores)),
                 "block_p95": 2.0,
                 "block_size_histogram": {"1": 1, "2": 2},
+                "block_count_by_bucket": {"1": 1, "2": 2},
+                "total_seconds_by_bucket": {"1": 0.002, "2": 0.008},
+                "dbscan_seconds_by_bucket": {"1": 0.0, "2": 0.01},
                 "distance_matrix_seconds_total": 0.01,
                 "constraints_seconds_total": 0.0,
                 "sanitize_seconds_total": 0.0,
@@ -389,6 +414,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
     assert context["runtime"]["load_inputs"]["read_publications_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
+    assert context["runtime"]["chars2vec"]["wall_seconds"] >= 0.0
+    assert context["runtime"]["chars2vec"]["unique_name_count"] == 5
     assert context["runtime"]["specter"]["fallback_reason"] == "torch_cuda_unavailable"
     assert context["runtime"]["pair_building"]["cpu_workers_effective"] == 4
     assert context["runtime"]["clustering"]["cpu_workers_effective"] == 4
@@ -409,6 +436,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "group_blocks_seconds" in stage_metrics["runtime"]["pair_building"]
     assert "top_slow_blocks" in stage_metrics["runtime"]["pair_building"]
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
+    assert stage_metrics["runtime"]["clustering"]["block_count_by_bucket"]
+    assert stage_metrics["runtime"]["clustering"]["total_seconds_by_bucket"]
+    assert stage_metrics["runtime"]["clustering"]["dbscan_seconds_by_bucket"]
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] == 0.0
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
     assert "START Bootstrap" in captured.err

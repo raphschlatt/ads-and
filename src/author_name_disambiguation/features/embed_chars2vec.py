@@ -216,24 +216,50 @@ def _vectorize_words_silently(
     *,
     batch_size: int,
     show_progress: bool,
-) -> np.ndarray:
-    words = [str(w).lower() for w in words]
-    unique_words = np.unique(words)
-    new_words = [w for w in unique_words if w not in model.cache]
+) -> tuple[np.ndarray, dict[str, object]]:
+    normalize_started_at = perf_counter()
+    normalized_words = np.asarray([str(w).lower() for w in words], dtype=object)
+    normalize_seconds = float(perf_counter() - normalize_started_at)
 
-    if len(new_words) > 0:
-        embeddings_pad_seq = _pad_sequences(model, new_words)
-        new_words_vectors = _predict_word_vectors(
+    unique_started_at = perf_counter()
+    unique_words, inverse = np.unique(normalized_words, return_inverse=True)
+    unique_seconds = float(perf_counter() - unique_started_at)
+
+    pad_seconds = 0.0
+    predict_seconds = 0.0
+    missing_word_indexes = [idx for idx, word in enumerate(unique_words.tolist()) if word not in model.cache]
+    if missing_word_indexes:
+        missing_words = [str(unique_words[idx]) for idx in missing_word_indexes]
+        pad_started_at = perf_counter()
+        embeddings_pad_seq = _pad_sequences(model, missing_words)
+        pad_seconds = float(perf_counter() - pad_started_at)
+
+        predict_started_at = perf_counter()
+        missing_word_vectors = _predict_word_vectors(
             model,
             embeddings_pad_seq,
             batch_size=batch_size,
             show_progress=show_progress,
         )
+        predict_seconds = float(perf_counter() - predict_started_at)
 
-        for idx, word in enumerate(new_words):
-            model.cache[word] = new_words_vectors[idx]
+        for idx, vector in zip(missing_word_indexes, np.asarray(missing_word_vectors, dtype=np.float32), strict=False):
+            model.cache[str(unique_words[idx])] = vector
 
-    return np.asarray([model.cache[current_word] for current_word in words], dtype=np.float32)
+    materialize_started_at = perf_counter()
+    unique_vectors = np.vstack([np.asarray(model.cache[str(word)], dtype=np.float32) for word in unique_words])
+    materialized = np.asarray(unique_vectors[inverse], dtype=np.float32)
+    materialize_seconds = float(perf_counter() - materialize_started_at)
+
+    meta = {
+        "normalize_seconds": normalize_seconds,
+        "unique_seconds": unique_seconds,
+        "pad_seconds": pad_seconds,
+        "predict_seconds": predict_seconds,
+        "materialize_seconds": materialize_seconds,
+        "unique_name_count": int(len(unique_words)),
+    }
+    return materialized, meta
 
 
 def generate_chars2vec_embeddings(
@@ -250,7 +276,15 @@ def generate_chars2vec_embeddings(
             "cache_hit": False,
             "generation_mode": "empty",
             "name_count": 0,
+            "unique_name_count": 0,
+            "wall_seconds": 0.0,
             "generation_seconds": 0.0,
+            "model_load_seconds": 0.0,
+            "normalize_seconds": 0.0,
+            "unique_seconds": 0.0,
+            "pad_seconds": 0.0,
+            "predict_seconds": 0.0,
+            "materialize_seconds": 0.0,
             "cache_load_seconds": 0.0,
             "cache_write_seconds": 0.0,
             "tensorflow_memory_growth_enabled": None,
@@ -266,14 +300,16 @@ def generate_chars2vec_embeddings(
         os.environ["KERAS_BACKEND"] = "tensorflow"
 
     tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
+    generation_started_at = perf_counter()
     try:
         import chars2vec  # type: ignore
 
-        generation_started_at = perf_counter()
+        model_load_started_at = perf_counter()
         with _filter_known_library_stderr(enabled=quiet_libraries):
             model = chars2vec.load_model(model_name)
+        model_load_seconds = float(perf_counter() - model_load_started_at)
         setattr(model, "keras", chars2vec.keras)
-        emb = _vectorize_words_silently(
+        emb, vectorize_meta = _vectorize_words_silently(
             model,
             names,
             batch_size=32,
@@ -283,11 +319,20 @@ def generate_chars2vec_embeddings(
         emb = np.asarray(emb, dtype=np.float32)
         if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:
             raise ValueError(f"Unexpected chars2vec output shape: {emb.shape}")
+        generation_elapsed = float(perf_counter() - generation_started_at)
         meta = {
             "cache_hit": False,
             "generation_mode": "chars2vec",
             "name_count": int(len(names)),
-            "generation_seconds": float(perf_counter() - generation_started_at),
+            "unique_name_count": int(vectorize_meta.get("unique_name_count", len(names))),
+            "wall_seconds": generation_elapsed,
+            "generation_seconds": generation_elapsed,
+            "model_load_seconds": model_load_seconds,
+            "normalize_seconds": float(vectorize_meta.get("normalize_seconds", 0.0)),
+            "unique_seconds": float(vectorize_meta.get("unique_seconds", 0.0)),
+            "pad_seconds": float(vectorize_meta.get("pad_seconds", 0.0)),
+            "predict_seconds": float(vectorize_meta.get("predict_seconds", 0.0)),
+            "materialize_seconds": float(vectorize_meta.get("materialize_seconds", 0.0)),
             "cache_load_seconds": 0.0,
             "cache_write_seconds": 0.0,
             "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
@@ -303,11 +348,20 @@ def generate_chars2vec_embeddings(
             ) from exc
 
     emb = np.vstack([_hash_stub_embedding(name, dim=_CHARS2VEC_DIM) for name in names]).astype(np.float32)
+    generation_elapsed = float(perf_counter() - generation_started_at)
     meta = {
         "cache_hit": False,
         "generation_mode": "stub_only",
         "name_count": int(len(names)),
-        "generation_seconds": 0.0,
+        "unique_name_count": int(len({str(name).lower() for name in names})),
+        "wall_seconds": generation_elapsed,
+        "generation_seconds": generation_elapsed,
+        "model_load_seconds": 0.0,
+        "normalize_seconds": 0.0,
+        "unique_seconds": 0.0,
+        "pad_seconds": 0.0,
+        "predict_seconds": 0.0,
+        "materialize_seconds": 0.0,
         "cache_load_seconds": 0.0,
         "cache_write_seconds": 0.0,
         "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
@@ -330,6 +384,7 @@ def get_or_create_chars2vec_embeddings(
 ) -> np.ndarray | tuple[np.ndarray, dict[str, object]]:
     output = Path(output_path)
     names = mentions["author_raw"].fillna("").astype(str).tolist()
+    call_started_at = perf_counter()
     if output.exists() and not force_recompute:
         cache_load_started_at = perf_counter()
         cached = load_validated_npy(
@@ -342,7 +397,15 @@ def get_or_create_chars2vec_embeddings(
                 "cache_hit": True,
                 "generation_mode": "cache",
                 "name_count": int(len(names)),
+                "unique_name_count": int(len({str(name).lower() for name in names})),
+                "wall_seconds": float(perf_counter() - call_started_at),
                 "generation_seconds": 0.0,
+                "model_load_seconds": 0.0,
+                "normalize_seconds": 0.0,
+                "unique_seconds": 0.0,
+                "pad_seconds": 0.0,
+                "predict_seconds": 0.0,
+                "materialize_seconds": 0.0,
                 "cache_load_seconds": float(perf_counter() - cache_load_started_at),
                 "cache_write_seconds": 0.0,
                 "tensorflow_memory_growth_enabled": None,
@@ -366,4 +429,5 @@ def get_or_create_chars2vec_embeddings(
     atomic_save_npy(output, emb)
     meta = dict(meta)
     meta["cache_write_seconds"] = float(perf_counter() - cache_write_started_at)
+    meta["wall_seconds"] = float(perf_counter() - call_started_at)
     return (emb, meta) if return_meta else emb

@@ -48,7 +48,7 @@ _BLOCK_SIZE_HIST_BUCKETS = [
     ("65+", 65, None),
 ]
 _LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
-_SMALL_BLOCK_CPU_THRESHOLD = 8
+_SMALL_BLOCK_CPU_THRESHOLD = 0
 
 
 def _ascii_fold(text: str) -> str:
@@ -559,15 +559,21 @@ def _cluster_two_point_block(dist: np.ndarray, eps: float, min_samples: int) -> 
 def _build_block_size_histogram(entries: list[dict[str, Any]]) -> dict[str, int]:
     hist = {label: 0 for label, _, _ in _BLOCK_SIZE_HIST_BUCKETS}
     for entry in entries:
-        size = int(entry["size"])
-        for label, min_size, max_size in _BLOCK_SIZE_HIST_BUCKETS:
-            if size < int(min_size):
-                continue
-            if max_size is not None and size > int(max_size):
-                continue
-            hist[label] += 1
-            break
+        label = _block_size_bucket_label(int(entry["size"]))
+        if label is None:
+            continue
+        hist[label] += 1
     return {label: int(count) for label, count in hist.items() if count > 0}
+
+
+def _block_size_bucket_label(size: int) -> str | None:
+    for label, min_size, max_size in _BLOCK_SIZE_HIST_BUCKETS:
+        if size < int(min_size):
+            continue
+        if max_size is not None and size > int(max_size):
+            continue
+        return str(label)
+    return None
 
 
 def _resolve_block_backend(
@@ -577,7 +583,11 @@ def _resolve_block_backend(
     small_block_cpu_threshold: int = _SMALL_BLOCK_CPU_THRESHOLD,
 ) -> tuple[str, str | None]:
     backend_clean = str(requested_backend).strip().lower()
-    if backend_clean == "cuml_gpu" and int(block_size) <= int(small_block_cpu_threshold):
+    if (
+        backend_clean == "cuml_gpu"
+        and int(small_block_cpu_threshold) > 1
+        and int(block_size) <= int(small_block_cpu_threshold)
+    ):
         return "sklearn_cpu", "small_block_cpu_threshold"
     return backend_clean, None
 
@@ -1057,9 +1067,22 @@ def cluster_blockwise_dbscan(
 
     timing_rows = [row for row in timing_rows if row]
     backend_block_counts: dict[str, int] = {}
+    block_count_by_bucket: dict[str, int] = {}
+    total_seconds_by_bucket: dict[str, float] = {}
+    dbscan_seconds_by_bucket: dict[str, float] = {}
     for row in timing_rows:
         backend_label = str(row.get("backend", "") or "unknown")
         backend_block_counts[backend_label] = int(backend_block_counts.get(backend_label, 0)) + 1
+        bucket_label = _block_size_bucket_label(int(row.get("block_size", 0)))
+        if bucket_label is None:
+            continue
+        block_count_by_bucket[bucket_label] = int(block_count_by_bucket.get(bucket_label, 0)) + 1
+        total_seconds_by_bucket[bucket_label] = float(
+            total_seconds_by_bucket.get(bucket_label, 0.0) + float(row.get("total_seconds", 0.0))
+        )
+        dbscan_seconds_by_bucket[bucket_label] = float(
+            dbscan_seconds_by_bucket.get(bucket_label, 0.0) + float(row.get("dbscan_seconds", 0.0))
+        )
     small_block_cpu_routed_blocks = int(
         sum(1 for row in timing_rows if str(row.get("backend_reason", "")) == "small_block_cpu_threshold")
     )
@@ -1085,7 +1108,9 @@ def cluster_blockwise_dbscan(
         "cluster_backend_requested": backend_requested,
         "cluster_backend_effective": backend_effective,
         "cluster_backend_reason": backend_info.get("reason"),
-        "small_block_cpu_threshold": int(_SMALL_BLOCK_CPU_THRESHOLD) if backend_effective == "cuml_gpu" else None,
+        "small_block_cpu_threshold": (
+            int(_SMALL_BLOCK_CPU_THRESHOLD) if backend_effective == "cuml_gpu" and _SMALL_BLOCK_CPU_THRESHOLD > 1 else None
+        ),
         "small_block_cpu_routed_blocks": int(small_block_cpu_routed_blocks),
         "small_block_cpu_routed_pairs_est": int(small_block_cpu_routed_pairs_est),
         "backend_block_counts": {str(key): int(value) for key, value in sorted(backend_block_counts.items())},
@@ -1100,6 +1125,9 @@ def cluster_blockwise_dbscan(
         "total_pairs_est": int(total_pairs_est),
         "block_p95": float(block_p95),
         "block_size_histogram": _build_block_size_histogram(entries),
+        "block_count_by_bucket": {str(key): int(value) for key, value in sorted(block_count_by_bucket.items())},
+        "total_seconds_by_bucket": {str(key): float(value) for key, value in sorted(total_seconds_by_bucket.items())},
+        "dbscan_seconds_by_bucket": {str(key): float(value) for key, value in sorted(dbscan_seconds_by_bucket.items())},
         "build_entries_seconds": float(build_entries_seconds),
         "distance_matrix_seconds_total": distance_matrix_seconds_total,
         "constraints_seconds_total": constraints_seconds_total,
