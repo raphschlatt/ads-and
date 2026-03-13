@@ -303,6 +303,10 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
         threshold_selection_status="model_run_threshold",
         threshold_source="model_run",
         precision_mode="fp32",
+        runtime={
+            "specter": {"tokenize_seconds_total": 12.0, "forward_seconds_total": 4.0},
+            "pair_scoring": {"parquet_write_seconds": 6.0},
+        },
     )
     assert stage_metrics["metric_scope"] == "infer"
     assert stage_metrics["counts"]["ads_clusters"] == 4
@@ -325,6 +329,10 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
             "split_high_sim_rate_probe": 0.20,
             "merged_low_conf_rate_probe": 0.05,
             "counts": {"ads_mentions": 4, "ads_clusters": 2, "ads_cluster_assignments": 4},
+            "runtime": {
+                "specter": {"tokenize_seconds_total": 15.0, "forward_seconds_total": 5.0},
+                "pair_scoring": {"parquet_write_seconds": 9.0},
+            },
         },
         baseline_dir / "05_stage_metrics_infer_sources.json",
     )
@@ -345,6 +353,11 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     assert payload["ads_clusters_current"] == 4
     assert payload["ads_clusters_delta"] == 2.0
     assert round(float(payload["split_high_sim_rate_probe_delta"]), 6) == -0.07
+    runtime_compare = payload["runtime_seconds_compare"]
+    assert runtime_compare["common_metric_count"] == 3
+    assert runtime_compare["metrics"]["specter.tokenize_seconds_total"]["delta"] == -3.0
+    assert runtime_compare["metrics"]["specter.tokenize_seconds_total"]["speedup"] == 1.25
+    assert runtime_compare["metrics"]["pair_scoring.parquet_write_seconds"]["improvement_seconds"] == 3.0
 
 
 def test_write_compare_infer_to_baseline_is_partition_aware(tmp_path: Path):

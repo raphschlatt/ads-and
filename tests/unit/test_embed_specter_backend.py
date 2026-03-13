@@ -163,6 +163,7 @@ def test_generate_specter_embeddings_length_batches_and_cpu_auto_precision(monke
     assert meta["token_count_total"] == 3
     assert meta["max_sequence_length_observed"] == 1
     assert meta["mean_sequence_length_observed"] == 1.0
+    assert meta["device_to_host_flush_batch_count"] == 1
     assert meta["device_to_host_flushes"] == 2
 
 
@@ -175,12 +176,12 @@ def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(80 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
-    assert effective == 256
+    assert effective == 384
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(24 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
-    assert effective == 128
+    assert effective == 160
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(8 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
@@ -194,6 +195,35 @@ def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.Mo
     requested, effective = embed_specter._resolve_specter_batch_size(torch, 48, "cuda:0")
     assert requested == 48
     assert effective == 48
+
+
+def test_resolve_device_to_host_flush_batch_count_prefers_larger_cuda_buffers(monkeypatch: pytest.MonkeyPatch):
+    class _Props:
+        def __init__(self, total_memory: int):
+            self.total_memory = total_memory
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(80 * 1024**3))
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cuda:0",
+        effective_batch_size=384,
+    ) == 8
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cuda:0",
+        effective_batch_size=160,
+    ) == 6
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cuda:0",
+        effective_batch_size=32,
+    ) == 4
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cpu",
+        effective_batch_size=32,
+    ) == 1
 
 
 class _FakeBatchTensor:
@@ -273,6 +303,7 @@ def test_generate_specter_embeddings_flushes_cuda_batches_in_order(monkeypatch: 
     np.testing.assert_allclose(out[:, 0], np.array([2.0] * 9, dtype=np.float32))
     assert meta["resolved_device"] == "cuda:0"
     assert meta["batches_total"] == 5
+    assert meta["device_to_host_flush_batch_count"] == 4
     assert meta["device_to_host_flushes"] == 2
     assert meta["token_count_total"] == 9
     assert meta["max_sequence_length_observed"] == 1

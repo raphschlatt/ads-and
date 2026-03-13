@@ -122,12 +122,30 @@ def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> t
     if total_memory is None:
         return None, 32
     if total_memory >= 70 * 1024**3:
-        return None, 256
+        return None, 384
     if total_memory >= 24 * 1024**3:
-        return None, 128
+        return None, 160
     if total_memory >= 12 * 1024**3:
-        return None, 64
+        return None, 80
     return None, 32
+
+
+def _resolve_device_to_host_flush_batch_count(
+    torch,
+    *,
+    device: str,
+    effective_batch_size: int | None,
+) -> int:
+    if not str(device).startswith("cuda"):
+        return 1
+
+    batch_size = 0 if effective_batch_size is None else int(effective_batch_size)
+    total_memory = _resolve_cuda_total_memory_bytes(torch, device)
+    if total_memory is not None and total_memory >= 70 * 1024**3 and batch_size >= 256:
+        return 8
+    if batch_size >= 128:
+        return 6
+    return 4
 
 
 def _is_cuda_oom(torch, exc: BaseException) -> bool:
@@ -183,6 +201,7 @@ def _base_runtime_meta(
         "max_sequence_length_observed": 0,
         "mean_sequence_length_observed": 0.0,
         "device_to_host_flushes": 0,
+        "device_to_host_flush_batch_count": 0,
     }
 
 
@@ -542,7 +561,12 @@ def generate_specter_embeddings(
         ),
     }
     observed_sequence_count = 0
-    device_to_host_flush_batch_count = 4 if str(device).startswith("cuda") else 1
+    device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
+        torch,
+        device=device,
+        effective_batch_size=meta.get("effective_batch_size"),
+    )
+    meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
     if len(vectors_for_indices) > 0:
         start = 0
         pending_cls_tensors: list[Any] = []
@@ -615,6 +639,12 @@ def generate_specter_embeddings(
                             if int(meta["effective_batch_size"]) > 16:
                                 meta["oom_retry_count"] += 1
                                 meta["effective_batch_size"] = max(16, int(meta["effective_batch_size"]) // 2)
+                                device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
+                                    torch,
+                                    device=device,
+                                    effective_batch_size=int(meta["effective_batch_size"]),
+                                )
+                                meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
                                 continue
                             if requested_device.strip().lower() == "auto":
                                 meta["oom_retry_count"] += 1
@@ -627,10 +657,15 @@ def generate_specter_embeddings(
                                     precision_mode=precision_mode,
                                     device=device,
                                 )
-                                device_to_host_flush_batch_count = 1
+                                device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
+                                    torch,
+                                    device=device,
+                                    effective_batch_size=16,
+                                )
                                 meta["resolved_device"] = device
                                 meta["effective_precision_mode"] = effective_precision_mode
                                 meta["effective_batch_size"] = 16
+                                meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
                                 continue
                             raise
                 _flush_pending_cls_batches(

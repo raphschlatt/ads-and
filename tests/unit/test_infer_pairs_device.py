@@ -574,6 +574,8 @@ def test_score_pairs_chunked_parity_matches_dataframe_path(monkeypatch, tmp_path
     assert direct_meta["pair_input_mode"] == "dataframe"
     assert chunked_meta["pair_input_mode"] == "parquet_chunked"
     assert chunked_meta["parquet_read_seconds"] >= 0.0
-    assert chunked_meta["pandas_conversion_seconds"] >= 0.0
+    assert chunked_meta["pandas_conversion_seconds"] == 0.0
+    assert chunked_meta["arrow_column_extract_seconds"] >= 0.0
     assert chunked_meta["pair_score_seconds"] >= 0.0
+    assert chunked_meta["parquet_output_table_seconds"] >= 0.0
     assert chunked_meta["parquet_write_seconds"] >= 0.0

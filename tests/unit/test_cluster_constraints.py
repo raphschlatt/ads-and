@@ -577,3 +577,66 @@ def test_cluster_backend_gpu_failure_falls_back_to_cpu(monkeypatch):
     )
     assert len(clusters) == 2
     assert meta["cluster_backend_effective"] == "sklearn_cpu"
+
+
+def test_cluster_backend_gpu_routes_small_blocks_to_cpu(monkeypatch):
+    small_ids = [f"s{i}" for i in range(3)]
+    big_ids = [f"b{i}" for i in range(9)]
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": m, "block_key": "blk.small", "author_raw": "S, A", "year": 2000}
+            for m in small_ids
+        ]
+        + [
+            {"mention_id": m, "block_key": "blk.big", "author_raw": "B, A", "year": 2001}
+            for m in big_ids
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        _complete_block_pair_scores("blk.small", small_ids)
+        + _complete_block_pair_scores("blk.big", big_ids)
+    )
+    cfg = {"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
+    seen = {"cpu_sizes": [], "gpu_sizes": []}
+
+    class _FakeDBSCAN:
+        def __init__(self, *, eps, min_samples, metric):
+            del eps, min_samples, metric
+
+        def fit_predict(self, dist):
+            seen["cpu_sizes"].append(int(dist.shape[0]))
+            return np.zeros(dist.shape[0], dtype=np.int64)
+
+    def _fake_gpu(dist, eps, min_samples, metric):
+        del eps, min_samples, metric
+        seen["gpu_sizes"].append(int(dist.shape[0]))
+        return np.zeros(dist.shape[0], dtype=np.int64)
+
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster.DBSCAN", _FakeDBSCAN)
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster._run_dbscan_cuml", _fake_gpu)
+    monkeypatch.setattr(
+        "author_name_disambiguation.approaches.nand.cluster._resolve_cluster_backend",
+        lambda backend, metric: {
+            "requested": backend,
+            "effective": "cuml_gpu",
+            "reason": "forced-test",
+            "cuml_available": True,
+            "metric": metric,
+        },
+    )
+
+    clusters, meta = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        backend="cuml_gpu",
+        return_meta=True,
+    )
+
+    assert len(clusters) == len(mentions)
+    assert seen["cpu_sizes"] == [3]
+    assert seen["gpu_sizes"] == [9]
+    assert meta["cluster_backend_effective"] == "cuml_gpu"
+    assert meta["small_block_cpu_threshold"] == 8
+    assert meta["small_block_cpu_routed_blocks"] == 1
+    assert meta["backend_block_counts"] == {"cuml_gpu": 1, "sklearn_cpu": 1}

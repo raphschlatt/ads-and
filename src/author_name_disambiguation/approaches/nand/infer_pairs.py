@@ -86,6 +86,8 @@ def _best_effort_clear_cuda_cache(torch) -> None:
     try:
         if hasattr(cuda_module, "is_available") and not bool(cuda_module.is_available()):
             return
+        if hasattr(cuda_module, "empty_cache"):
+            cuda_module.empty_cache()
     except Exception:
         return
 
@@ -127,11 +129,6 @@ def _accumulate_numeric_clamp_summary(
     target["distance_above_max_count"] = int(target.get("distance_above_max_count", 0)) + int(
         dist_meta.get("above_max_count", 0)
     )
-    try:
-        if hasattr(cuda_module, "empty_cache"):
-            cuda_module.empty_cache()
-    except Exception:
-        return
 
 
 def load_checkpoint(checkpoint_path: str | Path, device: str = "auto") -> Dict[str, Any]:
@@ -187,6 +184,80 @@ def _encode_mentions(
     return mention_embeddings, mention_norms
 
 
+def _pair_index_array(values: np.ndarray, mention_index: Dict[str, int]) -> np.ndarray:
+    return np.fromiter((int(mention_index.get(str(value), -1)) for value in values), dtype=np.int64, count=len(values))
+
+
+def _build_scored_pair_arrays(
+    *,
+    pair_id: np.ndarray,
+    mention_id_1: np.ndarray,
+    mention_id_2: np.ndarray,
+    block_key: np.ndarray,
+    mention_index: Dict[str, int],
+    mention_embeddings: np.ndarray,
+    mention_norms: np.ndarray,
+    batch_size: int,
+    show_progress: bool,
+    active_runtime_meta: dict[str, Any],
+) -> dict[str, np.ndarray]:
+    idx1 = _pair_index_array(mention_id_1, mention_index)
+    idx2 = _pair_index_array(mention_id_2, mention_index)
+
+    valid_mask = (idx1 >= 0) & (idx2 >= 0)
+    idx1_valid = idx1[valid_mask]
+    idx2_valid = idx2[valid_mask]
+    active_runtime_meta["pairs_total_rows"] = int(active_runtime_meta.get("pairs_total_rows", 0)) + int(len(pair_id))
+    active_runtime_meta["pairs_valid_rows"] = int(active_runtime_meta.get("pairs_valid_rows", 0)) + int(len(idx1_valid))
+
+    sims = []
+    total = (len(idx1_valid) + batch_size - 1) // batch_size
+    starts = iter_progress(
+        range(0, len(idx1_valid), batch_size),
+        total=total,
+        label="Score batches",
+        enabled=show_progress,
+        unit="batch",
+    )
+    score_started_at = perf_counter()
+    for start in starts:
+        end = min(start + batch_size, len(idx1_valid))
+        batch_idx1 = idx1_valid[start:end]
+        batch_idx2 = idx2_valid[start:end]
+        z1 = mention_embeddings[batch_idx1]
+        z2 = mention_embeddings[batch_idx2]
+        dot = np.einsum("ij,ij->i", z1, z2, optimize=True)
+        denom = np.maximum(mention_norms[batch_idx1] * mention_norms[batch_idx2], 1e-8)
+        sims.append((dot / denom).astype(np.float32, copy=False))
+    active_runtime_meta["pair_score_seconds"] = float(active_runtime_meta.get("pair_score_seconds", 0.0)) + float(
+        perf_counter() - score_started_at
+    )
+
+    sim_arr = np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)
+    sim_arr, sim_meta = clamp_cosine_sim(sim_arr)
+    dist_arr, dist_meta = compute_safe_distance_from_cosine(sim_arr)
+    _accumulate_numeric_clamp_summary(
+        active_runtime_meta.setdefault("numeric_clamping", _init_numeric_clamp_summary()),
+        sim_meta=sim_meta,
+        dist_meta=dist_meta,
+    )
+
+    return {
+        "pair_id": np.asarray(pair_id[valid_mask], dtype=object),
+        "mention_id_1": np.asarray(mention_id_1[valid_mask], dtype=object),
+        "mention_id_2": np.asarray(mention_id_2[valid_mask], dtype=object),
+        "block_key": np.asarray(block_key[valid_mask], dtype=object),
+        "cosine_sim": sim_arr.astype(np.float32, copy=False),
+        "distance": dist_arr.astype(np.float32, copy=False),
+    }
+
+
+def _scored_pair_arrays_to_frame(score_columns: dict[str, np.ndarray]) -> pd.DataFrame:
+    out = pd.DataFrame(score_columns, columns=PAIR_SCORE_REQUIRED_COLUMNS)
+    validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
+    return out
+
+
 def score_pairs_with_checkpoint(
     mentions: pd.DataFrame,
     pairs: pd.DataFrame | str | Path,
@@ -232,7 +303,9 @@ def score_pairs_with_checkpoint(
     runtime_meta["mention_encode_seconds"] = 0.0
     runtime_meta["parquet_read_seconds"] = 0.0
     runtime_meta["pandas_conversion_seconds"] = 0.0
+    runtime_meta["arrow_column_extract_seconds"] = 0.0
     runtime_meta["pair_score_seconds"] = 0.0
+    runtime_meta["parquet_output_table_seconds"] = 0.0
     runtime_meta["parquet_write_seconds"] = 0.0
     runtime_meta["pairs_total_rows"] = 0
     runtime_meta["pairs_valid_rows"] = 0
@@ -252,53 +325,19 @@ def score_pairs_with_checkpoint(
         mention_norms: np.ndarray,
         active_runtime_meta: dict[str, Any],
     ) -> pd.DataFrame:
-        idx1 = pairs_df["mention_id_1"].astype(str).map(mindex).values
-        idx2 = pairs_df["mention_id_2"].astype(str).map(mindex).values
-
-        valid_mask = ~(pd.isna(idx1) | pd.isna(idx2))
-        p = pairs_df.loc[valid_mask].copy().reset_index(drop=True)
-        idx1_valid = idx1[valid_mask].astype(int)
-        idx2_valid = idx2[valid_mask].astype(int)
-        active_runtime_meta["pairs_total_rows"] = int(active_runtime_meta.get("pairs_total_rows", 0)) + int(len(pairs_df))
-        active_runtime_meta["pairs_valid_rows"] = int(active_runtime_meta.get("pairs_valid_rows", 0)) + int(len(p))
-
-        sims = []
-        total = (len(p) + batch_size - 1) // batch_size
-        starts = iter_progress(
-            range(0, len(p), batch_size),
-            total=total,
-            label="Score batches",
-            enabled=show_progress,
-            unit="batch",
+        score_columns = _build_scored_pair_arrays(
+            pair_id=pairs_df["pair_id"].astype(str).to_numpy(copy=False),
+            mention_id_1=pairs_df["mention_id_1"].astype(str).to_numpy(copy=False),
+            mention_id_2=pairs_df["mention_id_2"].astype(str).to_numpy(copy=False),
+            block_key=pairs_df["block_key"].astype(str).to_numpy(copy=False),
+            mention_index=mindex,
+            mention_embeddings=mention_embeddings,
+            mention_norms=mention_norms,
+            batch_size=batch_size,
+            show_progress=show_progress,
+            active_runtime_meta=active_runtime_meta,
         )
-        score_started_at = perf_counter()
-        for start in starts:
-            end = min(start + batch_size, len(p))
-            batch_idx1 = idx1_valid[start:end]
-            batch_idx2 = idx2_valid[start:end]
-            z1 = mention_embeddings[batch_idx1]
-            z2 = mention_embeddings[batch_idx2]
-            dot = np.einsum("ij,ij->i", z1, z2, optimize=True)
-            denom = np.maximum(mention_norms[batch_idx1] * mention_norms[batch_idx2], 1e-8)
-            sims.append((dot / denom).astype(np.float32, copy=False))
-        active_runtime_meta["pair_score_seconds"] = float(active_runtime_meta.get("pair_score_seconds", 0.0)) + float(
-            perf_counter() - score_started_at
-        )
-
-        sim_arr = np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)
-        sim_arr, sim_meta = clamp_cosine_sim(sim_arr)
-        dist_arr, dist_meta = compute_safe_distance_from_cosine(sim_arr)
-        _accumulate_numeric_clamp_summary(
-            active_runtime_meta.setdefault("numeric_clamping", _init_numeric_clamp_summary()),
-            sim_meta=sim_meta,
-            dist_meta=dist_meta,
-        )
-
-        out = p[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
-        out["cosine_sim"] = sim_arr.astype(np.float32)
-        out["distance"] = dist_arr.astype(np.float32)
-        validate_columns(out, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
-        return out
+        return _scored_pair_arrays_to_frame(score_columns)
 
     def _run_scoring(active_device: str, active_runtime_meta: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
         effective_precision_mode = _resolve_effective_precision_mode(
@@ -363,22 +402,43 @@ def score_pairs_with_checkpoint(
                 active_runtime_meta["parquet_read_seconds"] = float(
                     active_runtime_meta.get("parquet_read_seconds", 0.0)
                 ) + float(perf_counter() - read_started_at)
-                pandas_started_at = perf_counter()
-                pairs_chunk = batch.to_pandas()
-                active_runtime_meta["pandas_conversion_seconds"] = float(
-                    active_runtime_meta.get("pandas_conversion_seconds", 0.0)
-                ) + float(perf_counter() - pandas_started_at)
-                scores_chunk = _score_pairs_frame(
-                    pairs_chunk,
+                extract_started_at = perf_counter()
+                pair_columns = {
+                    "pair_id": np.asarray(batch.column(batch.schema.get_field_index("pair_id")).to_pylist(), dtype=object),
+                    "mention_id_1": np.asarray(
+                        batch.column(batch.schema.get_field_index("mention_id_1")).to_pylist(),
+                        dtype=object,
+                    ),
+                    "mention_id_2": np.asarray(
+                        batch.column(batch.schema.get_field_index("mention_id_2")).to_pylist(),
+                        dtype=object,
+                    ),
+                    "block_key": np.asarray(batch.column(batch.schema.get_field_index("block_key")).to_pylist(), dtype=object),
+                }
+                active_runtime_meta["arrow_column_extract_seconds"] = float(
+                    active_runtime_meta.get("arrow_column_extract_seconds", 0.0)
+                ) + float(perf_counter() - extract_started_at)
+                score_columns = _build_scored_pair_arrays(
+                    pair_id=pair_columns["pair_id"],
+                    mention_id_1=pair_columns["mention_id_1"],
+                    mention_id_2=pair_columns["mention_id_2"],
+                    block_key=pair_columns["block_key"],
+                    mention_index=mindex,
                     mention_embeddings=mention_embeddings,
                     mention_norms=mention_norms,
                     active_runtime_meta=active_runtime_meta,
+                    batch_size=batch_size,
+                    show_progress=show_progress,
                 )
                 if return_scores:
-                    out_rows.append(scores_chunk)
-                if out_path is not None:
+                    out_rows.append(_scored_pair_arrays_to_frame(score_columns))
+                if out_path is not None and len(score_columns["pair_id"]) > 0:
+                    table_started_at = perf_counter()
+                    table = pa.Table.from_pydict(score_columns)
+                    active_runtime_meta["parquet_output_table_seconds"] = float(
+                        active_runtime_meta.get("parquet_output_table_seconds", 0.0)
+                    ) + float(perf_counter() - table_started_at)
                     write_started_at = perf_counter()
-                    table = pa.Table.from_pandas(scores_chunk, preserve_index=False)
                     if writer is None:
                         writer_schema = table.schema
                         writer = pq.ParquetWriter(out_path, writer_schema)
@@ -440,6 +500,8 @@ def score_pairs_with_checkpoint(
         retry_runtime_meta["pair_score_seconds"] = 0.0
         retry_runtime_meta["parquet_read_seconds"] = 0.0
         retry_runtime_meta["pandas_conversion_seconds"] = 0.0
+        retry_runtime_meta["arrow_column_extract_seconds"] = 0.0
+        retry_runtime_meta["parquet_output_table_seconds"] = 0.0
         retry_runtime_meta["parquet_write_seconds"] = 0.0
         retry_runtime_meta["pairs_total_rows"] = 0
         retry_runtime_meta["pairs_valid_rows"] = 0

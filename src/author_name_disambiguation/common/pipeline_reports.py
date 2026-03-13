@@ -46,6 +46,76 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
+def _flatten_runtime_seconds(
+    payload: Mapping[str, Any] | None,
+    *,
+    prefix: str = "",
+) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not isinstance(payload, Mapping):
+        return out
+    for raw_key, raw_value in payload.items():
+        key = str(raw_key)
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(raw_value, Mapping):
+            out.update(_flatten_runtime_seconds(raw_value, prefix=path))
+            continue
+        if isinstance(raw_value, bool):
+            continue
+        if isinstance(raw_value, (int, float)) and ("seconds" in key or key.endswith("_s")):
+            out[path] = float(raw_value)
+    return out
+
+
+def _build_runtime_seconds_compare(
+    *,
+    baseline_runtime: Mapping[str, Any] | None,
+    current_runtime: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    baseline_flat = _flatten_runtime_seconds(baseline_runtime)
+    current_flat = _flatten_runtime_seconds(current_runtime)
+    common_keys = sorted(set(baseline_flat) & set(current_flat))
+    baseline_only_keys = sorted(set(baseline_flat) - set(current_flat))
+    current_only_keys = sorted(set(current_flat) - set(baseline_flat))
+
+    metrics: dict[str, Any] = {}
+    for key in common_keys:
+        baseline_value = float(baseline_flat[key])
+        current_value = float(current_flat[key])
+        delta = float(current_value - baseline_value)
+        improvement = float(baseline_value - current_value)
+        metrics[key] = {
+            "baseline": baseline_value,
+            "current": current_value,
+            "delta": delta,
+            "pct_delta": None if baseline_value == 0.0 else float(delta / baseline_value),
+            "improvement_seconds": improvement,
+            "speedup": None if current_value <= 0.0 else float(baseline_value / current_value),
+        }
+
+    top_improvements = [
+        {"metric": key, **metrics[key]}
+        for key in sorted(common_keys, key=lambda item: (-float(metrics[item]["improvement_seconds"]), item))
+        if float(metrics[key]["improvement_seconds"]) > 0.0
+    ][:15]
+    top_regressions = [
+        {"metric": key, **metrics[key]}
+        for key in sorted(common_keys, key=lambda item: (float(metrics[item]["improvement_seconds"]), item))
+        if float(metrics[key]["improvement_seconds"]) < 0.0
+    ][:15]
+
+    return {
+        "baseline_metric_count": int(len(baseline_flat)),
+        "current_metric_count": int(len(current_flat)),
+        "common_metric_count": int(len(common_keys)),
+        "baseline_only_metrics": baseline_only_keys,
+        "current_only_metrics": current_only_keys,
+        "metrics": metrics,
+        "top_improvements": top_improvements,
+        "top_regressions": top_regressions,
+    }
+
+
 def _block_p95(df: pd.DataFrame) -> float:
     if len(df) == 0:
         return 0.0
@@ -799,6 +869,8 @@ def write_compare_train_to_baseline(
     current_counts = (current_split.get("split_label_counts") or {})
     baseline_stage_counts = (baseline_stage or {}).get("counts") or {}
     current_stage_counts = current_stage.get("counts") or {}
+    baseline_runtime = (baseline_stage or {}).get("runtime") or {}
+    current_runtime = current_stage.get("runtime") or {}
 
     payload = {
         "compare_scope": "train",
@@ -856,6 +928,8 @@ def write_compare_infer_to_baseline(
 
     baseline_stage_counts = (baseline_stage or {}).get("counts") or {}
     current_stage_counts = current_stage.get("counts") or {}
+    baseline_runtime = (baseline_stage or {}).get("runtime") or {}
+    current_runtime = current_stage.get("runtime") or {}
 
     singleton_ratio_baseline = (baseline_stage or {}).get("singleton_ratio")
     singleton_ratio_current = current_stage.get("singleton_ratio")
@@ -868,6 +942,10 @@ def write_compare_infer_to_baseline(
     cluster_compare = _partition_compare_clusters(
         baseline_dir=baseline_dir,
         current_dir=current_dir,
+    )
+    runtime_compare = _build_runtime_seconds_compare(
+        baseline_runtime=baseline_runtime,
+        current_runtime=current_runtime,
     )
 
     payload = {
@@ -938,6 +1016,7 @@ def write_compare_infer_to_baseline(
         "mention_cluster_top_changed_blocks": cluster_compare.get("top_changed_blocks", []),
         "mention_cluster_compare_baseline_error": cluster_compare.get("baseline_error"),
         "mention_cluster_compare_current_error": cluster_compare.get("current_error"),
+        "runtime_seconds_compare": runtime_compare,
     }
     return write_json(payload, output_path)
 

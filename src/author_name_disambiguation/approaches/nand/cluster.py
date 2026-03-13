@@ -48,6 +48,7 @@ _BLOCK_SIZE_HIST_BUCKETS = [
     ("65+", 65, None),
 ]
 _LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
+_SMALL_BLOCK_CPU_THRESHOLD = 8
 
 
 def _ascii_fold(text: str) -> str:
@@ -569,6 +570,18 @@ def _build_block_size_histogram(entries: list[dict[str, Any]]) -> dict[str, int]
     return {label: int(count) for label, count in hist.items() if count > 0}
 
 
+def _resolve_block_backend(
+    *,
+    requested_backend: str,
+    block_size: int,
+    small_block_cpu_threshold: int = _SMALL_BLOCK_CPU_THRESHOLD,
+) -> tuple[str, str | None]:
+    backend_clean = str(requested_backend).strip().lower()
+    if backend_clean == "cuml_gpu" and int(block_size) <= int(small_block_cpu_threshold):
+        return "sklearn_cpu", "small_block_cpu_threshold"
+    return backend_clean, None
+
+
 def _cluster_single_block(
     *,
     block_key: str,
@@ -580,6 +593,10 @@ def _cluster_single_block(
     constraints: Dict[str, Any],
     backend: str,
 ) -> tuple[list[dict[str, str]], dict[str, int], dict[str, Any]]:
+    block_backend, backend_reason = _resolve_block_backend(
+        requested_backend=backend,
+        block_size=int(len(block_mentions)),
+    )
     sanitize_totals = {
         "corrected_blocks": 0,
         "non_finite_count": 0,
@@ -598,7 +615,9 @@ def _cluster_single_block(
         "dbscan_seconds": 0.0,
         "gpu_transfer_seconds": 0.0,
         "total_seconds": 0.0,
-        "backend": str(backend),
+        "backend_requested": str(backend),
+        "backend": str(block_backend),
+        "backend_reason": backend_reason,
     }
     block_started_at = perf_counter()
 
@@ -626,12 +645,11 @@ def _cluster_single_block(
     sanitize_totals["asymmetry_pairs"] += int(sanitize_meta["asymmetry_pairs"])
     sanitize_totals["diag_reset_count"] += int(sanitize_meta["diag_reset_count"])
 
-    backend_clean = str(backend).strip().lower()
     dbscan_started_at = perf_counter()
     if len(block_mentions) == 2:
         labels = _cluster_two_point_block(dist=dist, eps=eps, min_samples=min_samples)
         timing["dbscan_seconds"] = float(perf_counter() - dbscan_started_at)
-    elif backend_clean == "cuml_gpu":
+    elif str(block_backend) == "cuml_gpu":
         global _LAST_CUML_TIMINGS
         _LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
         labels = _run_dbscan_cuml(dist=dist, eps=eps, min_samples=min_samples, metric=metric)
@@ -1038,6 +1056,18 @@ def cluster_blockwise_dbscan(
         save_parquet(out, output_path, index=False)
 
     timing_rows = [row for row in timing_rows if row]
+    backend_block_counts: dict[str, int] = {}
+    for row in timing_rows:
+        backend_label = str(row.get("backend", "") or "unknown")
+        backend_block_counts[backend_label] = int(backend_block_counts.get(backend_label, 0)) + 1
+    small_block_cpu_routed_blocks = int(
+        sum(1 for row in timing_rows if str(row.get("backend_reason", "")) == "small_block_cpu_threshold")
+    )
+    small_block_cpu_routed_pairs_est = int(
+        sum(int(entry.get("pair_est", 0)) for entry in entries if int(entry.get("size", 0)) <= _SMALL_BLOCK_CPU_THRESHOLD)
+        if backend_effective == "cuml_gpu"
+        else 0
+    )
     top_slow_blocks = sorted(
         timing_rows,
         key=lambda row: (-float(row.get("total_seconds", 0.0)), str(row.get("block_key", ""))),
@@ -1055,6 +1085,10 @@ def cluster_blockwise_dbscan(
         "cluster_backend_requested": backend_requested,
         "cluster_backend_effective": backend_effective,
         "cluster_backend_reason": backend_info.get("reason"),
+        "small_block_cpu_threshold": int(_SMALL_BLOCK_CPU_THRESHOLD) if backend_effective == "cuml_gpu" else None,
+        "small_block_cpu_routed_blocks": int(small_block_cpu_routed_blocks),
+        "small_block_cpu_routed_pairs_est": int(small_block_cpu_routed_pairs_est),
+        "backend_block_counts": {str(key): int(value) for key, value in sorted(backend_block_counts.items())},
         "cpu_sharding_mode": str(sharding_mode),
         "cpu_sharding_enabled": bool(sharding_on and backend_effective == "sklearn_cpu"),
         "cpu_workers_requested": worker_info.get("requested"),

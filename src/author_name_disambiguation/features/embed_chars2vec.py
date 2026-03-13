@@ -8,6 +8,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -249,6 +250,9 @@ def generate_chars2vec_embeddings(
             "cache_hit": False,
             "generation_mode": "empty",
             "name_count": 0,
+            "generation_seconds": 0.0,
+            "cache_load_seconds": 0.0,
+            "cache_write_seconds": 0.0,
             "tensorflow_memory_growth_enabled": None,
             "tensorflow_memory_growth_error": None,
             "tensorflow_cleanup_attempted": False,
@@ -265,6 +269,7 @@ def generate_chars2vec_embeddings(
     try:
         import chars2vec  # type: ignore
 
+        generation_started_at = perf_counter()
         with _filter_known_library_stderr(enabled=quiet_libraries):
             model = chars2vec.load_model(model_name)
         setattr(model, "keras", chars2vec.keras)
@@ -282,6 +287,9 @@ def generate_chars2vec_embeddings(
             "cache_hit": False,
             "generation_mode": "chars2vec",
             "name_count": int(len(names)),
+            "generation_seconds": float(perf_counter() - generation_started_at),
+            "cache_load_seconds": 0.0,
+            "cache_write_seconds": 0.0,
             "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
             "tensorflow_memory_growth_error": tf_memory_growth_error,
             "tensorflow_cleanup_attempted": True,
@@ -299,6 +307,9 @@ def generate_chars2vec_embeddings(
         "cache_hit": False,
         "generation_mode": "stub_only",
         "name_count": int(len(names)),
+        "generation_seconds": 0.0,
+        "cache_load_seconds": 0.0,
+        "cache_write_seconds": 0.0,
         "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
         "tensorflow_memory_growth_error": tf_memory_growth_error,
         "tensorflow_cleanup_attempted": False,
@@ -320,6 +331,7 @@ def get_or_create_chars2vec_embeddings(
     output = Path(output_path)
     names = mentions["author_raw"].fillna("").astype(str).tolist()
     if output.exists() and not force_recompute:
+        cache_load_started_at = perf_counter()
         cached = load_validated_npy(
             output,
             validator=lambda arr: arr.ndim == 2 and arr.shape == (len(names), 50),
@@ -330,6 +342,9 @@ def get_or_create_chars2vec_embeddings(
                 "cache_hit": True,
                 "generation_mode": "cache",
                 "name_count": int(len(names)),
+                "generation_seconds": 0.0,
+                "cache_load_seconds": float(perf_counter() - cache_load_started_at),
+                "cache_write_seconds": 0.0,
                 "tensorflow_memory_growth_enabled": None,
                 "tensorflow_memory_growth_error": None,
                 "tensorflow_cleanup_attempted": False,
@@ -347,5 +362,8 @@ def get_or_create_chars2vec_embeddings(
     )
     emb, meta = result if isinstance(result, tuple) else (result, {"cache_hit": False})
 
+    cache_write_started_at = perf_counter()
     atomic_save_npy(output, emb)
+    meta = dict(meta)
+    meta["cache_write_seconds"] = float(perf_counter() - cache_write_started_at)
     return (emb, meta) if return_meta else emb
