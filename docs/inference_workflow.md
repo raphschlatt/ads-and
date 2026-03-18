@@ -128,18 +128,56 @@ The compare report includes:
 - coverage/go-no-go deltas
 - partition-aware `mention_clusters` drift, not just raw UID-string diffs
 
+After the compare report exists, freeze the candidate into a formal promote-or-keep-baseline decision:
+
+```bash
+python scripts/ops/freeze_infer_baseline.py \
+  --baseline-run-id bench_full_v22_fix2 \
+  --candidate-run-id <new_run_dir_name> \
+  --metrics-root artifacts/exports \
+  --runtime-metric-max-delta clustering.dbscan_seconds_total=0
+```
+
+This writes inside the candidate run dir:
+
+- `98_infer_baseline_decision.json`
+- `98_infer_baseline_decision.md`
+
+Use additional `--runtime-metric-max-delta <metric>=<max_delta_seconds>` gates to reflect the focus of the wave under test.
+
 If a candidate is not promoted, keep the compare JSONs and prune the heavy parquet outputs:
 
 ```bash
 python scripts/ops/prune_infer_run.py --run-dir artifacts/exports/<failed_run_dir>
 ```
 
+The JSON-only retention set now preserves:
+
+- `00_context.json`
+- `05_stage_metrics_infer_sources.json`
+- `05_go_no_go_infer_sources.json`
+- `98_infer_baseline_decision.json`
+- `98_infer_baseline_decision.md`
+- `99_compare_infer_to_baseline.json`
+
 If a candidate is promoted, write a new versioned baseline manifest:
+
+```bash
+python scripts/ops/freeze_infer_baseline.py \
+  --baseline-run-id bench_full_v22_fix2 \
+  --candidate-run-id <promoted_run_dir> \
+  --metrics-root artifacts/exports \
+  --runtime-metric-max-delta clustering.dbscan_seconds_total=0 \
+  --promote-manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json
+```
+
+If you already have a `98_infer_baseline_decision.json` and only need the versioned manifest, the lower-level helper remains available:
 
 ```bash
 python scripts/ops/write_infer_baseline_manifest.py \
   --run-dir artifacts/exports/<promoted_run_dir> \
-  --manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json
+  --manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json \
+  --compare-report artifacts/exports/<promoted_run_dir>/99_compare_infer_to_baseline.json
 ```
 
 ## Notes
@@ -149,3 +187,4 @@ python scripts/ops/write_infer_baseline_manifest.py \
 - Packaged defaults are used when `cluster_config` and `gates_config` are omitted.
 - Aborted runs should be cleaned per `output_root`; no shared cache cleanup is done automatically.
 - Large historical inference artifacts outside the documented keep-set are expected to be removed after baseline freeze.
+- A candidate run is not considered resolved until it has both a compare report and a `98_infer_baseline_decision.{json,md}` record.

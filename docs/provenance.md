@@ -37,4 +37,15 @@ That baseline manifest records:
 - the artifact keep-set used for workspace cleanup
 - optional compare metadata against the previous baseline
 
+Operational ADS candidates are expected to carry a local decision record before they are promoted or pruned:
+
+- `98_infer_baseline_decision.json`
+- `98_infer_baseline_decision.md`
+
+Those records bind a candidate run to:
+
+- the compare report used for the decision
+- the policy gates used for promotion vs. keep-baseline
+- the final decision outcome and, when promoted, the resulting versioned manifest path
+
 Intermediate optimization runs are not part of long-term provenance once the compare report exists and failed ADS candidates have been pruned to the JSON-only retention set.

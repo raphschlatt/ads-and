@@ -17,6 +17,8 @@ def test_prune_infer_run_keeps_only_json_retention_set(tmp_path: Path):
         "00_context.json",
         "05_stage_metrics_infer_sources.json",
         "05_go_no_go_infer_sources.json",
+        "98_infer_baseline_decision.json",
+        "98_infer_baseline_decision.md",
         "99_compare_infer_to_baseline.json",
     ]
     for name in keep_names:

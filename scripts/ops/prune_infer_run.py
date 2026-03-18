@@ -12,6 +12,8 @@ DEFAULT_KEEP_FILES = (
     "00_context.json",
     "05_stage_metrics_infer_sources.json",
     "05_go_no_go_infer_sources.json",
+    "98_infer_baseline_decision.json",
+    "98_infer_baseline_decision.md",
     "99_compare_infer_to_baseline.json",
 )
 
