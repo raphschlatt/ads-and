@@ -43,6 +43,26 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _write_active_baseline(
+    *,
+    path: Path,
+    candidate_run_id: str,
+    candidate_dir: Path,
+    manifest_path: str | None,
+    compare_path: Path,
+    previous_baseline_run_id: str,
+) -> None:
+    payload = {
+        "baseline_run_id": str(candidate_run_id),
+        "artifact_dir": candidate_dir.name,
+        "manifest_path": manifest_path,
+        "compare_report": str(compare_path),
+        "previous_baseline_run_id": str(previous_baseline_run_id),
+        "updated_utc": _utc_now(),
+    }
+    _write_json(path, payload)
+
+
 def _parse_metric_gate(raw: str) -> tuple[str, float]:
     text = str(raw).strip()
     if not text or "=" not in text:
@@ -142,6 +162,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decision-json", default=None)
     parser.add_argument("--decision-md", default=None)
     parser.add_argument("--promote-manifest-path", default=None)
+    parser.add_argument("--active-baseline-path", default=None)
     parser.add_argument("--keep-artifact", action="append", default=[])
     parser.add_argument("--require-go-current", dest="require_go_current", action="store_true")
     parser.add_argument("--no-require-go-current", dest="require_go_current", action="store_false")
@@ -257,6 +278,7 @@ def main() -> int:
 
     decision_name = "promote_candidate" if not failures else "keep_baseline"
     manifest_path: str | None = None
+    active_baseline_path: str | None = None
 
     if args.promote_manifest_path is not None and not failures:
         manifest_target = Path(str(args.promote_manifest_path)).expanduser().resolve()
@@ -290,6 +312,18 @@ def main() -> int:
             )
         manifest_path = str(manifest_target)
 
+    if args.active_baseline_path is not None and not failures:
+        active_target = Path(str(args.active_baseline_path)).expanduser().resolve()
+        _write_active_baseline(
+            path=active_target,
+            candidate_run_id=str(args.candidate_run_id),
+            candidate_dir=candidate_dir,
+            manifest_path=manifest_path,
+            compare_path=compare_path,
+            previous_baseline_run_id=str(args.baseline_run_id),
+        )
+        active_baseline_path = str(active_target)
+
     payload: dict[str, Any] = {
         "baseline_run_id": str(args.baseline_run_id),
         "candidate_run_id": str(args.candidate_run_id),
@@ -310,6 +344,7 @@ def main() -> int:
             "decision_json": str(decision_json),
             "decision_markdown": str(decision_md),
             "promote_manifest_path": manifest_path,
+            "active_baseline_path": active_baseline_path,
         },
         "observed": {
             "go_baseline": compare_payload.get("go_baseline"),

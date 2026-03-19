@@ -104,6 +104,7 @@ The source-mirrored outputs preserve all input fields and add:
 The current promoted ADS inference baseline is tracked in:
 
 - `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
+- `docs/baselines/infer_ads_active.json`
 
 Current keep-set for large inference artifacts:
 
@@ -168,7 +169,8 @@ python scripts/ops/freeze_infer_baseline.py \
   --candidate-run-id <promoted_run_dir> \
   --metrics-root artifacts/exports \
   --runtime-metric-max-delta clustering.dbscan_seconds_total=0 \
-  --promote-manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json
+  --promote-manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json \
+  --active-baseline-path docs/baselines/infer_ads_active.json
 ```
 
 If you already have a `98_infer_baseline_decision.json` and only need the versioned manifest, the lower-level helper remains available:
@@ -188,3 +190,4 @@ python scripts/ops/write_infer_baseline_manifest.py \
 - Aborted runs should be cleaned per `output_root`; no shared cache cleanup is done automatically.
 - Large historical inference artifacts outside the documented keep-set are expected to be removed after baseline freeze.
 - A candidate run is not considered resolved until it has both a compare report and a `98_infer_baseline_decision.{json,md}` record.
+- `docs/baselines/infer_ads_active.json` is the machine-readable pointer to the currently active ADS baseline.

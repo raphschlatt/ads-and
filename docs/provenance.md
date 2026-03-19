@@ -29,6 +29,8 @@ For the ADS full-source inference line, provenance is now anchored by two retain
 The contract for this retained pair is documented in:
 
 - `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
+- `docs/baselines/infer_ads_active.json`
+- `docs/baselines/infer_ads_full_run_20260305_v22_fix2_transition.md`
 
 That baseline manifest records:
 
@@ -47,5 +49,8 @@ Those records bind a candidate run to:
 - the compare report used for the decision
 - the policy gates used for promotion vs. keep-baseline
 - the final decision outcome and, when promoted, the resulting versioned manifest path
+
+The active ADS baseline is also exposed as a small machine-readable pointer in `docs/baselines/infer_ads_active.json`.
+That file is intended for tooling and should be updated together with every future infer baseline promotion.
 
 Intermediate optimization runs are not part of long-term provenance once the compare report exists and failed ADS candidates have been pruned to the JSON-only retention set.

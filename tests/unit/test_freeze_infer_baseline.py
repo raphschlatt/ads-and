@@ -164,6 +164,7 @@ def test_freeze_infer_baseline_can_promote_and_write_manifest(tmp_path: Path):
     )
 
     manifest_path = tmp_path / "docs" / "baselines" / "infer_ads_full_run_20260305_v23.json"
+    active_path = tmp_path / "docs" / "baselines" / "infer_ads_active.json"
     proc = subprocess.run(
         [
             sys.executable,
@@ -178,6 +179,8 @@ def test_freeze_infer_baseline_can_promote_and_write_manifest(tmp_path: Path):
             "clustering.dbscan_seconds_total=0",
             "--promote-manifest-path",
             str(manifest_path),
+            "--active-baseline-path",
+            str(active_path),
             "--keep-artifact",
             "bench_full_v22_fix2",
         ],
@@ -191,7 +194,13 @@ def test_freeze_infer_baseline_can_promote_and_write_manifest(tmp_path: Path):
     assert payload["decision"]["decision"] == "promote_candidate"
     assert payload["decision"]["passed"] is True
     assert payload["decision"]["promoted_manifest_path"] == str(manifest_path)
+    assert payload["references"]["active_baseline_path"] == str(active_path)
 
     manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest_payload["canonical_baseline"]["artifact_dir"] == "bench_full_perf_pkg2"
     assert "bench_full_v22_fix2" in manifest_payload["artifact_keep_set"]
+
+    active_payload = json.loads(active_path.read_text(encoding="utf-8"))
+    assert active_payload["baseline_run_id"] == "bench_full_perf_pkg2"
+    assert active_payload["artifact_dir"] == "bench_full_perf_pkg2"
+    assert active_payload["manifest_path"] == str(manifest_path)

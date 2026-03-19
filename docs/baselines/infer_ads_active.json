@@ -1,0 +1,8 @@
+{
+  "artifact_dir": "bench_full_v22_fix2",
+  "baseline_run_id": "bench_full_v22_fix2",
+  "compare_report": null,
+  "manifest_path": "docs/baselines/infer_ads_full_run_20260305_v22_fix2.json",
+  "previous_baseline_run_id": "bench_full_v21_fix4",
+  "updated_utc": "2026-03-18T00:00:00Z"
+}
