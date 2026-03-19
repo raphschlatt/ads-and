@@ -79,6 +79,30 @@ Relation to upstream chars2vec:
 - upstream does not document a GPU-first or large-batch equivalence guarantee
 - for this repo, the historical reference path should be treated as `predict` with effective batch size `32`
 
+## Reference Check
+
+Resolved clarification:
+- the earlier suspicion about `effective_batch_size: 256` in the active ADS baseline was a misread
+- in [bench_full_v22_fix2/00_context.json](/home/ubuntu/Author_Name_Disambiguation/artifacts/exports/bench_full_v22_fix2/00_context.json), that `effective_batch_size` belongs to `specter`, not to `chars2vec`
+- the historical pre-wave chars2vec code in commit `f41c3a9^` used fixed `batch_size=32`
+
+What this means:
+- the `LSPO Gate Run` for `perf_pkg2_chars_v1` really was comparing against the intended historical chars2vec path
+- the gate result is therefore a real signal for this wave, not just a stale-reference artifact
+
+## CPU / GPU Note
+
+Critical interpretation:
+- upstream chars2vec does not recommend GPU as a default for inference
+- the strongest upstream speed levers are batching, cache reuse, and small embedding size
+- that critique is valid and should stay part of our planning
+
+How that maps to this repo:
+- our LSPO and ADS runs are not "few-word" inference; they are large-batch, many-name workloads
+- that is exactly the regime where GPU can still help
+- but the next safer optimization wave should not assume "GPU + larger batch" is the best lever
+- for this repo, exact-path preprocessing, cache, and lifecycle improvements are the safer next bets than further batch-size inflation
+
 ## Decision
 
 Do not promote from this wave:
