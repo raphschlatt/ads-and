@@ -1,23 +1,20 @@
-Als Nächstes kommt klar `Wave A: chars2vec alleine`.
+`wave_b_v1` ist als fehlgeschlagener Clustering-Kandidat abgeschlossen.
 
-Warum:
-- `LSPO` ist wieder grün und sichtbar.
-- der Code ist jetzt bereinigt, also kein schlechter Ballast mehr im Pfad.
-- `chars2vec` ist noch der größte unerwartete Rückschritt.
-- `Clustering` fassen wir absichtlich erst danach an, damit wir keine Änderungen stacken.
+Gesicherter Stand:
+- `LSPO` war nur die Vorqualifikation und blieb innerhalb der Toleranz.
+- `ADS Full` war die operative Entscheidungsebene und ist klar regressiv ausgefallen.
+- Fuer `bench_full_wave_b_v1` existiert jetzt eine formale `keep_baseline`-Decision.
+- Der Run wurde auf die dokumentierte JSON-only-Retention reduziert.
+- Die aktive infer-Baseline bleibt `bench_full_v22_fix2`.
 
-Die Reihenfolge ist jetzt:
-1. `chars2vec` gezielt optimieren, ohne Clustering mitzunehmen.
-2. `LSPO` laufen lassen mit Tag `perf_pkg2_chars_v1`.
-3. `ADS Full` laufen lassen als `bench_full_perf_pkg2_chars_v1`.
-4. vergleichen:
-   - wenn `LSPO` grün und `ADS` schneller als [bench_full_v22_fix2](/home/ubuntu/Author_Name_Disambiguation/artifacts/exports/bench_full_v22_fix2): promoten
-   - wenn nicht: Code-Rollback, ADS-Run mit [prune_infer_run.py](/home/ubuntu/Author_Name_Disambiguation/scripts/ops/prune_infer_run.py) auf JSON-only schrumpfen
-5. erst dann `Wave B: Clustering alleine`
+Was daraus folgt:
+1. `wave_b_v1` wird nicht promotet.
+2. Diese Konfiguration ist nicht mehr der laufende Arbeitszweig.
+3. Der naechste Performance-Schritt wird separat und von der sauberen Baseline aus neu geplant.
 
-Was wir ausdrücklich noch nicht machen:
-- kein `SPECTER`
-- kein `Pair-Scoring`
-- kein gemischtes `chars2vec + clustering`-Paket
+Was wir jetzt bewusst nicht tun:
+- kein Weiteriterieren auf dem entfernten `wave_b_v1`-Configpfad
+- kein gemischtes Paket aus neuen Clustering- und chars2vec-Aenderungen
+- kein neuer Full-Run, bevor der naechste Versuch inhaltlich neu begruendet ist
 
-Kurz: der nächste sinnvolle Schritt ist jetzt die **isolierte chars2vec-Runde**. Wenn du willst, setze ich die jetzt direkt um.
+Kurz: erst Close-out und Baseline-Hygiene, dann neue Planung aus sauberem Zustand.
