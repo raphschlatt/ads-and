@@ -213,3 +213,32 @@ If an agent starts the wrong type of run:
 ## One-Sentence Mental Model
 
 For inference-only experiments, we keep the Trained NAND Model fixed, use an LSPO Gate Run as Gate 1, then use an ADS Full Candidate Run as Gate 2, and only keep the code change if Gate 1 is acceptable and Gate 2 beats the ADS inference baseline.
+
+## Experiment Memory
+
+Permanent experiment notes live here:
+- `docs/experiments/`
+
+Current note for the active chars2vec wave:
+- `docs/experiments/perf_pkg2_chars_v1.md`
+
+Rule:
+- Keep vocabulary and workflow rules in `AGENTS.md`.
+- Keep concrete experiment outcomes, measured numbers, and next-step recommendations in `docs/experiments/`.
+
+## chars2vec Guardrails For This Repo
+
+Upstream chars2vec behavior to treat as the historical reference path:
+- lowercase words
+- deduplicate with `np.unique`
+- reuse the model-local `cache`
+- call `embedding_model.predict([embeddings_pad_seq])`
+
+Implication for this repo:
+- A chars2vec batch-size change is not automatically a "runtime-only" change.
+- In this repo, changing the effective chars2vec batch size can change embeddings numerically and can therefore move LSPO Gate Run metrics.
+
+Current project lesson from `perf_pkg2_chars_v1`:
+- The large-batch chars2vec path was much faster in microbenchmarks.
+- It did not pass the LSPO Gate Run under the current no-drift policy.
+- Therefore large-batch chars2vec must not be treated as promoted behavior unless we explicitly change policy or prove equivalence.
