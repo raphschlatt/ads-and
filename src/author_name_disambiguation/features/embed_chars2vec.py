@@ -18,9 +18,10 @@ from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 
 _CHARS2VEC_DIM = 50
+_CHARS2VEC_HISTORICAL_BATCH_SIZE = 32
 _CHARS2VEC_AUTO_GPU_BATCH_SIZE = 512
 _CHARS2VEC_AUTO_CPU_BATCH_SIZE = 128
-_CHARS2VEC_MIN_RETRY_BATCH_SIZE = 32
+_CHARS2VEC_MIN_RETRY_BATCH_SIZE = _CHARS2VEC_HISTORICAL_BATCH_SIZE
 _KNOWN_TF_STDERR_PATTERNS = (
     re.compile(r"^WARNING: All log messages before absl::InitializeLog\(\) is called are written to STDERR\s*$"),
     re.compile(r".*\bgpu_device\.cc:\d+\].*Created device .*", re.IGNORECASE),
@@ -377,7 +378,7 @@ def _vectorize_words_silently(
 def generate_chars2vec_embeddings(
     names: list[str],
     model_name: str = "eng_50",
-    batch_size: int | None = None,
+    batch_size: int | None = _CHARS2VEC_HISTORICAL_BATCH_SIZE,
     execution_mode: Literal["predict", "direct_call"] = "predict",
     use_stub_if_missing: bool = False,
     quiet_libraries: bool = False,
@@ -511,7 +512,7 @@ def get_or_create_chars2vec_embeddings(
     output_path: str | Path,
     force_recompute: bool = False,
     model_name: str = "eng_50",
-    batch_size: int | None = None,
+    batch_size: int | None = _CHARS2VEC_HISTORICAL_BATCH_SIZE,
     execution_mode: Literal["predict", "direct_call"] = "predict",
     use_stub_if_missing: bool = False,
     quiet_libraries: bool = False,

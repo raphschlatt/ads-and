@@ -7,6 +7,8 @@ Status:
 - `LSPO Gate Run` failed
 - `ADS Full Candidate Run` was not started
 - experiment is documented but not promoted
+- Track A soft revert is implemented
+- Track A CPU vs GPU benchmark says keep `GPU exact32` as the reference device
 
 ## Scope
 
@@ -130,3 +132,39 @@ Good candidates for the next wave:
 Not recommended as the next move:
 - another `ADS Full Candidate Run` from `perf_pkg2_chars_v1`
 - further tuning of large-batch chars2vec without first deciding whether small output drift is acceptable policy
+
+## Track A Outcome
+
+What Track A changed:
+- the productive chars2vec default path was restored to the historical reference behavior: `execution_mode="predict"` with effective `batch_size=32`
+- productive LSPO and ADS inference call sites now explicitly request that historical path
+- the benchmark helper was extended for exact-path `CPU vs GPU` comparison on `batch_size=32`
+
+Track A artifacts:
+- [06_clustering_test_report__track_a_control_exact32_v1.json](/home/ubuntu/Author_Name_Disambiguation/artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__track_a_control_exact32_v1.json)
+- [99_compare_cluster_report_to_baseline__track_a_control_exact32_v1.json](/home/ubuntu/Author_Name_Disambiguation/artifacts/metrics/full_20260218T111506Z_cli02681429/99_compare_cluster_report_to_baseline__track_a_control_exact32_v1.json)
+- [chars2vec_exact32_device_compare_track_a_v1.json](/home/ubuntu/Author_Name_Disambiguation/artifacts/benchmarks/chars2vec_exact32_device_compare_track_a_v1.json)
+
+Control-run result:
+- the restored `exact32` path still did not compare bit-cleanly against the historical `06_clustering_test_report.json`
+- the metric deltas were identical to the earlier `perf_pkg2_chars_v1` gate failure
+- this is not evidence that `exact32` is still wrong; it points to a broader LSPO reproduction mismatch in the current compatibility path
+
+Important reproducibility detail:
+- the historical baseline report uses `subset_cache_key_computed = full_seed11_targetfull_cfg0dbcdaf9_srcd52b159f766e`
+- the new control run uses `subset_verification_mode = legacy_compat`
+- the new control run computed `subset_cache_key_computed = full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342`
+- so the current control run is a useful sanity check, but not a perfect historical apples-to-apples reproduction
+
+Exact32 CPU vs GPU benchmark result:
+- `exact32_gpu_as_is`: `116.61s` wall median
+- `exact32_cpu_as_is`: `127.38s` wall median
+- `exact32_gpu_unique_only`: `160.43s` wall median
+- `exact32_cpu_unique_only`: `215.63s` wall median
+- decision: `preferred_reference_device = gpu`
+- decision: `cpu_candidate_for_gate1 = false`
+
+What this means now:
+- keep `GPU exact32` as the current productive chars2vec reference path
+- do not spend the next wave on `CPU exact32` promotion
+- the next chars2vec optimization wave should target exact-path profiling and overhead reduction around `predict(32)`

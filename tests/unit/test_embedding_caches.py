@@ -218,6 +218,28 @@ def test_generate_specter_embeddings_uses_precomputed_vectors_directly():
     assert meta["used_precomputed_embeddings"] is True
 
 
+def test_generate_chars2vec_embeddings_defaults_to_historical_batch_32(monkeypatch: pytest.MonkeyPatch):
+    _install_fake_tensorflow(monkeypatch)
+    state = _install_fake_chars2vec_backend(monkeypatch)
+
+    names = [f"name_{idx:04d}" for idx in range(70)]
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=names,
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (70, 50)
+    assert meta["execution_mode"] == "predict"
+    assert meta["requested_batch_size"] == 32
+    assert meta["effective_batch_size"] == 32
+    assert meta["predict_batch_count"] == 3
+    assert meta["oom_retry_count"] == 0
+    assert len(state["predict_calls"]) == 1
+    assert state["predict_calls"][0]["batch_size"] == 32
+
+
 def test_generate_chars2vec_embeddings_auto_batches_on_gpu_with_callbacks(monkeypatch: pytest.MonkeyPatch):
     progress_updates: list[int] = []
     _install_fake_tensorflow(monkeypatch)
@@ -253,6 +275,7 @@ def test_generate_chars2vec_embeddings_auto_batches_on_gpu_with_callbacks(monkey
     names = [f"name_{idx:04d}" for idx in range(900)]
     out, meta = embed_chars2vec.generate_chars2vec_embeddings(
         names=names,
+        batch_size=None,
         show_progress=True,
         quiet_libraries=False,
         return_meta=True,
@@ -290,6 +313,7 @@ def test_generate_chars2vec_embeddings_auto_batches_on_cpu(monkeypatch: pytest.M
     names = [f"name_{idx:03d}" for idx in range(140)]
     out, meta = embed_chars2vec.generate_chars2vec_embeddings(
         names=names,
+        batch_size=None,
         show_progress=False,
         quiet_libraries=False,
         return_meta=True,
@@ -388,7 +412,7 @@ def test_generate_chars2vec_embeddings_direct_call_bypasses_predict(monkeypatch:
 
     assert out.shape == (5, 50)
     assert meta["execution_mode"] == "direct_call"
-    assert meta["requested_batch_size"] is None
+    assert meta["requested_batch_size"] == 32
     assert meta["effective_batch_size"] == 3
     assert meta["predict_batch_count"] == 0
     assert meta["oom_retry_count"] == 0

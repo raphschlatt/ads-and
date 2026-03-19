@@ -242,3 +242,21 @@ Current project lesson from `perf_pkg2_chars_v1`:
 - The large-batch chars2vec path was much faster in microbenchmarks.
 - It did not pass the LSPO Gate Run under the current no-drift policy.
 - Therefore large-batch chars2vec must not be treated as promoted behavior unless we explicitly change policy or prove equivalence.
+
+## LSPO Control-Run Reproducibility Rule
+
+When using an `LSPO Gate Run` as a control run against a historical report:
+- check `subset_cache_key_computed`
+- check `subset_cache_key_expected`
+- check `subset_verification_mode`
+
+Interpretation rule:
+- if `subset_cache_key_computed` differs from the historical expected key, the run is not a strict historical reproduction
+- if `subset_verification_mode = legacy_compat`, treat the run as a compatibility sanity-check, not as a proof of exact historical equivalence
+
+Current known example:
+- historical baseline report: `subset_cache_key_computed = full_seed11_targetfull_cfg0dbcdaf9_srcd52b159f766e`
+- newer compatibility-path control runs: `subset_cache_key_computed = full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342`
+
+Implication:
+- do not blame the current inference code path alone for a control-run drift until the LSPO subset key matches the historical baseline

@@ -740,6 +740,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         mentions=mentions,
         output_path=chars_path,
         force_recompute=bool(request.force),
+        batch_size=32,
+        execution_mode="predict",
         use_stub_if_missing=False,
         quiet_libraries=True,
         show_progress=bool(request.progress),

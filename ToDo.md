@@ -33,6 +33,11 @@ Was daraus folgt:
 3. Vor dem naechsten promoteten Inferenz-Experiment sollte der historische chars2vec-Defaultpfad wieder der Referenzzustand sein.
 
 Was wir als Naechstes sinnvoll tun:
-1. chars2vec auf den historischen Referenzpfad zurueckstellen
-2. den naechsten chars2vec-Versuch nur noch als Exact-Path-Optimierung planen
-3. erst dann einen neuen `LSPO Gate Run` ansetzen
+1. chars2vec auf dem historischen Referenzpfad `predict(32)` halten
+2. `CPU exact32` nicht weiter als Promotionskandidat verfolgen, weil `GPU exact32` im Track-A-Benchmark auf beiden Datenschnitten schneller war
+3. den naechsten chars2vec-Versuch nur noch als Exact-Path-Optimierung rund um `predict(32)` planen
+
+Wichtige Track-A-Erkenntnisse:
+- Der produktive chars2vec-Pfad ist wieder auf dem historischen `predict(32)`-Verhalten.
+- Der Track-A-Control-Run war trotzdem kein perfekter historischer Repro-Check, weil der aktuelle LSPO-Kompatibilitaetspfad `subset_cache_key_computed = ...srcb2c9203fe342` erzeugt, waehrend die historische Baseline auf `...srcd52b159f766e` basiert.
+- Das bedeutet: aktuelle Control-Runs koennen als Sanity-Check dienen, aber nicht automatisch als strenger Beweis fuer bit-identische Reproduktion der historischen LSPO-Baseline.
