@@ -12,7 +12,14 @@ import pytest
 from author_name_disambiguation.features import embed_chars2vec, embed_specter
 
 
-def _install_fake_chars2vec_backend(monkeypatch: pytest.MonkeyPatch):
+def _install_fake_chars2vec_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    predict_impl=None,
+    direct_call_impl=None,
+):
+    state = {"predict_calls": [], "direct_call_calls": []}
+
     def _pad_sequences(sequences, maxlen=None):
         del maxlen
         max_length = max(seq.shape[0] for seq in sequences)
@@ -25,11 +32,45 @@ def _install_fake_chars2vec_backend(monkeypatch: pytest.MonkeyPatch):
     class _FakeCallback:
         pass
 
+    class _FakeTensor:
+        def __init__(self, array):
+            self._array = np.asarray(array, dtype=np.float32)
+
+        def numpy(self):
+            return self._array
+
     class _FakeEmbeddingModel:
         def predict(self, inputs, batch_size=None, verbose=None, callbacks=None):
-            del batch_size, verbose, callbacks
+            state["predict_calls"].append(
+                {
+                    "batch_size": batch_size,
+                    "verbose": verbose,
+                    "callback_count": 0 if callbacks is None else len(callbacks),
+                    "row_count": len(inputs[0]),
+                }
+            )
+            if predict_impl is not None:
+                return predict_impl(
+                    inputs,
+                    batch_size=batch_size,
+                    verbose=verbose,
+                    callbacks=callbacks,
+                    state=state,
+                )
             total_rows = len(inputs[0])
             return np.ones((total_rows, 50), dtype=np.float32)
+
+        def __call__(self, inputs, training=False):
+            state["direct_call_calls"].append(
+                {
+                    "training": bool(training),
+                    "row_count": len(inputs),
+                }
+            )
+            if direct_call_impl is not None:
+                return direct_call_impl(inputs, training=training, state=state)
+            total_rows = len(inputs)
+            return _FakeTensor(np.ones((total_rows, 50), dtype=np.float32))
 
     class _FakeModel:
         def __init__(self):
@@ -46,6 +87,7 @@ def _install_fake_chars2vec_backend(monkeypatch: pytest.MonkeyPatch):
         ),
     )
     monkeypatch.setitem(sys.modules, "chars2vec", fake_chars2vec)
+    return state
 
 
 def _install_fake_tensorflow(
@@ -176,9 +218,9 @@ def test_generate_specter_embeddings_uses_precomputed_vectors_directly():
     assert meta["used_precomputed_embeddings"] is True
 
 
-def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkeypatch: pytest.MonkeyPatch):
-    predict_calls: list[dict[str, object]] = []
+def test_generate_chars2vec_embeddings_auto_batches_on_gpu_with_callbacks(monkeypatch: pytest.MonkeyPatch):
     progress_updates: list[int] = []
+    _install_fake_tensorflow(monkeypatch)
 
     @contextmanager
     def _fake_loop_progress(**_kwargs):
@@ -190,58 +232,25 @@ def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkey
 
     monkeypatch.setattr(embed_chars2vec, "loop_progress", _fake_loop_progress)
 
-    def _pad_sequences(sequences, maxlen=None):
-        del maxlen
-        max_length = max(seq.shape[0] for seq in sequences)
-        vocab_size = sequences[0].shape[1]
-        out = np.zeros((len(sequences), max_length, vocab_size), dtype=np.float32)
-        for idx, seq in enumerate(sequences):
-            out[idx, : seq.shape[0], :] = seq
-        return out
-
-    class _FakeCallback:
-        pass
-
-    class _FakeEmbeddingModel:
-        def predict(self, inputs, batch_size=None, verbose=None, callbacks=None):
-            total_rows = len(inputs[0])
-            predict_calls.append(
-                {
-                    "batch_size": batch_size,
-                    "verbose": verbose,
-                    "callback_count": 0 if callbacks is None else len(callbacks),
-                }
-            )
-            total_batches = (total_rows + int(batch_size) - 1) // int(batch_size)
+    def _predict_impl(inputs, batch_size=None, verbose=None, callbacks=None, state=None):
+        assert state is not None
+        total_rows = len(inputs[0])
+        total_batches = (total_rows + int(batch_size) - 1) // int(batch_size)
+        for callback in callbacks or []:
+            if hasattr(callback, "on_predict_begin"):
+                callback.on_predict_begin({})
+        for batch_idx in range(total_batches):
             for callback in callbacks or []:
-                if hasattr(callback, "on_predict_begin"):
-                    callback.on_predict_begin({})
-            for batch_idx in range(total_batches):
-                for callback in callbacks or []:
-                    if hasattr(callback, "on_predict_batch_end"):
-                        callback.on_predict_batch_end(batch_idx, {})
-            for callback in callbacks or []:
-                if hasattr(callback, "on_predict_end"):
-                    callback.on_predict_end({})
-            return np.ones((total_rows, 50), dtype=np.float32)
+                if hasattr(callback, "on_predict_batch_end"):
+                    callback.on_predict_batch_end(batch_idx, {})
+        for callback in callbacks or []:
+            if hasattr(callback, "on_predict_end"):
+                callback.on_predict_end({})
+        return np.ones((total_rows, 50), dtype=np.float32)
 
-    class _FakeModel:
-        def __init__(self):
-            self.cache: dict[str, np.ndarray] = {}
-            self.char_to_ix = {char: idx for idx, char in enumerate("abcdefghijklmnopqrstuvwxyz0123456789_")}
-            self.vocab_size = len(self.char_to_ix)
-            self.embedding_model = _FakeEmbeddingModel()
+    state = _install_fake_chars2vec_backend(monkeypatch, predict_impl=_predict_impl)
 
-    fake_chars2vec = SimpleNamespace(
-        load_model=lambda _model_name: _FakeModel(),
-        keras=SimpleNamespace(
-            preprocessing=SimpleNamespace(sequence=SimpleNamespace(pad_sequences=_pad_sequences)),
-            callbacks=SimpleNamespace(Callback=_FakeCallback),
-        ),
-    )
-    monkeypatch.setitem(sys.modules, "chars2vec", fake_chars2vec)
-
-    names = [f"name_{idx:03d}" for idx in range(70)]
+    names = [f"name_{idx:04d}" for idx in range(900)]
     out, meta = embed_chars2vec.generate_chars2vec_embeddings(
         names=names,
         show_progress=True,
@@ -249,10 +258,10 @@ def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkey
         return_meta=True,
     )
 
-    assert out.shape == (70, 50)
+    assert out.shape == (900, 50)
     assert meta["generation_mode"] == "chars2vec"
-    assert meta["name_count"] == 70
-    assert meta["unique_name_count"] == 70
+    assert meta["name_count"] == 900
+    assert meta["unique_name_count"] == 900
     assert meta["wall_seconds"] >= 0.0
     assert meta["generation_seconds"] >= 0.0
     assert meta["model_load_seconds"] >= 0.0
@@ -261,9 +270,134 @@ def test_generate_chars2vec_embeddings_uses_single_predict_with_callbacks(monkey
     assert meta["pad_seconds"] >= 0.0
     assert meta["predict_seconds"] >= 0.0
     assert meta["materialize_seconds"] >= 0.0
-    assert len(predict_calls) == 1
-    assert predict_calls[0] == {"batch_size": 32, "verbose": 0, "callback_count": 1}
-    assert progress_updates == [1, 1, 1]
+    assert meta["execution_mode"] == "predict"
+    assert meta["requested_batch_size"] is None
+    assert meta["effective_batch_size"] == 512
+    assert meta["predict_batch_count"] == 2
+    assert meta["oom_retry_count"] == 0
+    assert len(state["predict_calls"]) == 1
+    assert state["predict_calls"][0]["batch_size"] == 512
+    assert state["predict_calls"][0]["verbose"] == 0
+    assert state["predict_calls"][0]["callback_count"] == 1
+    assert progress_updates == [1, 1]
+
+
+def test_generate_chars2vec_embeddings_auto_batches_on_cpu(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(embed_chars2vec, "_configure_tensorflow_memory_growth", lambda: (None, None))
+    monkeypatch.setattr(embed_chars2vec, "_tensorflow_gpu_available", lambda: False)
+    state = _install_fake_chars2vec_backend(monkeypatch)
+
+    names = [f"name_{idx:03d}" for idx in range(140)]
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=names,
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (140, 50)
+    assert meta["execution_mode"] == "predict"
+    assert meta["requested_batch_size"] is None
+    assert meta["effective_batch_size"] == 128
+    assert meta["predict_batch_count"] == 2
+    assert meta["oom_retry_count"] == 0
+    assert len(state["predict_calls"]) == 1
+    assert state["predict_calls"][0]["batch_size"] == 128
+
+
+def test_generate_chars2vec_embeddings_passes_manual_batch_size_through(monkeypatch: pytest.MonkeyPatch):
+    state = _install_fake_tensorflow(monkeypatch)
+    del state
+    backend_state = _install_fake_chars2vec_backend(monkeypatch)
+
+    names = [f"name_{idx:03d}" for idx in range(70)]
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=names,
+        batch_size=64,
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (70, 50)
+    assert meta["requested_batch_size"] == 64
+    assert meta["effective_batch_size"] == 64
+    assert meta["predict_batch_count"] == 2
+    assert meta["oom_retry_count"] == 0
+    assert backend_state["predict_calls"][0]["batch_size"] == 64
+
+
+def test_generate_chars2vec_embeddings_retries_gpu_oom_until_min_batch(monkeypatch: pytest.MonkeyPatch):
+    _install_fake_tensorflow(monkeypatch)
+    attempted_batches: list[int] = []
+
+    def _predict_impl(inputs, batch_size=None, verbose=None, callbacks=None, state=None):
+        del inputs, verbose, callbacks, state
+        batch = int(batch_size)
+        attempted_batches.append(batch)
+        if batch > 32:
+            raise RuntimeError(f"ResourceExhaustedError: OOM when allocating tensor for batch {batch}")
+        return np.ones((3, 50), dtype=np.float32)
+
+    _install_fake_chars2vec_backend(monkeypatch, predict_impl=_predict_impl)
+
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=["Doe J", "Roe A", "Moe B"],
+        batch_size=128,
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (3, 50)
+    assert attempted_batches == [128, 64, 32]
+    assert meta["execution_mode"] == "predict"
+    assert meta["requested_batch_size"] == 128
+    assert meta["effective_batch_size"] == 32
+    assert meta["predict_batch_count"] == 1
+    assert meta["oom_retry_count"] == 2
+
+
+def test_generate_chars2vec_embeddings_direct_call_bypasses_predict(monkeypatch: pytest.MonkeyPatch):
+    def _predict_impl(inputs, batch_size=None, verbose=None, callbacks=None, state=None):
+        del inputs, batch_size, verbose, callbacks, state
+        raise AssertionError("predict should not be used in direct_call mode")
+
+    def _direct_call_impl(inputs, training=False, state=None):
+        del state
+        total_rows = len(inputs)
+        out = np.zeros((total_rows, 50), dtype=np.float32)
+        for idx in range(total_rows):
+            out[idx, 0] = float(idx + 1)
+        return SimpleNamespace(numpy=lambda: out, training=training)
+
+    state = _install_fake_chars2vec_backend(
+        monkeypatch,
+        predict_impl=_predict_impl,
+        direct_call_impl=_direct_call_impl,
+    )
+
+    names = ["Beta", "Alpha", "beta", "Gamma", "ALPHA"]
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=names,
+        execution_mode="direct_call",
+        show_progress=True,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (5, 50)
+    assert meta["execution_mode"] == "direct_call"
+    assert meta["requested_batch_size"] is None
+    assert meta["effective_batch_size"] == 3
+    assert meta["predict_batch_count"] == 0
+    assert meta["oom_retry_count"] == 0
+    assert state["predict_calls"] == []
+    assert state["direct_call_calls"] == [{"training": False, "row_count": 3}]
+    np.testing.assert_allclose(out[0], out[2])
+    np.testing.assert_allclose(out[1], out[4])
+    assert out[0, 0] != out[1, 0]
+    assert out[1, 0] != out[3, 0]
 
 
 def test_generate_chars2vec_embeddings_restores_input_order_from_unique_inverse(monkeypatch: pytest.MonkeyPatch):
@@ -318,6 +452,38 @@ def test_generate_chars2vec_embeddings_restores_input_order_from_unique_inverse(
     np.testing.assert_allclose(out[1], out[4])
     assert out[0, 0] != out[1, 0]
     assert out[1, 0] != out[3, 0]
+
+
+def test_get_or_create_chars2vec_embeddings_cache_hit_ignores_inference_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    mentions = pd.DataFrame({"author_raw": ["Doe J", "Roe A"]})
+    cache_path = tmp_path / "chars2vec.npy"
+    cached = np.arange(100, dtype=np.float32).reshape(2, 50)
+    np.save(cache_path, cached)
+
+    def _unexpected_generate(**_kwargs):
+        raise AssertionError("cache hit should skip chars2vec generation")
+
+    monkeypatch.setattr(embed_chars2vec, "generate_chars2vec_embeddings", _unexpected_generate)
+
+    out, meta = embed_chars2vec.get_or_create_chars2vec_embeddings(
+        mentions=mentions,
+        output_path=cache_path,
+        batch_size=777,
+        execution_mode="direct_call",
+        return_meta=True,
+    )
+
+    np.testing.assert_allclose(out, cached)
+    assert meta["cache_hit"] is True
+    assert meta["generation_mode"] == "cache"
+    assert meta["execution_mode"] == "direct_call"
+    assert meta["requested_batch_size"] == 777
+    assert meta["effective_batch_size"] is None
+    assert meta["predict_batch_count"] == 0
+    assert meta["oom_retry_count"] == 0
 
 
 def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_cleanup(monkeypatch: pytest.MonkeyPatch):
