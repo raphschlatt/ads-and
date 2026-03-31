@@ -1905,6 +1905,57 @@ def cmd_run_hf_compatibility_report(args):
         ui.close()
 
 
+def cmd_run_specter_benchmark(args):
+    ui = CliUI(total_steps=1, progress=args.progress)
+    try:
+        from author_name_disambiguation.specter_benchmark import (
+            SpecterBenchmarkRequest,
+            run_specter_benchmark,
+        )
+
+        ui.start("Run SPECTER benchmark")
+        ui.info(
+            f"dataset={args.dataset_id} | bundle={Path(args.model_bundle).expanduser().resolve()} | "
+            f"parity_sample={int(args.parity_sample_size)} | throughput_sample={int(args.throughput_sample_size)} | "
+            f"provider={args.provider} | model={args.model_name}"
+        )
+        result = run_specter_benchmark(
+            SpecterBenchmarkRequest(
+                publications_path=args.publications_path,
+                references_path=args.references_path,
+                output_root=args.output_root,
+                dataset_id=args.dataset_id,
+                model_bundle=args.model_bundle,
+                provider=args.provider,
+                model_name=args.model_name,
+                hf_token_env_var=args.hf_token_env_var,
+                parity_sample_size=int(args.parity_sample_size),
+                throughput_sample_size=int(args.throughput_sample_size),
+                local_batch_size=args.local_batch_size,
+                cpu_device=args.cpu_device,
+                gpu_device=args.gpu_device,
+                api_parallelism_appendix=int(args.api_parallelism_appendix),
+                force=bool(args.force),
+                progress=bool(args.progress),
+            )
+        )
+        payload = {
+            "run_id": result.run_id,
+            "output_root": str(result.output_root),
+            "report_json_path": str(result.report_json_path),
+            "report_markdown_path": str(result.report_markdown_path),
+            "recommendation": str(result.recommendation),
+        }
+        ui.done(str(result.recommendation))
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
 def cmd_run_cluster_test_report(args):
     ui = CliUI(total_steps=6, progress=args.progress)
     try:
@@ -2487,6 +2538,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_hf_compatibility_report)
+
+    sp = sub.add_parser("run-specter-benchmark")
+    sp.add_argument("--publications-path", required=True)
+    sp.add_argument("--references-path", default=None)
+    sp.add_argument("--output-root", required=True)
+    sp.add_argument("--dataset-id", required=True)
+    sp.add_argument("--model-bundle", required=True)
+    sp.add_argument("--provider", default="hf-inference")
+    sp.add_argument("--model-name", default="allenai/specter")
+    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
+    sp.add_argument("--parity-sample-size", type=int, default=128)
+    sp.add_argument("--throughput-sample-size", type=int, default=2048)
+    sp.add_argument("--local-batch-size", type=int, default=None)
+    sp.add_argument("--cpu-device", default="cpu")
+    sp.add_argument("--gpu-device", default="cuda")
+    sp.add_argument("--api-parallelism-appendix", type=int, default=4)
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_run_specter_benchmark)
 
     sp = sub.add_parser("run-cluster-test-report")
     sp.add_argument("--model-run-id", required=True)

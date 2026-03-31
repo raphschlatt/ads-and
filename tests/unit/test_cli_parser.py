@@ -12,6 +12,7 @@ def test_build_parser_exposes_only_public_commands():
         "precompute-source-embeddings",
         "compare-infer-baseline",
         "run-hf-compatibility-report",
+        "run-specter-benchmark",
         "run-cluster-test-report",
         "export-model-bundle",
     }
@@ -260,6 +261,41 @@ def test_run_hf_compatibility_report_parser_defaults():
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_hf_compatibility_report
+
+
+def test_run_specter_benchmark_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-specter-benchmark",
+            "--publications-path",
+            "publications.parquet",
+            "--output-root",
+            "out",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            "/tmp/bundle",
+        ]
+    )
+    assert args.command == "run-specter-benchmark"
+    assert args.publications_path == "publications.parquet"
+    assert args.references_path is None
+    assert args.output_root == "out"
+    assert args.dataset_id == "my_ads_2026"
+    assert args.model_bundle == "/tmp/bundle"
+    assert args.provider == "hf-inference"
+    assert args.model_name == "allenai/specter"
+    assert args.hf_token_env_var == "HF_TOKEN"
+    assert args.parity_sample_size == 128
+    assert args.throughput_sample_size == 2048
+    assert args.local_batch_size is None
+    assert args.cpu_device == "cpu"
+    assert args.gpu_device == "cuda"
+    assert args.api_parallelism_appendix == 4
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_run_specter_benchmark
 
 
 def test_run_cluster_test_report_parser_defaults():

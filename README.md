@@ -10,6 +10,7 @@ The installed surface is intentionally small:
 - `precompute-source-embeddings`
 - `run-infer-sources`
 - `run-hf-compatibility-report`
+- `run-specter-benchmark`
 
 The public Python API for inference surfaces is intentionally small:
 
@@ -150,6 +151,23 @@ author-name-disambiguation run-hf-compatibility-report \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
 ```
 
+Benchmark API vs CPU vs GPU SPECTER on ADS-like inputs:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-specter-benchmark \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/benchmarks/ads_prod_current_specter \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
+```
+
+This writes:
+
+- `specter_benchmark_report.json`
+- `specter_benchmark_report.md`
+
 ## Programmatic Inference
 
 ```python
@@ -221,6 +239,12 @@ The HF path is intentionally narrow in Welle 1:
 - token source: `HF_TOKEN`
 
 Promotion of the HF path is gated by `run-hf-compatibility-report`. Until that report passes for a given bundle, treat remote HF SPECTER as experimental rather than automatically bundle-compatible.
+
+For a broader operational comparison of `hf_api` vs local CPU vs local GPU, use `run-specter-benchmark`.
+That benchmark intentionally separates:
+
+- Track A: notebook/SPECTER parity with `max_length=512`
+- Track B: current bundle parity with the bundle token cap, currently `256`
 
 Inference outputs under `output_root`:
 

@@ -237,11 +237,26 @@ def _read_assignment_snapshot(path: Path) -> pd.DataFrame:
     return frame[["mention_id", "author_uid"]].astype(str).sort_values("mention_id").reset_index(drop=True)
 
 
+def _canonicalize_cluster_assignments(frame: pd.DataFrame) -> pd.DataFrame:
+    if len(frame) == 0:
+        return pd.DataFrame(columns=["mention_id", "cluster_key"])
+    grouped = (
+        frame.groupby("author_uid", sort=False)["mention_id"]
+        .apply(lambda values: tuple(sorted(values.astype(str).tolist())))
+        .reset_index(name="cluster_members")
+    )
+    grouped["cluster_key"] = grouped["cluster_members"].map(lambda members: "||".join(members))
+    out = frame.merge(grouped[["author_uid", "cluster_key"]], on="author_uid", how="left")
+    return out[["mention_id", "cluster_key"]].astype(str).sort_values("mention_id").reset_index(drop=True)
+
+
 def _compare_infer_outputs(local_result, hf_result) -> dict[str, Any]:
     local_clusters = _read_assignment_snapshot(local_result.mention_clusters_path)
     hf_clusters = _read_assignment_snapshot(hf_result.mention_clusters_path)
-    merged = local_clusters.merge(
-        hf_clusters,
+    local_canonical = _canonicalize_cluster_assignments(local_clusters)
+    hf_canonical = _canonicalize_cluster_assignments(hf_clusters)
+    merged = local_canonical.merge(
+        hf_canonical,
         on="mention_id",
         how="outer",
         suffixes=("_local", "_hf"),
@@ -250,9 +265,9 @@ def _compare_infer_outputs(local_result, hf_result) -> dict[str, Any]:
     changed_assignments = int(
         (
             merged["_merge"].eq("both")
-            & merged["author_uid_local"].notna()
-            & merged["author_uid_hf"].notna()
-            & merged["author_uid_local"].ne(merged["author_uid_hf"])
+            & merged["cluster_key_local"].notna()
+            & merged["cluster_key_hf"].notna()
+            & merged["cluster_key_local"].ne(merged["cluster_key_hf"])
         ).sum()
     )
     missing_mentions = int((merged["_merge"] != "both").sum())

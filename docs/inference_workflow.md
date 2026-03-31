@@ -95,6 +95,45 @@ The report includes:
 
 If the gate fails, the HF path stays experimental even if the remote vectors are shape-compatible.
 
+## API vs CPU vs GPU Benchmark
+
+Use the dedicated benchmark when you want a like-for-like comparison of:
+
+- local GPU SPECTER
+- local CPU SPECTER
+- HF remote SPECTER without client-side truncation
+- HF remote SPECTER with client-side tokenizer truncation
+
+Example:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-specter-benchmark \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/benchmarks/ads_prod_current_specter \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
+```
+
+The benchmark writes:
+
+- `specter_benchmark_report.json`
+- `specter_benchmark_report.md`
+
+The report is split into two tracks:
+
+- Track A: notebook/SPECTER parity with `max_length=512`
+- Track B: bundle parity with the current bundle token cap, currently `256`
+
+It also reports:
+
+- whether the raw HF path breaks on long ADS-style texts
+- whether client-side tokenizer truncation restores a viable HF path
+- throughput and cosine parity across API, CPU, and GPU
+- a source-based full-run interpolation
+- a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
+
 ## Optional Controls
 
 - `--infer-stage smoke|mini|mid|full`

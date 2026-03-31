@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from author_name_disambiguation import cli
+from author_name_disambiguation.hf_compatibility_report import _compare_infer_outputs
 from author_name_disambiguation.infer_sources import InferSourcesResult
 
 
@@ -142,3 +143,27 @@ def test_cli_run_hf_compatibility_report_writes_json_and_markdown(monkeypatch, t
     assert report_json["mini_cpu_infer"]["go"] is True
     assert "Status: `PASS`" in report_md
     assert len(calls) == 3
+
+
+def test_compare_infer_outputs_is_label_invariant(tmp_path: Path):
+    local = _make_infer_result(
+        tmp_path / "local",
+        mention_rows=[
+            {"mention_id": "m1", "author_uid": "u_local_1", "block_key": "blk"},
+            {"mention_id": "m2", "author_uid": "u_local_1", "block_key": "blk"},
+            {"mention_id": "m3", "author_uid": "u_local_2", "block_key": "blk"},
+        ],
+    )
+    hf = _make_infer_result(
+        tmp_path / "hf",
+        mention_rows=[
+            {"mention_id": "m1", "author_uid": "u_hf_alpha", "block_key": "blk"},
+            {"mention_id": "m2", "author_uid": "u_hf_alpha", "block_key": "blk"},
+            {"mention_id": "m3", "author_uid": "u_hf_beta", "block_key": "blk"},
+        ],
+    )
+
+    compare = _compare_infer_outputs(local, hf)
+
+    assert compare["passed"] is True
+    assert compare["changed_assignments"] == 0
