@@ -292,7 +292,7 @@ def test_run_specter_benchmark_parser_defaults():
     assert args.local_batch_size is None
     assert args.cpu_device == "cpu"
     assert args.gpu_device == "cuda"
-    assert args.api_parallelism_appendix == 4
+    assert args.api_concurrency == 4
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_specter_benchmark

@@ -101,8 +101,9 @@ Use the dedicated benchmark when you want a like-for-like comparison of:
 
 - local GPU SPECTER
 - local CPU SPECTER
-- HF remote SPECTER without client-side truncation
-- HF remote SPECTER with client-side tokenizer truncation
+- HF remote SPECTER with the same client-side tokenizer truncation used by the live inference path
+
+The raw HF path is still probed, but only as a small diagnostic for long-text failures rather than as a first-class throughput mode.
 
 Example:
 
@@ -129,7 +130,7 @@ The report is split into two tracks:
 It also reports:
 
 - whether the raw HF path breaks on long ADS-style texts
-- whether client-side tokenizer truncation restores a viable HF path
+- whether the cap-aligned truncated HF path stays viable against local CPU/GPU references
 - throughput and cosine parity across API, CPU, and GPU
 - a source-based full-run interpolation
 - a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough

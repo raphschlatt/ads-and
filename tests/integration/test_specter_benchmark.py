@@ -114,8 +114,8 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
         lambda model_name, device: (_FakeSession("gpu" if device == "cuda" else "cpu"), {"available": True}),
     )
 
-    def _fake_hf_mode(*, sample, mode_name, cap=None, parallelism=1, **_kwargs):
-        value = 3.0 if "parallel4" not in mode_name else 4.0
+    def _fake_hf_mode(*, sample, mode_name, cap=None, api_concurrency=4, **_kwargs):
+        value = 3.0
         vectors = np.vstack([np.full((1, 768), fill_value=value + idx, dtype=np.float32) for idx in range(len(sample.texts))])
         success_mask = np.ones((len(sample.texts),), dtype=bool)
         return benchmark_module._ModeRun(
@@ -124,14 +124,14 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
             vectors=vectors,
             attempted_mask=np.ones((len(sample.texts),), dtype=bool),
             success_mask=success_mask,
-            per_item_wall_seconds=np.full((len(sample.texts),), 0.3 if parallelism == 1 else 0.12, dtype=np.float64),
+            per_item_wall_seconds=np.full((len(sample.texts),), 0.12, dtype=np.float64),
             raw_shapes=[str([cap or 128, 768])] * len(sample.texts),
             sent_token_counts=np.full((len(sample.texts),), float(cap or 128), dtype=np.float64),
             errors=[None] * len(sample.texts),
             load_seconds=0.0,
-            processing_wall_seconds=(0.3 if parallelism == 1 else 0.12) * len(sample.texts),
-            total_wall_seconds=(0.3 if parallelism == 1 else 0.12) * len(sample.texts),
-            meta={"parallelism": int(parallelism), "cap": cap},
+            processing_wall_seconds=0.12 * len(sample.texts),
+            total_wall_seconds=0.12 * len(sample.texts),
+            meta={"api_concurrency": int(api_concurrency), "cap": cap},
         )
 
     monkeypatch.setattr(benchmark_module, "_run_hf_mode", _fake_hf_mode)
@@ -194,7 +194,9 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     assert payload["recommendation"] == report_json["decision"]["recommendation"]
     assert report_json["tracks"]["track_a"]["cap"] == 512
     assert report_json["tracks"]["track_b"]["cap"] == 256
+    assert report_json["raw_hf_probe"]["mode"]["texts_successful"] == report_json["raw_hf_probe"]["mode"]["texts_total"]
     assert report_json["tracks"]["track_b"]["downstream"]["smoke"]["passed"] is True
     assert report_json["extrapolation"]["track_b"]["cpu_infer_tail"]["chosen_method"] == "pair_scaled"
     assert "SPECTER Benchmark Report" in report_md
+    assert "Raw HF Probe" in report_md
     assert "Track B Downstream" in report_md

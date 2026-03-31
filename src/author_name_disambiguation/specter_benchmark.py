@@ -1,19 +1,20 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 from dataclasses import dataclass
 import ast
+import importlib.util
 import json
 import os
 import platform
 import shutil
 import sys
 import tempfile
-import threading
 from pathlib import Path
-from time import perf_counter, sleep
+from time import perf_counter
 from typing import Any
 
+import httpx
 import numpy as np
 import pandas as pd
 
@@ -40,7 +41,7 @@ _TRACK_A_CAP = 512
 _DEFAULT_TRACK_B_CAP = 256
 _DEFAULT_PARITY_SAMPLE_SIZE = 128
 _DEFAULT_THROUGHPUT_SAMPLE_SIZE = 2048
-_DEFAULT_API_PARALLELISM_APPENDIX = 4
+_DEFAULT_API_CONCURRENCY = 4
 _DEFAULT_MAX_RETRIES = 5
 _DEFAULT_BASE_BACKOFF_SECONDS = 1.0
 _DEFAULT_MAX_BACKOFF_SECONDS = 30.0
@@ -61,7 +62,7 @@ class SpecterBenchmarkRequest:
     local_batch_size: int | None = None
     cpu_device: str = "cpu"
     gpu_device: str = "cuda"
-    api_parallelism_appendix: int = _DEFAULT_API_PARALLELISM_APPENDIX
+    api_concurrency: int = _DEFAULT_API_CONCURRENCY
     force: bool = False
     progress: bool = True
 
@@ -502,29 +503,22 @@ def _summarize_mode_run(
     return summary
 
 
-def _sum_seconds_suffix(mapping: dict[str, Any] | None) -> float:
-    if not isinstance(mapping, dict):
-        return 0.0
-    total = 0.0
-    for key, value in mapping.items():
-        if not key.endswith("_seconds"):
-            continue
-        if isinstance(value, (int, float)):
-            total += float(value)
-    return float(total)
+def _hf_http2_enabled() -> bool:
+    return importlib.util.find_spec("h2") is not None
 
 
-def _build_hf_client(*, provider: str, api_key: str):
-    from huggingface_hub import InferenceClient
+def _build_hf_feature_extraction_url(*, provider: str, model_name: str) -> str:
+    from huggingface_hub import constants
 
-    return InferenceClient(provider=provider, api_key=api_key)
+    base_url = constants.INFERENCE_PROXY_TEMPLATE.format(provider=provider)
+    return f"{base_url}/models/{model_name}/pipeline/feature-extraction"
 
 
-def _request_hf_single(
+async def _request_hf_single_async(
     *,
-    client: Any,
+    client: httpx.AsyncClient,
+    url: str,
     text: str,
-    model_name: str,
     max_retries: int = _DEFAULT_MAX_RETRIES,
     base_backoff_seconds: float = _DEFAULT_BASE_BACKOFF_SECONDS,
     max_backoff_seconds: float = _DEFAULT_MAX_BACKOFF_SECONDS,
@@ -532,21 +526,19 @@ def _request_hf_single(
     started_at = perf_counter()
     attempts = 0
     backoff_seconds_total = 0.0
+    request_payload = {
+        "inputs": text,
+        "parameters": {
+            "truncate": True,
+            "truncation_direction": "Right",
+        },
+    }
     while True:
         attempts += 1
         try:
-            try:
-                payload = client.feature_extraction(
-                    text,
-                    model=model_name,
-                    truncate=True,
-                    truncation_direction="Right",
-                )
-            except TypeError as exc:
-                message = str(exc)
-                if "truncate" not in message and "truncation_direction" not in message:
-                    raise
-                payload = client.feature_extraction(text, model=model_name)
+            response = await client.post(url, json=request_payload)
+            response.raise_for_status()
+            payload = response.json()
             arr = np.asarray(payload, dtype=np.float32)
             vector = _normalize_hf_batch_response(arr, expected_items=1)[0]
             return vector.astype(np.float32, copy=False), {
@@ -558,11 +550,16 @@ def _request_hf_single(
         except Exception as exc:
             should_retry = attempts <= int(max_retries) and _is_retryable_hf_error(exc)
             if not should_retry:
+                detail = str(exc)
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                    body = exc.response.text.strip()
+                    if body:
+                        detail = f"HTTP {exc.response.status_code}: {body[:240]}"
                 raise RuntimeError(
-                    f"HF feature_extraction failed after {attempts} attempt(s): {type(exc).__name__}: {exc}"
+                    f"HF feature_extraction failed after {attempts} attempt(s): {type(exc).__name__}: {detail}"
                 ) from exc
             delay = min(float(max_backoff_seconds), float(base_backoff_seconds) * (2 ** (attempts - 1)))
-            sleep(delay)
+            await asyncio.sleep(delay)
             backoff_seconds_total += float(delay)
 
 
@@ -576,8 +573,7 @@ def _run_hf_mode(
     tokenizer: Any,
     cap: int | None = None,
     progress: bool,
-    skip_token_count_gt_512: bool = False,
-    parallelism: int = 1,
+    api_concurrency: int = _DEFAULT_API_CONCURRENCY,
 ) -> _ModeRun:
     texts_total = len(sample.texts)
     vectors = np.full((texts_total, 768), np.nan, dtype=np.float32)
@@ -591,91 +587,67 @@ def _run_hf_mode(
     provider = _normalize_provider(provider)
     model_name = _normalize_model_name(model_name)
     api_key = _resolve_hf_token(hf_token_env_var)
-    client_local = threading.local()
+    effective_concurrency = max(1, int(api_concurrency))
+    http2_enabled = _hf_http2_enabled()
+    request_url = _build_hf_feature_extraction_url(provider=provider, model_name=model_name)
 
-    def _client_for_thread():
-        client = getattr(client_local, "client", None)
-        if client is None:
-            client = _build_hf_client(provider=provider, api_key=api_key)
-            client_local.client = client
-        return client
-
-    def _prepare_text(idx: int) -> tuple[str | None, int | None, int | None, str | None]:
+    def _prepare_text(idx: int) -> tuple[str, int]:
         raw_tokens = int(sample.raw_token_counts[idx])
-        if skip_token_count_gt_512 and raw_tokens > 512:
-            return None, None, None, "known_unsupported_raw_token_count_gt_512"
-        if mode_name == "hf_api_raw":
-            return sample.texts[idx], raw_tokens, raw_tokens, None
         if cap is None:
-            raise ValueError(f"cap is required for mode {mode_name!r}")
-        sent_text, truncated_input_ids, retokenized_tokens = _truncate_text_to_cap(
+            return sample.texts[idx], raw_tokens
+        sent_text, _truncated_input_ids, retokenized_tokens = _truncate_text_to_cap(
             sample.texts[idx],
             tokenizer=tokenizer,
             cap=int(cap),
         )
-        return sent_text, truncated_input_ids, retokenized_tokens, None
+        return sent_text, int(retokenized_tokens)
 
-    def _run_one(idx: int) -> tuple[int, np.ndarray | None, dict[str, Any], str | None]:
-        sent_text, sent_tokens, final_tokens, skip_reason = _prepare_text(idx)
-        if skip_reason is not None:
-            return idx, None, {"wall_seconds": 0.0, "raw_shape": None, "sent_token_count": None}, skip_reason
-        client = _client_for_thread()
-        vector, meta = _request_hf_single(client=client, text=str(sent_text), model_name=model_name)
-        meta["sent_token_count"] = int(final_tokens if final_tokens is not None else sent_tokens or 0)
-        return idx, vector, meta, None
+    async def _run_all(tracker: Any) -> None:
+        timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)
+        limits = httpx.Limits(
+            max_connections=int(effective_concurrency),
+            max_keepalive_connections=int(effective_concurrency),
+        )
+        headers = {"Authorization": f"Bearer {api_key}"}
+        semaphore = asyncio.Semaphore(int(effective_concurrency))
+
+        async with httpx.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            limits=limits,
+            http2=bool(http2_enabled),
+        ) as client:
+
+            async def _run_one(idx: int) -> None:
+                attempted_mask[idx] = True
+                sent_text, sent_token_count = _prepare_text(idx)
+                try:
+                    async with semaphore:
+                        vector, meta = await _request_hf_single_async(
+                            client=client,
+                            url=request_url,
+                            text=str(sent_text),
+                        )
+                    vectors[idx] = vector
+                    success_mask[idx] = True
+                    per_item_wall_seconds[idx] = float(meta.get("wall_seconds") or 0.0)
+                    sent_token_counts[idx] = float(sent_token_count)
+                    raw_shapes[idx] = None if meta.get("raw_shape") is None else str(meta["raw_shape"])
+                except Exception as exc:
+                    errors[idx] = str(exc)
+                finally:
+                    tracker.update(1)
+
+            await asyncio.gather(*(_run_one(idx) for idx in range(texts_total)))
 
     started_at = perf_counter()
-    effective_parallelism = max(1, int(parallelism))
     with loop_progress(
         total=texts_total,
         label=f"{mode_name} {sample.name}",
         enabled=bool(progress),
         unit="text",
     ) as tracker:
-        if effective_parallelism == 1:
-            for idx in range(texts_total):
-                attempted_mask[idx] = True
-                try:
-                    item_idx, vector, meta, skip_reason = _run_one(idx)
-                    per_item_wall_seconds[item_idx] = float(meta.get("wall_seconds") or 0.0)
-                    sent_token_counts[item_idx] = float(meta.get("sent_token_count")) if meta.get("sent_token_count") is not None else np.nan
-                    raw_shapes[item_idx] = None if meta.get("raw_shape") is None else str(meta["raw_shape"])
-                    if skip_reason is None and vector is not None:
-                        vectors[item_idx] = vector
-                        success_mask[item_idx] = True
-                    else:
-                        errors[item_idx] = str(skip_reason)
-                except Exception as exc:
-                    errors[idx] = str(exc)
-                tracker.update(1)
-        else:
-            futures = {}
-            with ThreadPoolExecutor(max_workers=effective_parallelism) as pool:
-                for idx in range(texts_total):
-                    attempted_mask[idx] = True
-                    futures[pool.submit(_run_one, idx)] = idx
-                for future in as_completed(futures):
-                    idx = futures[future]
-                    try:
-                        item_idx, vector, meta, skip_reason = future.result()
-                        per_item_wall_seconds[item_idx] = float(meta.get("wall_seconds") or 0.0)
-                        sent_token_counts[item_idx] = float(meta.get("sent_token_count")) if meta.get("sent_token_count") is not None else np.nan
-                        raw_shapes[item_idx] = None if meta.get("raw_shape") is None else str(meta["raw_shape"])
-                        if skip_reason is None and vector is not None:
-                            vectors[item_idx] = vector
-                            success_mask[item_idx] = True
-                        else:
-                            errors[item_idx] = str(skip_reason)
-                    except Exception as exc:
-                        errors[idx] = str(exc)
-                    tracker.update(1)
-
-    if skip_token_count_gt_512:
-        skip_mask = sample.raw_token_counts > 512
-        attempted_mask[skip_mask] = False
-        success_mask[skip_mask] = False
-        for idx in np.where(skip_mask)[0]:
-            errors[idx] = "known_unsupported_raw_token_count_gt_512"
+        asyncio.run(_run_all(tracker))
 
     total_wall_seconds = perf_counter() - started_at
     return _ModeRun(
@@ -694,9 +666,10 @@ def _run_hf_mode(
         meta={
             "provider": provider,
             "model_name": model_name,
-            "parallelism": int(effective_parallelism),
+            "transport": "httpx_async_pool",
+            "api_concurrency": int(effective_concurrency),
+            "http2_enabled": bool(http2_enabled),
             "client_truncation_cap": None if cap is None else int(cap),
-            "skip_token_count_gt_512": bool(skip_token_count_gt_512),
         },
     )
 
@@ -819,8 +792,7 @@ def _build_track_sample_report(
     cap: int,
     reference: _ModeRun,
     local_cpu: _ModeRun,
-    hf_raw: _ModeRun,
-    hf_client_truncated: _ModeRun,
+    hf_api: _ModeRun,
 ) -> dict[str, Any]:
     return {
         "sample_name": sample.name,
@@ -836,15 +808,8 @@ def _build_track_sample_report(
                 reference_vectors=reference.vectors,
                 reference_success_mask=reference.success_mask,
             ),
-            hf_raw.mode: _summarize_mode_run(
-                hf_raw,
-                sample,
-                cap=cap,
-                reference_vectors=reference.vectors,
-                reference_success_mask=reference.success_mask,
-            ),
-            hf_client_truncated.mode: _summarize_mode_run(
-                hf_client_truncated,
+            hf_api.mode: _summarize_mode_run(
+                hf_api,
                 sample,
                 cap=cap,
                 reference_vectors=reference.vectors,
@@ -1048,6 +1013,7 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
     throughput_a = track_a["throughput_sample"]["modes"]
     throughput_b = track_b["throughput_sample"]["modes"]
     decision = payload["decision"]
+    raw_probe = payload["raw_hf_probe"]["mode"]
     lines = [
         "# SPECTER Benchmark Report",
         "",
@@ -1055,7 +1021,7 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Bundle: `{payload['model_bundle']}`",
         f"- Recommendation: `{decision['recommendation']}`",
         f"- Raw HF API feasible on long ADS texts: `{decision['hf_api_raw_long_text_feasible']}`",
-        f"- HF API with client-side truncation viable for Track B: `{decision['hf_api_client_truncated_track_b_viable']}`",
+        f"- HF API with client-side truncation viable for Track B: `{decision['hf_api_truncated_track_b_viable']}`",
         "",
         "## Why The Notebook MWE Works",
         "",
@@ -1075,16 +1041,20 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         "",
         f"- local_gpu texts/sec: `{throughput_a['local_gpu']['texts_per_second']}`",
         f"- local_cpu texts/sec: `{throughput_a['local_cpu']['texts_per_second']}`",
-        f"- hf_api_raw success/full: `{throughput_a['hf_api_raw']['texts_successful']}` / `{throughput_a['hf_api_raw']['texts_total']}`",
-        f"- hf_api_client_truncated texts/sec: `{throughput_a['hf_api_client_truncated']['texts_per_second']}`",
+        f"- hf_api_truncated texts/sec: `{throughput_a['hf_api_truncated']['texts_per_second']}`",
+        f"- hf_api_truncated api_concurrency: `{throughput_a['hf_api_truncated']['meta']['api_concurrency']}`",
         "",
         "## Track B Throughput",
         "",
         f"- local_gpu texts/sec: `{throughput_b['local_gpu']['texts_per_second']}`",
         f"- local_cpu texts/sec: `{throughput_b['local_cpu']['texts_per_second']}`",
-        f"- hf_api_raw success/full: `{throughput_b['hf_api_raw']['texts_successful']}` / `{throughput_b['hf_api_raw']['texts_total']}`",
-        f"- hf_api_client_truncated texts/sec: `{throughput_b['hf_api_client_truncated']['texts_per_second']}`",
-        f"- hf_api_client_truncated cosine mean vs local_gpu: `{throughput_b['hf_api_client_truncated']['cosine_vs_local_gpu']['mean_cosine_similarity']}`",
+        f"- hf_api_truncated texts/sec: `{throughput_b['hf_api_truncated']['texts_per_second']}`",
+        f"- hf_api_truncated cosine mean vs local_gpu: `{throughput_b['hf_api_truncated']['cosine_vs_local_gpu']['mean_cosine_similarity']}`",
+        "",
+        "## Raw HF Probe",
+        "",
+        f"- Success/full on parity sample: `{raw_probe['texts_successful']}` / `{raw_probe['texts_total']}`",
+        f"- Failed texts on parity sample: `{raw_probe['texts_failed']}`",
     ]
     downstream = track_b.get("downstream")
     if downstream:
@@ -1115,7 +1085,7 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
             "",
             f"- Track A local_gpu embed-only full seconds: `{extrap['track_a']['embedding_only']['local_gpu']['full_embed_seconds']}`",
             f"- Track B local_cpu embed-only full seconds: `{extrap['track_b']['embedding_only']['local_cpu']['full_embed_seconds']}`",
-            f"- Track B hf_api_client_truncated embed-only full seconds: `{extrap['track_b']['embedding_only']['hf_api_client_truncated']['full_embed_seconds']}`",
+            f"- Track B hf_api_truncated embed-only full seconds: `{extrap['track_b']['embedding_only']['hf_api_truncated']['full_embed_seconds']}`",
         ]
     )
     tail = extrap["track_b"].get("cpu_infer_tail")
@@ -1123,7 +1093,7 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         lines.extend(
             [
                 f"- Track B chosen CPU tail seconds: `{tail['chosen_tail_seconds']}`",
-                f"- Track B hf_api_client_truncated end-to-end full seconds: `{extrap['track_b']['end_to_end']['hf_api_client_truncated_full_seconds']}`",
+                f"- Track B hf_api_truncated end-to-end full seconds: `{extrap['track_b']['end_to_end']['hf_api_truncated_full_seconds']}`",
             ]
         )
     lines.extend(
@@ -1132,8 +1102,9 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
             "## Interpretation",
             "",
             "- The notebook MWE succeeds because it is a short paper text and stays below the problematic raw long-text regime.",
-            "- The raw HF endpoint is reported separately from the client-truncated API path so long-text provider failures do not get hidden.",
-            "- Track A is the apples-to-apples SPECTER/Notebook view; Track B is the actual bundle view.",
+            "- The main comparison is cap-aligned with the live inference path: local GPU, local CPU, and HF API all use the same tokenizer truncation per track.",
+            "- The raw HF endpoint is kept only as a small diagnostic probe so long-text provider failures stay visible without dominating the benchmark.",
+            "- Track A is the notebook/SPECTER view; Track B is the actual bundle view.",
         ]
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1232,9 +1203,9 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
     if local_cpu_session is None:
         raise RuntimeError(f"Benchmark requires a working CPU session: {local_cpu_meta.get('error')}")
 
-    hf_raw_parity = _run_hf_mode(
+    hf_raw_probe = _run_hf_mode(
         sample=parity_sample,
-        mode_name="hf_api_raw",
+        mode_name="hf_api_raw_probe",
         model_name=model_name,
         provider=request.provider,
         hf_token_env_var=request.hf_token_env_var,
@@ -1242,12 +1213,12 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
         progress=bool(request.progress),
     )
     raw_long_text_failure = any(
-        (not bool(hf_raw_parity.success_mask[idx])) and int(parity_sample.raw_token_counts[idx]) > 512
+        (not bool(hf_raw_probe.success_mask[idx])) and int(parity_sample.raw_token_counts[idx]) > 512
         for idx in range(len(parity_sample.texts))
-        if bool(hf_raw_parity.attempted_mask[idx])
+        if bool(hf_raw_probe.attempted_mask[idx])
     )
 
-    def _run_track(cap: int, *, sample: _BenchmarkSample, raw_mode: _ModeRun) -> dict[str, Any]:
+    def _run_track(cap: int, *, sample: _BenchmarkSample) -> tuple[dict[str, Any], _ModeRun, _ModeRun, _ModeRun]:
         local_gpu = local_gpu_session.run(
             sample=sample,
             cap=int(cap),
@@ -1260,41 +1231,31 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             batch_size=request.local_batch_size,
             progress=bool(request.progress),
         )
-        hf_client_truncated = _run_hf_mode(
+        hf_api = _run_hf_mode(
             sample=sample,
-            mode_name="hf_api_client_truncated",
+            mode_name="hf_api_truncated",
             model_name=model_name,
             provider=request.provider,
             hf_token_env_var=request.hf_token_env_var,
             tokenizer=tokenizer,
             cap=int(cap),
             progress=bool(request.progress),
+            api_concurrency=int(request.api_concurrency),
         )
-        return _build_track_sample_report(
+        report = _build_track_sample_report(
             sample=sample,
             cap=int(cap),
             reference=local_gpu,
             local_cpu=local_cpu,
-            hf_raw=raw_mode,
-            hf_client_truncated=hf_client_truncated,
+            hf_api=hf_api,
         )
-
-    hf_raw_throughput = _run_hf_mode(
-        sample=throughput_sample,
-        mode_name="hf_api_raw",
-        model_name=model_name,
-        provider=request.provider,
-        hf_token_env_var=request.hf_token_env_var,
-        tokenizer=tokenizer,
-        progress=bool(request.progress),
-        skip_token_count_gt_512=bool(raw_long_text_failure),
-    )
+        return report, local_gpu, local_cpu, hf_api
 
     mwe_local_gpu = local_gpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
     mwe_local_cpu = local_cpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
     mwe_hf_raw = _run_hf_mode(
         sample=mwe_sample,
-        mode_name="hf_api_raw",
+        mode_name="hf_api_raw_probe",
         model_name=model_name,
         provider=request.provider,
         hf_token_env_var=request.hf_token_env_var,
@@ -1303,60 +1264,35 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
     )
     mwe_hf_truncated = _run_hf_mode(
         sample=mwe_sample,
-        mode_name="hf_api_client_truncated",
+        mode_name="hf_api_truncated",
         model_name=model_name,
         provider=request.provider,
         hf_token_env_var=request.hf_token_env_var,
         tokenizer=tokenizer,
         cap=_TRACK_A_CAP,
         progress=False,
+        api_concurrency=int(request.api_concurrency),
     )
 
-    track_a_parity = _run_track(_TRACK_A_CAP, sample=parity_sample, raw_mode=hf_raw_parity)
-    track_a_throughput = _run_track(_TRACK_A_CAP, sample=throughput_sample, raw_mode=hf_raw_throughput)
-    track_b_parity = _run_track(track_b_cap, sample=parity_sample, raw_mode=hf_raw_parity)
-    track_b_throughput = _run_track(track_b_cap, sample=throughput_sample, raw_mode=hf_raw_throughput)
-
-    appendix_parallel = _run_hf_mode(
+    track_a_parity, _, _, _ = _run_track(_TRACK_A_CAP, sample=parity_sample)
+    track_a_throughput, _, _, _ = _run_track(_TRACK_A_CAP, sample=throughput_sample)
+    track_b_parity, _, _, _ = _run_track(track_b_cap, sample=parity_sample)
+    track_b_throughput, track_b_throughput_local_gpu, _, track_b_throughput_hf_api = _run_track(
+        track_b_cap,
         sample=throughput_sample,
-        mode_name="hf_api_client_truncated_parallel4",
-        model_name=model_name,
-        provider=request.provider,
-        hf_token_env_var=request.hf_token_env_var,
-        tokenizer=tokenizer,
-        cap=track_b_cap,
-        progress=bool(request.progress),
-        parallelism=max(1, int(request.api_parallelism_appendix)),
     )
 
     downstream = None
-    track_b_reference_summary = track_b_throughput["modes"]["local_gpu"]
-    track_b_candidate_summary = track_b_throughput["modes"]["hf_api_client_truncated"]
+    track_b_candidate_summary = track_b_throughput["modes"]["hf_api_truncated"]
     if (
         isinstance(track_b_candidate_summary.get("cosine_vs_local_gpu"), dict)
         and bool(track_b_candidate_summary["texts_successful"] == track_b_candidate_summary["texts_total"])
     ):
-        track_b_local_gpu_vectors = local_gpu_session.run(
-            sample=throughput_sample,
-            cap=track_b_cap,
-            batch_size=request.local_batch_size,
-            progress=False,
-        ).vectors
-        track_b_hf_vectors = _run_hf_mode(
-            sample=throughput_sample,
-            mode_name="hf_api_client_truncated",
-            model_name=model_name,
-            provider=request.provider,
-            hf_token_env_var=request.hf_token_env_var,
-            tokenizer=tokenizer,
-            cap=track_b_cap,
-            progress=False,
-        ).vectors
         downstream = _run_track_b_downstream(
             output_root=output_root,
             sample=throughput_sample,
-            local_gpu_vectors=track_b_local_gpu_vectors,
-            hf_vectors=track_b_hf_vectors,
+            local_gpu_vectors=track_b_throughput_local_gpu.vectors,
+            hf_vectors=track_b_throughput_hf_api.vectors,
             model_bundle=request.model_bundle,
             dataset_id=request.dataset_id,
         )
@@ -1370,26 +1306,16 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
     track_a_embedding_only = {
         "local_gpu": _embedding_extrapolation(track_a_throughput["modes"]["local_gpu"], full_source_rows),
         "local_cpu": _embedding_extrapolation(track_a_throughput["modes"]["local_cpu"], full_source_rows),
-        "hf_api_raw": _embedding_extrapolation(track_a_throughput["modes"]["hf_api_raw"], full_source_rows),
-        "hf_api_client_truncated": _embedding_extrapolation(
-            track_a_throughput["modes"]["hf_api_client_truncated"],
+        "hf_api_truncated": _embedding_extrapolation(
+            track_a_throughput["modes"]["hf_api_truncated"],
             full_source_rows,
         ),
     }
     track_b_embedding_only = {
         "local_gpu": _embedding_extrapolation(track_b_throughput["modes"]["local_gpu"], full_source_rows),
         "local_cpu": _embedding_extrapolation(track_b_throughput["modes"]["local_cpu"], full_source_rows),
-        "hf_api_raw": _embedding_extrapolation(track_b_throughput["modes"]["hf_api_raw"], full_source_rows),
-        "hf_api_client_truncated": _embedding_extrapolation(
-            track_b_throughput["modes"]["hf_api_client_truncated"],
-            full_source_rows,
-        ),
-        "hf_api_client_truncated_parallel4": _embedding_extrapolation(
-            _summarize_mode_run(
-                appendix_parallel,
-                throughput_sample,
-                cap=track_b_cap,
-            ),
+        "hf_api_truncated": _embedding_extrapolation(
+            track_b_throughput["modes"]["hf_api_truncated"],
             full_source_rows,
         ),
     }
@@ -1400,21 +1326,21 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
         full_pairs=int(full_ads_scaling["pair_upper_bound"]),
     )
     end_to_end = {
-        "hf_api_client_truncated_full_seconds": None,
+        "hf_api_truncated_full_seconds": None,
         "local_cpu_full_seconds": None,
     }
     if cpu_tail is not None:
-        hf_embed = track_b_embedding_only["hf_api_client_truncated"].get("full_embed_seconds")
+        hf_embed = track_b_embedding_only["hf_api_truncated"].get("full_embed_seconds")
         cpu_embed = track_b_embedding_only["local_cpu"].get("full_embed_seconds")
         if isinstance(hf_embed, (int, float)):
-            end_to_end["hf_api_client_truncated_full_seconds"] = float(hf_embed + cpu_tail["chosen_tail_seconds"])
+            end_to_end["hf_api_truncated_full_seconds"] = float(hf_embed + cpu_tail["chosen_tail_seconds"])
         if isinstance(cpu_embed, (int, float)):
             end_to_end["local_cpu_full_seconds"] = float(cpu_embed + cpu_tail["chosen_tail_seconds"])
 
     recommendation = (
-        "HF API with client-side tokenizer truncation is benchmark-ready for Track B."
+        "Track B benchmark passes with pooled HF API after client-side tokenizer truncation."
         if downstream and downstream.get("smoke", {}).get("passed")
-        else "Keep HF raw experimental; evaluate Track B only through client-side tokenizer truncation."
+        else "HF stays experimental unless the cap-aligned truncated API path passes Track B downstream parity."
     )
     payload = {
         "run_id": run_id,
@@ -1442,7 +1368,7 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                     reference_vectors=mwe_local_gpu.vectors,
                     reference_success_mask=mwe_local_gpu.success_mask,
                 ),
-                "hf_api_client_truncated": _summarize_mode_run(
+                "hf_api_truncated": _summarize_mode_run(
                     mwe_hf_truncated,
                     mwe_sample,
                     cap=_TRACK_A_CAP,
@@ -1450,6 +1376,13 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                     reference_success_mask=mwe_local_gpu.success_mask,
                 ),
             },
+        },
+        "raw_hf_probe": {
+            "sample_name": parity_sample.name,
+            "sample_size": int(len(parity_sample.texts)),
+            "bucket_counts_track_a": _bucket_counts(parity_sample.raw_token_counts, _TRACK_A_CAP),
+            "bucket_counts_track_b": _bucket_counts(parity_sample.raw_token_counts, track_b_cap),
+            "mode": _summarize_mode_run(hf_raw_probe, parity_sample, cap=track_b_cap),
         },
         "full_dataset": {
             "publications_rows": int(len(publications)),
@@ -1470,18 +1403,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                 "cap": int(track_b_cap),
                 "parity_sample": track_b_parity,
                 "throughput_sample": track_b_throughput,
-                "appendix_parallel4": _summarize_mode_run(
-                    appendix_parallel,
-                    throughput_sample,
-                    cap=track_b_cap,
-                    reference_vectors=local_gpu_session.run(
-                        sample=throughput_sample,
-                        cap=track_b_cap,
-                        batch_size=request.local_batch_size,
-                        progress=False,
-                    ).vectors,
-                    reference_success_mask=np.ones((len(throughput_sample.texts),), dtype=bool),
-                ),
                 "downstream": downstream,
             },
         },
@@ -1497,7 +1418,7 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
         },
         "decision": {
             "hf_api_raw_long_text_feasible": not bool(raw_long_text_failure),
-            "hf_api_client_truncated_track_b_viable": bool(downstream and downstream.get("smoke", {}).get("passed")),
+            "hf_api_truncated_track_b_viable": bool(downstream and downstream.get("smoke", {}).get("passed")),
             "recommendation": recommendation,
         },
         "artifacts": {

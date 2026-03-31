@@ -1934,7 +1934,7 @@ def cmd_run_specter_benchmark(args):
                 local_batch_size=args.local_batch_size,
                 cpu_device=args.cpu_device,
                 gpu_device=args.gpu_device,
-                api_parallelism_appendix=int(args.api_parallelism_appendix),
+                api_concurrency=int(args.api_concurrency),
                 force=bool(args.force),
                 progress=bool(args.progress),
             )
@@ -2553,7 +2553,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--local-batch-size", type=int, default=None)
     sp.add_argument("--cpu-device", default="cpu")
     sp.add_argument("--gpu-device", default="cuda")
-    sp.add_argument("--api-parallelism-appendix", type=int, default=4)
+    sp.add_argument("--api-concurrency", type=int, default=4)
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_specter_benchmark)

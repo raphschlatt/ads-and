@@ -246,6 +246,12 @@ That benchmark intentionally separates:
 - Track A: notebook/SPECTER parity with `max_length=512`
 - Track B: current bundle parity with the bundle token cap, currently `256`
 
+The main comparison is cap-aligned with the real inference path:
+
+- local GPU and local CPU both truncate at the track cap
+- HF remote SPECTER also uses the same client-side tokenizer truncation
+- a small raw-HF probe stays in the report only as a long-text diagnostic
+
 Inference outputs under `output_root`:
 
 - `publications_disambiguated.{parquet|jsonl}`
