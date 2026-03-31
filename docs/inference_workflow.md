@@ -135,6 +135,33 @@ It also reports:
 - a source-based full-run interpolation
 - a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
 
+For the separate HF transport study, install the optional benchmark extras and run the lab benchmark:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --editable ".[bench,dev]" \
+  --torch-backend cu126
+
+export HF_TOKEN=...
+author-name-disambiguation run-specter-hf-lab-benchmark \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/benchmarks/ads_prod_current_specter_hf_lab \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
+  --profiles all \
+  --concurrency-values 4,16,64
+```
+
+That runner is intentionally separate from the realistic package benchmark:
+
+- it measures HF transport only, not the whole package path
+- it reports `micro_short_repeat` and `ads_realistic_truncated` separately
+- it labels aggressive async profiles as `lab_only` and, where applicable, `non_production`
+- it exists to answer the "10x to 50x faster than sync" question without mixing those numbers into the warmed package benchmark
+
 ## Optional Controls
 
 - `--infer-stage smoke|mini|mid|full`

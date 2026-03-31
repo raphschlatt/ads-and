@@ -14,7 +14,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-import httpx
 import numpy as np
 import pandas as pd
 
@@ -42,6 +41,7 @@ _DEFAULT_TRACK_B_CAP = 256
 _DEFAULT_PARITY_SAMPLE_SIZE = 128
 _DEFAULT_THROUGHPUT_SAMPLE_SIZE = 2048
 _DEFAULT_API_CONCURRENCY = 4
+_DEFAULT_WARMUP_SAMPLE_SIZE = 8
 _DEFAULT_MAX_RETRIES = 5
 _DEFAULT_BASE_BACKOFF_SECONDS = 1.0
 _DEFAULT_MAX_BACKOFF_SECONDS = 30.0
@@ -102,12 +102,40 @@ class _ModeRun:
     meta: dict[str, Any]
 
 
+@dataclass(slots=True)
+class _TrackArtifacts:
+    cold_start: dict[str, Any]
+    warmed_throughput: dict[str, Any]
+    cosine_parity: dict[str, Any]
+    reference_run: _ModeRun
+    hf_run: _ModeRun
+
+
 def _resolved_path(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _missing_bench_dependency_message(*, packages: str, command_name: str) -> str:
+    return (
+        f"Missing optional benchmark dependency/dependencies: {packages}. "
+        f"Install the benchmark extras before running {command_name!r}, for example "
+        "`uv pip install --python /home/ubuntu/.venv/bin/python --editable '.[bench,dev]'`."
+    )
+
+
+def _import_httpx_for_bench():
+    try:
+        import httpx
+
+        return httpx
+    except Exception as exc:  # pragma: no cover - import guard
+        raise RuntimeError(
+            _missing_bench_dependency_message(packages="httpx", command_name="run-specter-benchmark")
+        ) from exc
 
 
 def _load_normalized_source(path: str | Path, *, source_type: str) -> pd.DataFrame:
@@ -308,6 +336,25 @@ def _make_sample(combined: pd.DataFrame, *, name: str, target_size: int, raw_tok
         texts=texts,
         raw_token_counts=raw_counts.astype(np.int32, copy=False),
         manifest=manifest,
+    )
+
+
+def _slice_sample(sample: _BenchmarkSample, *, name: str, target_size: int) -> _BenchmarkSample:
+    count = min(len(sample.texts), max(0, int(target_size)))
+    if count <= 0:
+        return _BenchmarkSample(
+            name=str(name),
+            frame=sample.frame.iloc[0:0].copy(),
+            texts=[],
+            raw_token_counts=np.zeros((0,), dtype=np.int32),
+            manifest=[],
+        )
+    return _BenchmarkSample(
+        name=str(name),
+        frame=sample.frame.iloc[:count].copy().reset_index(drop=True),
+        texts=list(sample.texts[:count]),
+        raw_token_counts=sample.raw_token_counts[:count].astype(np.int32, copy=False),
+        manifest=[dict(row) for row in sample.manifest[:count]],
     )
 
 
@@ -516,13 +563,14 @@ def _build_hf_feature_extraction_url(*, provider: str, model_name: str) -> str:
 
 async def _request_hf_single_async(
     *,
-    client: httpx.AsyncClient,
+    client: Any,
     url: str,
     text: str,
     max_retries: int = _DEFAULT_MAX_RETRIES,
     base_backoff_seconds: float = _DEFAULT_BASE_BACKOFF_SECONDS,
     max_backoff_seconds: float = _DEFAULT_MAX_BACKOFF_SECONDS,
 ) -> tuple[np.ndarray, dict[str, Any]]:
+    httpx = _import_httpx_for_bench()
     started_at = perf_counter()
     attempts = 0
     backoff_seconds_total = 0.0
@@ -575,6 +623,7 @@ def _run_hf_mode(
     progress: bool,
     api_concurrency: int = _DEFAULT_API_CONCURRENCY,
 ) -> _ModeRun:
+    httpx = _import_httpx_for_bench()
     texts_total = len(sample.texts)
     vectors = np.full((texts_total, 768), np.nan, dtype=np.float32)
     attempted_mask = np.zeros((texts_total,), dtype=bool)
@@ -819,6 +868,46 @@ def _build_track_sample_report(
     }
 
 
+def _build_cold_start_report(
+    *,
+    sample: _BenchmarkSample,
+    cap: int,
+    reference: _ModeRun,
+    local_cpu: _ModeRun,
+    hf_api: _ModeRun,
+    local_gpu_load_seconds: float,
+    local_cpu_load_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "sample_name": sample.name,
+        "sample_size": int(len(sample.texts)),
+        "sample_manifest": list(sample.manifest),
+        "bucket_counts": _bucket_counts(sample.raw_token_counts, cap),
+        "session_load_seconds": {
+            "local_gpu": float(local_gpu_load_seconds),
+            "local_cpu": float(local_cpu_load_seconds),
+            "hf_api_truncated": 0.0,
+        },
+        "modes": {
+            reference.mode: _summarize_mode_run(reference, sample, cap=cap),
+            local_cpu.mode: _summarize_mode_run(local_cpu, sample, cap=cap),
+            hf_api.mode: _summarize_mode_run(hf_api, sample, cap=cap),
+        },
+    }
+
+
+def _build_cosine_parity_report(section_report: dict[str, Any]) -> dict[str, Any]:
+    modes = dict(section_report.get("modes") or {})
+    return {
+        "sample_name": str(section_report.get("sample_name", "")),
+        "sample_size": int(section_report.get("sample_size", 0) or 0),
+        "comparisons": {
+            "local_cpu_vs_local_gpu": dict(modes.get("local_cpu", {}).get("cosine_vs_local_gpu") or {}),
+            "hf_api_truncated_vs_local_gpu": dict(modes.get("hf_api_truncated", {}).get("cosine_vs_local_gpu") or {}),
+        },
+    }
+
+
 def _run_track_b_downstream(
     *,
     output_root: Path,
@@ -1007,11 +1096,22 @@ def _build_tail_extrapolation(
     }
 
 
+def _cleanup_output_root_if_empty(output_root: Path) -> None:
+    if not output_root.exists():
+        return
+    try:
+        next(output_root.iterdir())
+    except StopIteration:
+        output_root.rmdir()
+    except Exception:
+        return
+
+
 def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
     track_a = payload["tracks"]["track_a"]
     track_b = payload["tracks"]["track_b"]
-    throughput_a = track_a["throughput_sample"]["modes"]
-    throughput_b = track_b["throughput_sample"]["modes"]
+    throughput_a = track_a["warmed_throughput"]["modes"]
+    throughput_b = track_b["warmed_throughput"]["modes"]
     decision = payload["decision"]
     raw_probe = payload["raw_hf_probe"]["mode"]
     lines = [
@@ -1039,24 +1139,29 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         "",
         "## Track A Throughput",
         "",
+        f"- Cold-start warmup sample size: `{track_a['cold_start']['sample_size']}`",
+        f"- Warmed throughput sample size: `{track_a['warmed_throughput']['sample_size']}`",
         f"- local_gpu texts/sec: `{throughput_a['local_gpu']['texts_per_second']}`",
         f"- local_cpu texts/sec: `{throughput_a['local_cpu']['texts_per_second']}`",
         f"- hf_api_truncated texts/sec: `{throughput_a['hf_api_truncated']['texts_per_second']}`",
         f"- hf_api_truncated api_concurrency: `{throughput_a['hf_api_truncated']['meta']['api_concurrency']}`",
+        f"- hf_api_truncated mean cosine vs local_gpu: `{track_a['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
         "",
         "## Track B Throughput",
         "",
+        f"- Cold-start warmup sample size: `{track_b['cold_start']['sample_size']}`",
+        f"- Warmed throughput sample size: `{track_b['warmed_throughput']['sample_size']}`",
         f"- local_gpu texts/sec: `{throughput_b['local_gpu']['texts_per_second']}`",
         f"- local_cpu texts/sec: `{throughput_b['local_cpu']['texts_per_second']}`",
         f"- hf_api_truncated texts/sec: `{throughput_b['hf_api_truncated']['texts_per_second']}`",
-        f"- hf_api_truncated cosine mean vs local_gpu: `{throughput_b['hf_api_truncated']['cosine_vs_local_gpu']['mean_cosine_similarity']}`",
+        f"- hf_api_truncated cosine mean vs local_gpu: `{track_b['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
         "",
         "## Raw HF Probe",
         "",
         f"- Success/full on parity sample: `{raw_probe['texts_successful']}` / `{raw_probe['texts_total']}`",
         f"- Failed texts on parity sample: `{raw_probe['texts_failed']}`",
     ]
-    downstream = track_b.get("downstream")
+    downstream = track_b.get("downstream_track_b")
     if downstream:
         lines.extend(
             [
@@ -1102,6 +1207,7 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
             "## Interpretation",
             "",
             "- The notebook MWE succeeds because it is a short paper text and stays below the problematic raw long-text regime.",
+            "- The headline throughput numbers come from warmed runs; cold-start and session-load effects are reported separately.",
             "- The main comparison is cap-aligned with the live inference path: local GPU, local CPU, and HF API all use the same tokenizer truncation per track.",
             "- The raw HF endpoint is kept only as a small diagnostic probe so long-text provider failures stay visible without dominating the benchmark.",
             "- Track A is the notebook/SPECTER view; Track B is the actual bundle view.",
@@ -1122,317 +1228,411 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             f"{report_json_path}, {report_markdown_path}"
         )
     output_root.mkdir(parents=True, exist_ok=True)
+    try:
+        model_info = _resolve_model_bundle(request.model_bundle)
+        bundle_contract = dict(
+            model_info["manifest"].get("embedding_contract") or build_bundle_embedding_contract(model_info["model_cfg"])
+        )
+        bundle_text_contract = dict(bundle_contract.get("text", {}) or {})
+        model_name = _normalize_model_name(request.model_name)
+        if bundle_text_contract.get("model_name") and str(bundle_text_contract["model_name"]) != model_name:
+            raise ValueError(
+                "SPECTER benchmark must use the bundle text embedding contract. "
+                f"bundle={bundle_text_contract.get('model_name')!r} request={model_name!r}"
+            )
 
-    model_info = _resolve_model_bundle(request.model_bundle)
-    bundle_contract = dict(
-        model_info["manifest"].get("embedding_contract") or build_bundle_embedding_contract(model_info["model_cfg"])
-    )
-    bundle_text_contract = dict(bundle_contract.get("text", {}) or {})
-    model_name = _normalize_model_name(request.model_name)
-    if bundle_text_contract.get("model_name") and str(bundle_text_contract["model_name"]) != model_name:
-        raise ValueError(
-            "SPECTER benchmark must use the bundle text embedding contract. "
-            f"bundle={bundle_text_contract.get('model_name')!r} request={model_name!r}"
+        track_b_cap = int(bundle_text_contract.get("tokenization", {}).get("max_length", _DEFAULT_TRACK_B_CAP))
+        tokenizer = _build_tokenizer(model_name)
+        hardware = _collect_hardware_metadata()
+
+        publications = _load_normalized_source(request.publications_path, source_type="publication")
+        references = (
+            None
+            if request.references_path is None
+            else _load_normalized_source(request.references_path, source_type="reference")
+        )
+        combined = _build_combined_sources(publications, references)
+        if len(combined) == 0:
+            raise RuntimeError("Benchmark input is empty; provide at least one source record.")
+
+        raw_token_counts_full = _compute_raw_token_counts_for_frame(combined, tokenizer=tokenizer)
+        full_token_stats = _summarize_token_lengths(raw_token_counts_full)
+
+        parity_sample = _make_sample(
+            combined,
+            name="parity_sample",
+            target_size=int(request.parity_sample_size),
+            raw_token_counts_full=raw_token_counts_full,
+        )
+        throughput_target_size = max(_DEFAULT_THROUGHPUT_SAMPLE_SIZE, int(request.throughput_sample_size))
+        throughput_sample = _make_sample(
+            combined,
+            name="throughput_sample",
+            target_size=int(throughput_target_size),
+            raw_token_counts_full=raw_token_counts_full,
+        )
+        warmup_sample = _slice_sample(
+            throughput_sample,
+            name="warmup_sample",
+            target_size=min(_DEFAULT_WARMUP_SAMPLE_SIZE, len(throughput_sample.texts)),
         )
 
-    track_b_cap = int(bundle_text_contract.get("tokenization", {}).get("max_length", _DEFAULT_TRACK_B_CAP))
-    tokenizer = _build_tokenizer(model_name)
-    hardware = _collect_hardware_metadata()
-
-    publications = _load_normalized_source(request.publications_path, source_type="publication")
-    references = (
-        None if request.references_path is None else _load_normalized_source(request.references_path, source_type="reference")
-    )
-    combined = _build_combined_sources(publications, references)
-    if len(combined) == 0:
-        raise RuntimeError("Benchmark input is empty; provide at least one source record.")
-
-    raw_token_counts_full = _compute_raw_token_counts_for_frame(combined, tokenizer=tokenizer)
-    full_token_stats = _summarize_token_lengths(raw_token_counts_full)
-
-    parity_sample = _make_sample(
-        combined,
-        name="parity_sample",
-        target_size=int(request.parity_sample_size),
-        raw_token_counts_full=raw_token_counts_full,
-    )
-    throughput_sample = _make_sample(
-        combined,
-        name="throughput_sample",
-        target_size=int(request.throughput_sample_size),
-        raw_token_counts_full=raw_token_counts_full,
-    )
-
-    notebook_mwe = _load_notebook_mwe_text()
-    mwe_text = str(notebook_mwe["text"])
-    mwe_counts = _compute_raw_token_counts_for_texts([mwe_text], tokenizer=tokenizer)
-    mwe_sample = _BenchmarkSample(
-        name="mwe_sanity",
-        frame=pd.DataFrame(
-            [
+        notebook_mwe = _load_notebook_mwe_text()
+        mwe_text = str(notebook_mwe["text"])
+        mwe_counts = _compute_raw_token_counts_for_texts([mwe_text], tokenizer=tokenizer)
+        mwe_sample = _BenchmarkSample(
+            name="mwe_sanity",
+            frame=pd.DataFrame(
+                [
+                    {
+                        "bibcode": "mwe",
+                        "authors": [],
+                        "title": notebook_mwe["title"],
+                        "abstract": notebook_mwe["abstract"],
+                        "year": None,
+                        "aff": [],
+                        "_benchmark_source": "mwe",
+                        "_benchmark_source_order": 0,
+                    }
+                ]
+            ),
+            texts=[mwe_text],
+            raw_token_counts=mwe_counts.astype(np.int32, copy=False),
+            manifest=[
                 {
+                    "sample_index": 0,
+                    "source": "mwe",
+                    "source_order": 0,
                     "bibcode": "mwe",
-                    "authors": [],
-                    "title": notebook_mwe["title"],
-                    "abstract": notebook_mwe["abstract"],
                     "year": None,
-                    "aff": [],
-                    "_benchmark_source": "mwe",
-                    "_benchmark_source_order": 0,
+                    "raw_token_count": int(mwe_counts[0]),
                 }
-            ]
-        ),
-        texts=[mwe_text],
-        raw_token_counts=mwe_counts.astype(np.int32, copy=False),
-        manifest=[
-            {
-                "sample_index": 0,
-                "source": "mwe",
-                "source_order": 0,
-                "bibcode": "mwe",
-                "year": None,
-                "raw_token_count": int(mwe_counts[0]),
-            }
-        ],
-    )
+            ],
+        )
 
-    local_cpu_session, local_cpu_meta = _try_create_local_session(model_name=model_name, device=request.cpu_device)
-    local_gpu_session, local_gpu_meta = _try_create_local_session(model_name=model_name, device=request.gpu_device)
-    if local_gpu_session is None:
-        raise RuntimeError(f"Benchmark requires a working GPU session for local reference: {local_gpu_meta.get('error')}")
-    if local_cpu_session is None:
-        raise RuntimeError(f"Benchmark requires a working CPU session: {local_cpu_meta.get('error')}")
+        local_cpu_session, local_cpu_meta = _try_create_local_session(model_name=model_name, device=request.cpu_device)
+        local_gpu_session, local_gpu_meta = _try_create_local_session(model_name=model_name, device=request.gpu_device)
+        if local_gpu_session is None:
+            raise RuntimeError(
+                f"Benchmark requires a working GPU session for local reference: {local_gpu_meta.get('error')}"
+            )
+        if local_cpu_session is None:
+            raise RuntimeError(f"Benchmark requires a working CPU session: {local_cpu_meta.get('error')}")
 
-    hf_raw_probe = _run_hf_mode(
-        sample=parity_sample,
-        mode_name="hf_api_raw_probe",
-        model_name=model_name,
-        provider=request.provider,
-        hf_token_env_var=request.hf_token_env_var,
-        tokenizer=tokenizer,
-        progress=bool(request.progress),
-    )
-    raw_long_text_failure = any(
-        (not bool(hf_raw_probe.success_mask[idx])) and int(parity_sample.raw_token_counts[idx]) > 512
-        for idx in range(len(parity_sample.texts))
-        if bool(hf_raw_probe.attempted_mask[idx])
-    )
-
-    def _run_track(cap: int, *, sample: _BenchmarkSample) -> tuple[dict[str, Any], _ModeRun, _ModeRun, _ModeRun]:
-        local_gpu = local_gpu_session.run(
-            sample=sample,
-            cap=int(cap),
-            batch_size=request.local_batch_size,
+        hf_raw_probe = _run_hf_mode(
+            sample=parity_sample,
+            mode_name="hf_api_raw_probe",
+            model_name=model_name,
+            provider=request.provider,
+            hf_token_env_var=request.hf_token_env_var,
+            tokenizer=tokenizer,
             progress=bool(request.progress),
         )
-        local_cpu = local_cpu_session.run(
-            sample=sample,
-            cap=int(cap),
-            batch_size=request.local_batch_size,
-            progress=bool(request.progress),
+        raw_long_text_failure = any(
+            (not bool(hf_raw_probe.success_mask[idx])) and int(parity_sample.raw_token_counts[idx]) > 512
+            for idx in range(len(parity_sample.texts))
+            if bool(hf_raw_probe.attempted_mask[idx])
         )
-        hf_api = _run_hf_mode(
-            sample=sample,
+
+        def _run_track(cap: int) -> _TrackArtifacts:
+            warmup_local_gpu = local_gpu_session.run(
+                sample=warmup_sample,
+                cap=int(cap),
+                batch_size=request.local_batch_size,
+                progress=bool(request.progress),
+            )
+            warmup_local_cpu = local_cpu_session.run(
+                sample=warmup_sample,
+                cap=int(cap),
+                batch_size=request.local_batch_size,
+                progress=bool(request.progress),
+            )
+            warmup_hf = _run_hf_mode(
+                sample=warmup_sample,
+                mode_name="hf_api_truncated",
+                model_name=model_name,
+                provider=request.provider,
+                hf_token_env_var=request.hf_token_env_var,
+                tokenizer=tokenizer,
+                cap=int(cap),
+                progress=bool(request.progress),
+                api_concurrency=int(request.api_concurrency),
+            )
+
+            parity_local_gpu = local_gpu_session.run(
+                sample=parity_sample,
+                cap=int(cap),
+                batch_size=request.local_batch_size,
+                progress=bool(request.progress),
+            )
+            parity_local_cpu = local_cpu_session.run(
+                sample=parity_sample,
+                cap=int(cap),
+                batch_size=request.local_batch_size,
+                progress=bool(request.progress),
+            )
+            parity_hf = _run_hf_mode(
+                sample=parity_sample,
+                mode_name="hf_api_truncated",
+                model_name=model_name,
+                provider=request.provider,
+                hf_token_env_var=request.hf_token_env_var,
+                tokenizer=tokenizer,
+                cap=int(cap),
+                progress=bool(request.progress),
+                api_concurrency=int(request.api_concurrency),
+            )
+
+            throughput_local_gpu = local_gpu_session.run(
+                sample=throughput_sample,
+                cap=int(cap),
+                batch_size=request.local_batch_size,
+                progress=bool(request.progress),
+            )
+            throughput_local_cpu = local_cpu_session.run(
+                sample=throughput_sample,
+                cap=int(cap),
+                batch_size=request.local_batch_size,
+                progress=bool(request.progress),
+            )
+            throughput_hf = _run_hf_mode(
+                sample=throughput_sample,
+                mode_name="hf_api_truncated",
+                model_name=model_name,
+                provider=request.provider,
+                hf_token_env_var=request.hf_token_env_var,
+                tokenizer=tokenizer,
+                cap=int(cap),
+                progress=bool(request.progress),
+                api_concurrency=int(request.api_concurrency),
+            )
+
+            cold_start = _build_cold_start_report(
+                sample=warmup_sample,
+                cap=int(cap),
+                reference=warmup_local_gpu,
+                local_cpu=warmup_local_cpu,
+                hf_api=warmup_hf,
+                local_gpu_load_seconds=float(getattr(local_gpu_session, "load_seconds", 0.0) or 0.0),
+                local_cpu_load_seconds=float(getattr(local_cpu_session, "load_seconds", 0.0) or 0.0),
+            )
+            cosine_parity = _build_track_sample_report(
+                sample=parity_sample,
+                cap=int(cap),
+                reference=parity_local_gpu,
+                local_cpu=parity_local_cpu,
+                hf_api=parity_hf,
+            )
+            warmed_throughput = _build_track_sample_report(
+                sample=throughput_sample,
+                cap=int(cap),
+                reference=throughput_local_gpu,
+                local_cpu=throughput_local_cpu,
+                hf_api=throughput_hf,
+            )
+            return _TrackArtifacts(
+                cold_start=cold_start,
+                warmed_throughput=warmed_throughput,
+                cosine_parity=_build_cosine_parity_report(cosine_parity),
+                reference_run=throughput_local_gpu,
+                hf_run=throughput_hf,
+            )
+
+        mwe_local_gpu = local_gpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
+        mwe_local_cpu = local_cpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
+        mwe_hf_raw = _run_hf_mode(
+            sample=mwe_sample,
+            mode_name="hf_api_raw_probe",
+            model_name=model_name,
+            provider=request.provider,
+            hf_token_env_var=request.hf_token_env_var,
+            tokenizer=tokenizer,
+            progress=False,
+        )
+        mwe_hf_truncated = _run_hf_mode(
+            sample=mwe_sample,
             mode_name="hf_api_truncated",
             model_name=model_name,
             provider=request.provider,
             hf_token_env_var=request.hf_token_env_var,
             tokenizer=tokenizer,
-            cap=int(cap),
-            progress=bool(request.progress),
+            cap=_TRACK_A_CAP,
+            progress=False,
             api_concurrency=int(request.api_concurrency),
         )
-        report = _build_track_sample_report(
-            sample=sample,
-            cap=int(cap),
-            reference=local_gpu,
-            local_cpu=local_cpu,
-            hf_api=hf_api,
+
+        track_a = _run_track(_TRACK_A_CAP)
+        track_b = _run_track(track_b_cap)
+
+        downstream = None
+        track_b_candidate_summary = track_b.warmed_throughput["modes"]["hf_api_truncated"]
+        if (
+            isinstance(track_b_candidate_summary.get("cosine_vs_local_gpu"), dict)
+            and bool(track_b_candidate_summary["texts_successful"] == track_b_candidate_summary["texts_total"])
+        ):
+            downstream = _run_track_b_downstream(
+                output_root=output_root,
+                sample=throughput_sample,
+                local_gpu_vectors=track_b.reference_run.vectors,
+                hf_vectors=track_b.hf_run.vectors,
+                model_bundle=request.model_bundle,
+                dataset_id=request.dataset_id,
+            )
+
+        full_ads_scaling = _compute_full_ads_scaling_stats(
+            publications_path=request.publications_path,
+            references_path=request.references_path,
         )
-        return report, local_gpu, local_cpu, hf_api
+        full_source_rows = int(len(combined))
 
-    mwe_local_gpu = local_gpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
-    mwe_local_cpu = local_cpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
-    mwe_hf_raw = _run_hf_mode(
-        sample=mwe_sample,
-        mode_name="hf_api_raw_probe",
-        model_name=model_name,
-        provider=request.provider,
-        hf_token_env_var=request.hf_token_env_var,
-        tokenizer=tokenizer,
-        progress=False,
-    )
-    mwe_hf_truncated = _run_hf_mode(
-        sample=mwe_sample,
-        mode_name="hf_api_truncated",
-        model_name=model_name,
-        provider=request.provider,
-        hf_token_env_var=request.hf_token_env_var,
-        tokenizer=tokenizer,
-        cap=_TRACK_A_CAP,
-        progress=False,
-        api_concurrency=int(request.api_concurrency),
-    )
+        track_a_embedding_only = {
+            "local_gpu": _embedding_extrapolation(track_a.warmed_throughput["modes"]["local_gpu"], full_source_rows),
+            "local_cpu": _embedding_extrapolation(track_a.warmed_throughput["modes"]["local_cpu"], full_source_rows),
+            "hf_api_truncated": _embedding_extrapolation(
+                track_a.warmed_throughput["modes"]["hf_api_truncated"],
+                full_source_rows,
+            ),
+        }
+        track_b_embedding_only = {
+            "local_gpu": _embedding_extrapolation(track_b.warmed_throughput["modes"]["local_gpu"], full_source_rows),
+            "local_cpu": _embedding_extrapolation(track_b.warmed_throughput["modes"]["local_cpu"], full_source_rows),
+            "hf_api_truncated": _embedding_extrapolation(
+                track_b.warmed_throughput["modes"]["hf_api_truncated"],
+                full_source_rows,
+            ),
+        }
+        cpu_tail = _build_tail_extrapolation(
+            downstream_payload=downstream,
+            full_source_rows=full_source_rows,
+            full_mentions=int(full_ads_scaling["mentions_total"]),
+            full_pairs=int(full_ads_scaling["pair_upper_bound"]),
+        )
+        end_to_end = {
+            "hf_api_truncated_full_seconds": None,
+            "local_cpu_full_seconds": None,
+        }
+        if cpu_tail is not None:
+            hf_embed = track_b_embedding_only["hf_api_truncated"].get("full_embed_seconds")
+            cpu_embed = track_b_embedding_only["local_cpu"].get("full_embed_seconds")
+            if isinstance(hf_embed, (int, float)):
+                end_to_end["hf_api_truncated_full_seconds"] = float(hf_embed + cpu_tail["chosen_tail_seconds"])
+            if isinstance(cpu_embed, (int, float)):
+                end_to_end["local_cpu_full_seconds"] = float(cpu_embed + cpu_tail["chosen_tail_seconds"])
 
-    track_a_parity, _, _, _ = _run_track(_TRACK_A_CAP, sample=parity_sample)
-    track_a_throughput, _, _, _ = _run_track(_TRACK_A_CAP, sample=throughput_sample)
-    track_b_parity, _, _, _ = _run_track(track_b_cap, sample=parity_sample)
-    track_b_throughput, track_b_throughput_local_gpu, _, track_b_throughput_hf_api = _run_track(
-        track_b_cap,
-        sample=throughput_sample,
-    )
-
-    downstream = None
-    track_b_candidate_summary = track_b_throughput["modes"]["hf_api_truncated"]
-    if (
-        isinstance(track_b_candidate_summary.get("cosine_vs_local_gpu"), dict)
-        and bool(track_b_candidate_summary["texts_successful"] == track_b_candidate_summary["texts_total"])
-    ):
-        downstream = _run_track_b_downstream(
+        recommendation = (
+            "Track B warmed benchmark passes with the cap-aligned HF API path."
+            if downstream and downstream.get("smoke", {}).get("passed")
+            else "HF stays experimental unless the warmed Track B benchmark passes downstream parity."
+        )
+        payload = {
+            "run_id": run_id,
+            "generated_utc": pd.Timestamp.utcnow().isoformat(),
+            "dataset_id": str(request.dataset_id),
+            "model_bundle": str(_resolved_path(request.model_bundle)),
+            "embedding_contract": bundle_contract,
+            "hardware": hardware,
+            "sampling_policy": {
+                "parity_sample_requested": int(request.parity_sample_size),
+                "parity_sample_effective": int(len(parity_sample.texts)),
+                "throughput_sample_requested": int(request.throughput_sample_size),
+                "throughput_sample_effective_floor": int(_DEFAULT_THROUGHPUT_SAMPLE_SIZE),
+                "throughput_sample_effective": int(len(throughput_sample.texts)),
+                "warmup_sample_effective": int(len(warmup_sample.texts)),
+            },
+            "mwe_sanity": {
+                "notebook_path": notebook_mwe["notebook_path"],
+                "raw_token_count": int(mwe_counts[0]),
+                "modes": {
+                    "local_gpu": _summarize_mode_run(mwe_local_gpu, mwe_sample, cap=_TRACK_A_CAP),
+                    "local_cpu": _summarize_mode_run(
+                        mwe_local_cpu,
+                        mwe_sample,
+                        cap=_TRACK_A_CAP,
+                        reference_vectors=mwe_local_gpu.vectors,
+                        reference_success_mask=mwe_local_gpu.success_mask,
+                    ),
+                    "hf_api_raw": _summarize_mode_run(
+                        mwe_hf_raw,
+                        mwe_sample,
+                        cap=_TRACK_A_CAP,
+                        reference_vectors=mwe_local_gpu.vectors,
+                        reference_success_mask=mwe_local_gpu.success_mask,
+                    ),
+                    "hf_api_truncated": _summarize_mode_run(
+                        mwe_hf_truncated,
+                        mwe_sample,
+                        cap=_TRACK_A_CAP,
+                        reference_vectors=mwe_local_gpu.vectors,
+                        reference_success_mask=mwe_local_gpu.success_mask,
+                    ),
+                },
+            },
+            "raw_hf_probe": {
+                "sample_name": parity_sample.name,
+                "sample_size": int(len(parity_sample.texts)),
+                "bucket_counts_track_a": _bucket_counts(parity_sample.raw_token_counts, _TRACK_A_CAP),
+                "bucket_counts_track_b": _bucket_counts(parity_sample.raw_token_counts, track_b_cap),
+                "mode": _summarize_mode_run(hf_raw_probe, parity_sample, cap=track_b_cap),
+            },
+            "full_dataset": {
+                "publications_rows": int(len(publications)),
+                "references_rows": 0 if references is None else int(len(references)),
+                "source_rows_total": int(full_source_rows),
+                "raw_token_lengths": full_token_stats,
+                "bucket_counts_track_a": _bucket_counts(raw_token_counts_full, _TRACK_A_CAP),
+                "bucket_counts_track_b": _bucket_counts(raw_token_counts_full, track_b_cap),
+                "ads_scaling": full_ads_scaling,
+            },
+            "tracks": {
+                "track_a": {
+                    "cap": int(_TRACK_A_CAP),
+                    "cold_start": track_a.cold_start,
+                    "warmed_throughput": track_a.warmed_throughput,
+                    "cosine_parity": track_a.cosine_parity,
+                },
+                "track_b": {
+                    "cap": int(track_b_cap),
+                    "cold_start": track_b.cold_start,
+                    "warmed_throughput": track_b.warmed_throughput,
+                    "cosine_parity": track_b.cosine_parity,
+                    "downstream_track_b": downstream,
+                },
+            },
+            "extrapolation": {
+                "track_a": {
+                    "embedding_only": track_a_embedding_only,
+                },
+                "track_b": {
+                    "embedding_only": track_b_embedding_only,
+                    "cpu_infer_tail": cpu_tail,
+                    "end_to_end": end_to_end,
+                },
+            },
+            "decision": {
+                "hf_api_raw_long_text_feasible": not bool(raw_long_text_failure),
+                "hf_api_truncated_track_b_viable": bool(downstream and downstream.get("smoke", {}).get("passed")),
+                "recommendation": recommendation,
+            },
+            "artifacts": {
+                "output_root": str(output_root),
+                "report_json_path": str(report_json_path),
+                "report_markdown_path": str(report_markdown_path),
+            },
+        }
+        write_json(payload, report_json_path)
+        _write_markdown_report(payload, report_markdown_path)
+        return SpecterBenchmarkResult(
+            run_id=run_id,
             output_root=output_root,
-            sample=throughput_sample,
-            local_gpu_vectors=track_b_throughput_local_gpu.vectors,
-            hf_vectors=track_b_throughput_hf_api.vectors,
-            model_bundle=request.model_bundle,
-            dataset_id=request.dataset_id,
+            report_json_path=report_json_path,
+            report_markdown_path=report_markdown_path,
+            recommendation=recommendation,
         )
-
-    full_ads_scaling = _compute_full_ads_scaling_stats(
-        publications_path=request.publications_path,
-        references_path=request.references_path,
-    )
-    full_source_rows = int(len(combined))
-
-    track_a_embedding_only = {
-        "local_gpu": _embedding_extrapolation(track_a_throughput["modes"]["local_gpu"], full_source_rows),
-        "local_cpu": _embedding_extrapolation(track_a_throughput["modes"]["local_cpu"], full_source_rows),
-        "hf_api_truncated": _embedding_extrapolation(
-            track_a_throughput["modes"]["hf_api_truncated"],
-            full_source_rows,
-        ),
-    }
-    track_b_embedding_only = {
-        "local_gpu": _embedding_extrapolation(track_b_throughput["modes"]["local_gpu"], full_source_rows),
-        "local_cpu": _embedding_extrapolation(track_b_throughput["modes"]["local_cpu"], full_source_rows),
-        "hf_api_truncated": _embedding_extrapolation(
-            track_b_throughput["modes"]["hf_api_truncated"],
-            full_source_rows,
-        ),
-    }
-    cpu_tail = _build_tail_extrapolation(
-        downstream_payload=downstream,
-        full_source_rows=full_source_rows,
-        full_mentions=int(full_ads_scaling["mentions_total"]),
-        full_pairs=int(full_ads_scaling["pair_upper_bound"]),
-    )
-    end_to_end = {
-        "hf_api_truncated_full_seconds": None,
-        "local_cpu_full_seconds": None,
-    }
-    if cpu_tail is not None:
-        hf_embed = track_b_embedding_only["hf_api_truncated"].get("full_embed_seconds")
-        cpu_embed = track_b_embedding_only["local_cpu"].get("full_embed_seconds")
-        if isinstance(hf_embed, (int, float)):
-            end_to_end["hf_api_truncated_full_seconds"] = float(hf_embed + cpu_tail["chosen_tail_seconds"])
-        if isinstance(cpu_embed, (int, float)):
-            end_to_end["local_cpu_full_seconds"] = float(cpu_embed + cpu_tail["chosen_tail_seconds"])
-
-    recommendation = (
-        "Track B benchmark passes with pooled HF API after client-side tokenizer truncation."
-        if downstream and downstream.get("smoke", {}).get("passed")
-        else "HF stays experimental unless the cap-aligned truncated API path passes Track B downstream parity."
-    )
-    payload = {
-        "run_id": run_id,
-        "generated_utc": pd.Timestamp.utcnow().isoformat(),
-        "dataset_id": str(request.dataset_id),
-        "model_bundle": str(_resolved_path(request.model_bundle)),
-        "embedding_contract": bundle_contract,
-        "hardware": hardware,
-        "mwe_sanity": {
-            "notebook_path": notebook_mwe["notebook_path"],
-            "raw_token_count": int(mwe_counts[0]),
-            "modes": {
-                "local_gpu": _summarize_mode_run(mwe_local_gpu, mwe_sample, cap=_TRACK_A_CAP),
-                "local_cpu": _summarize_mode_run(
-                    mwe_local_cpu,
-                    mwe_sample,
-                    cap=_TRACK_A_CAP,
-                    reference_vectors=mwe_local_gpu.vectors,
-                    reference_success_mask=mwe_local_gpu.success_mask,
-                ),
-                "hf_api_raw": _summarize_mode_run(
-                    mwe_hf_raw,
-                    mwe_sample,
-                    cap=_TRACK_A_CAP,
-                    reference_vectors=mwe_local_gpu.vectors,
-                    reference_success_mask=mwe_local_gpu.success_mask,
-                ),
-                "hf_api_truncated": _summarize_mode_run(
-                    mwe_hf_truncated,
-                    mwe_sample,
-                    cap=_TRACK_A_CAP,
-                    reference_vectors=mwe_local_gpu.vectors,
-                    reference_success_mask=mwe_local_gpu.success_mask,
-                ),
-            },
-        },
-        "raw_hf_probe": {
-            "sample_name": parity_sample.name,
-            "sample_size": int(len(parity_sample.texts)),
-            "bucket_counts_track_a": _bucket_counts(parity_sample.raw_token_counts, _TRACK_A_CAP),
-            "bucket_counts_track_b": _bucket_counts(parity_sample.raw_token_counts, track_b_cap),
-            "mode": _summarize_mode_run(hf_raw_probe, parity_sample, cap=track_b_cap),
-        },
-        "full_dataset": {
-            "publications_rows": int(len(publications)),
-            "references_rows": 0 if references is None else int(len(references)),
-            "source_rows_total": int(full_source_rows),
-            "raw_token_lengths": full_token_stats,
-            "bucket_counts_track_a": _bucket_counts(raw_token_counts_full, _TRACK_A_CAP),
-            "bucket_counts_track_b": _bucket_counts(raw_token_counts_full, track_b_cap),
-            "ads_scaling": full_ads_scaling,
-        },
-        "tracks": {
-            "track_a": {
-                "cap": int(_TRACK_A_CAP),
-                "parity_sample": track_a_parity,
-                "throughput_sample": track_a_throughput,
-            },
-            "track_b": {
-                "cap": int(track_b_cap),
-                "parity_sample": track_b_parity,
-                "throughput_sample": track_b_throughput,
-                "downstream": downstream,
-            },
-        },
-        "extrapolation": {
-            "track_a": {
-                "embedding_only": track_a_embedding_only,
-            },
-            "track_b": {
-                "embedding_only": track_b_embedding_only,
-                "cpu_infer_tail": cpu_tail,
-                "end_to_end": end_to_end,
-            },
-        },
-        "decision": {
-            "hf_api_raw_long_text_feasible": not bool(raw_long_text_failure),
-            "hf_api_truncated_track_b_viable": bool(downstream and downstream.get("smoke", {}).get("passed")),
-            "recommendation": recommendation,
-        },
-        "artifacts": {
-            "output_root": str(output_root),
-            "report_json_path": str(report_json_path),
-            "report_markdown_path": str(report_markdown_path),
-        },
-    }
-    write_json(payload, report_json_path)
-    _write_markdown_report(payload, report_markdown_path)
-    return SpecterBenchmarkResult(
-        run_id=run_id,
-        output_root=output_root,
-        report_json_path=report_json_path,
-        report_markdown_path=report_markdown_path,
-        recommendation=recommendation,
-    )
+    except Exception:
+        if report_json_path.exists():
+            report_json_path.unlink()
+        if report_markdown_path.exists():
+            report_markdown_path.unlink()
+        raise
+    finally:
+        _cleanup_output_root_if_empty(output_root)

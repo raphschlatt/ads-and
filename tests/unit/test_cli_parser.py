@@ -13,6 +13,7 @@ def test_build_parser_exposes_only_public_commands():
         "compare-infer-baseline",
         "run-hf-compatibility-report",
         "run-specter-benchmark",
+        "run-specter-hf-lab-benchmark",
         "run-cluster-test-report",
         "export-model-bundle",
     }
@@ -296,6 +297,39 @@ def test_run_specter_benchmark_parser_defaults():
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_specter_benchmark
+
+
+def test_run_specter_hf_lab_benchmark_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-specter-hf-lab-benchmark",
+            "--publications-path",
+            "publications.parquet",
+            "--output-root",
+            "out",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            "/tmp/bundle",
+        ]
+    )
+    assert args.command == "run-specter-hf-lab-benchmark"
+    assert args.publications_path == "publications.parquet"
+    assert args.references_path is None
+    assert args.output_root == "out"
+    assert args.dataset_id == "my_ads_2026"
+    assert args.model_bundle == "/tmp/bundle"
+    assert args.provider == "hf-inference"
+    assert args.model_name == "allenai/specter"
+    assert args.hf_token_env_var == "HF_TOKEN"
+    assert args.profiles == "all"
+    assert args.concurrency_values == "4,16,64"
+    assert args.realistic_sample_size == 128
+    assert args.micro_repeat_count == 1000
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_run_specter_hf_lab_benchmark
 
 
 def test_run_cluster_test_report_parser_defaults():

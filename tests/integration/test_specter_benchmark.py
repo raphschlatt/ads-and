@@ -194,9 +194,45 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     assert payload["recommendation"] == report_json["decision"]["recommendation"]
     assert report_json["tracks"]["track_a"]["cap"] == 512
     assert report_json["tracks"]["track_b"]["cap"] == 256
+    assert report_json["sampling_policy"]["throughput_sample_effective_floor"] == 2048
+    assert report_json["tracks"]["track_a"]["cold_start"]["sample_size"] == 2
+    assert report_json["tracks"]["track_a"]["warmed_throughput"]["sample_size"] == 2
+    assert report_json["tracks"]["track_a"]["cosine_parity"]["comparisons"]["hf_api_truncated_vs_local_gpu"][
+        "compared_count"
+    ] == 2
     assert report_json["raw_hf_probe"]["mode"]["texts_successful"] == report_json["raw_hf_probe"]["mode"]["texts_total"]
-    assert report_json["tracks"]["track_b"]["downstream"]["smoke"]["passed"] is True
+    assert report_json["tracks"]["track_b"]["downstream_track_b"]["smoke"]["passed"] is True
     assert report_json["extrapolation"]["track_b"]["cpu_infer_tail"]["chosen_method"] == "pair_scaled"
     assert "SPECTER Benchmark Report" in report_md
     assert "Raw HF Probe" in report_md
     assert "Track B Downstream" in report_md
+
+
+def test_run_specter_benchmark_cleans_empty_output_root_on_failure(monkeypatch, tmp_path: Path):
+    benchmark_module = __import__("author_name_disambiguation.specter_benchmark", fromlist=["dummy"])
+    monkeypatch.setattr(benchmark_module, "_resolve_model_bundle", lambda _bundle: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-specter-benchmark",
+            "--publications-path",
+            str(tmp_path / "publications.parquet"),
+            "--output-root",
+            str(tmp_path / "benchmark_fail"),
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            str(tmp_path / "bundle"),
+            "--no-progress",
+        ]
+    )
+
+    try:
+        args.func(args)
+    except RuntimeError as exc:
+        assert str(exc) == "boom"
+    else:  # pragma: no cover - defensive
+        raise AssertionError("Expected RuntimeError")
+
+    assert not (tmp_path / "benchmark_fail").exists()

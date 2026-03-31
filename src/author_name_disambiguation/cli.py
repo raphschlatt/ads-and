@@ -1956,6 +1956,58 @@ def cmd_run_specter_benchmark(args):
         ui.close()
 
 
+def cmd_run_specter_hf_lab_benchmark(args):
+    ui = CliUI(total_steps=1, progress=args.progress)
+    try:
+        from author_name_disambiguation.specter_hf_lab_benchmark import (
+            SpecterHFLabBenchmarkRequest,
+            run_specter_hf_lab_benchmark,
+        )
+
+        profiles = tuple(part.strip() for part in str(args.profiles).split(",") if part.strip())
+        concurrency_values = tuple(
+            int(part.strip()) for part in str(args.concurrency_values).split(",") if part.strip()
+        )
+        ui.start("Run SPECTER HF lab benchmark")
+        ui.info(
+            f"dataset={args.dataset_id} | bundle={Path(args.model_bundle).expanduser().resolve()} | "
+            f"profiles={','.join(profiles or ('all',))} | concurrency={','.join(str(v) for v in concurrency_values or (4, 16, 64))}"
+        )
+        result = run_specter_hf_lab_benchmark(
+            SpecterHFLabBenchmarkRequest(
+                publications_path=args.publications_path,
+                references_path=args.references_path,
+                output_root=args.output_root,
+                dataset_id=args.dataset_id,
+                model_bundle=args.model_bundle,
+                provider=args.provider,
+                model_name=args.model_name,
+                hf_token_env_var=args.hf_token_env_var,
+                profiles=profiles or ("all",),
+                concurrency_values=concurrency_values or (4, 16, 64),
+                realistic_sample_size=int(args.realistic_sample_size),
+                micro_repeat_count=int(args.micro_repeat_count),
+                force=bool(args.force),
+                progress=bool(args.progress),
+            )
+        )
+        payload = {
+            "run_id": result.run_id,
+            "output_root": str(result.output_root),
+            "report_json_path": str(result.report_json_path),
+            "report_markdown_path": str(result.report_markdown_path),
+            "summary": str(result.summary),
+        }
+        ui.done(str(result.summary))
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
 def cmd_run_cluster_test_report(args):
     ui = CliUI(total_steps=6, progress=args.progress)
     try:
@@ -2557,6 +2609,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_specter_benchmark)
+
+    sp = sub.add_parser("run-specter-hf-lab-benchmark")
+    sp.add_argument("--publications-path", required=True)
+    sp.add_argument("--references-path", default=None)
+    sp.add_argument("--output-root", required=True)
+    sp.add_argument("--dataset-id", required=True)
+    sp.add_argument("--model-bundle", required=True)
+    sp.add_argument("--provider", default="hf-inference")
+    sp.add_argument("--model-name", default="allenai/specter")
+    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
+    sp.add_argument("--profiles", default="all")
+    sp.add_argument("--concurrency-values", default="4,16,64")
+    sp.add_argument("--realistic-sample-size", type=int, default=128)
+    sp.add_argument("--micro-repeat-count", type=int, default=1000)
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_run_specter_hf_lab_benchmark)
 
     sp = sub.add_parser("run-cluster-test-report")
     sp.add_argument("--model-run-id", required=True)

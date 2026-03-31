@@ -11,6 +11,7 @@ The installed surface is intentionally small:
 - `run-infer-sources`
 - `run-hf-compatibility-report`
 - `run-specter-benchmark`
+- `run-specter-hf-lab-benchmark`
 
 The public Python API for inference surfaces is intentionally small:
 
@@ -52,6 +53,16 @@ source /home/ubuntu/.venv/bin/activate
 uv pip install \
   --python /home/ubuntu/.venv/bin/python \
   --editable ".[dev,research]" \
+  --torch-backend cu126
+```
+
+For the benchmark-only extras used by the HF transport lab runner:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --editable ".[bench,dev]" \
   --torch-backend cu126
 ```
 
@@ -168,6 +179,25 @@ This writes:
 - `specter_benchmark_report.json`
 - `specter_benchmark_report.md`
 
+Run the separate HF transport lab benchmark:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-specter-hf-lab-benchmark \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/benchmarks/ads_prod_current_specter_hf_lab \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
+  --profiles all \
+  --concurrency-values 4,16,64
+```
+
+This writes:
+
+- `specter_hf_lab_report.json`
+- `specter_hf_lab_report.md`
+
 ## Programmatic Inference
 
 ```python
@@ -251,6 +281,14 @@ The main comparison is cap-aligned with the real inference path:
 - local GPU and local CPU both truncate at the track cap
 - HF remote SPECTER also uses the same client-side tokenizer truncation
 - a small raw-HF probe stays in the report only as a long-text diagnostic
+
+Use `run-specter-hf-lab-benchmark` when you want the separate HF-only transport study.
+That lab runner intentionally measures aggressive async/pooling profiles on:
+
+- `micro_short_repeat` for HF-style short-text max-speed behavior
+- `ads_realistic_truncated` for ADS-like capped texts
+
+The lab report separates `prod-safe` from explicitly `lab_only` / `non_production` profiles so transport tuning does not get mixed into the package-realistic benchmark numbers.
 
 Inference outputs under `output_root`:
 
