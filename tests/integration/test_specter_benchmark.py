@@ -87,13 +87,36 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     class _FakeSession:
         def __init__(self, mode: str):
             self.mode = mode
+            self.load_seconds = 0.01
 
         def run(self, *, sample, cap, batch_size, progress):
             vectors = np.vstack(
-                [np.full((1, 768), fill_value=float(idx + (1 if self.mode == "gpu" else 2)), dtype=np.float32) for idx in range(len(sample.texts))]
+                [
+                    np.full(
+                        (1, 768),
+                        fill_value=float(
+                            idx
+                            + (
+                                1
+                                if self.mode == "gpu"
+                                else 2
+                                if self.mode == "cpu_transformers"
+                                else 3
+                            )
+                        ),
+                        dtype=np.float32,
+                    )
+                    for idx in range(len(sample.texts))
+                ]
             )
             return benchmark_module._ModeRun(
-                mode=f"local_{self.mode}",
+                mode=(
+                    "local_gpu"
+                    if self.mode == "gpu"
+                    else "local_cpu_transformers"
+                    if self.mode == "cpu_transformers"
+                    else "local_cpu_onnx_fp32"
+                ),
                 available=True,
                 vectors=vectors,
                 attempted_mask=np.ones((len(sample.texts),), dtype=bool),
@@ -102,16 +125,25 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
                 raw_shapes=[str([1, cap, 768])] * len(sample.texts),
                 sent_token_counts=np.full((len(sample.texts),), float(cap), dtype=np.float64),
                 errors=[None] * len(sample.texts),
-                load_seconds=0.01,
+                load_seconds=float(self.load_seconds),
                 processing_wall_seconds=0.1 * len(sample.texts),
                 total_wall_seconds=0.11 * len(sample.texts),
-                meta={"device": self.mode, "cap": int(cap), "batch_size": batch_size},
+                meta={"device": self.mode, "cap": int(cap), "batch_size": batch_size, "runtime_backend": self.mode},
             )
 
     monkeypatch.setattr(
         benchmark_module,
         "_try_create_local_session",
-        lambda model_name, device: (_FakeSession("gpu" if device == "cuda" else "cpu"), {"available": True}),
+        lambda model_name, device, runtime_backend="transformers", cache_root=None: (
+            _FakeSession(
+                "gpu"
+                if device == "cuda"
+                else "cpu_onnx"
+                if runtime_backend == "onnx_fp32"
+                else "cpu_transformers"
+            ),
+            {"available": True, "device": device, "runtime_backend": runtime_backend},
+        ),
     )
 
     def _fake_hf_mode(*, sample, mode_name, cap=None, api_concurrency=4, **_kwargs):
@@ -139,14 +171,15 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
         benchmark_module,
         "_run_track_b_downstream",
         lambda **_kwargs: {
+            "candidate_label": _kwargs.get("candidate_label"),
             "smoke": {
                 "passed": True,
                 "go_local": True,
-                "go_hf": True,
+                "go_candidate": True,
                 "mention_count_local": 8,
-                "mention_count_hf": 8,
+                "mention_count_candidate": 8,
                 "cluster_count_local": 4,
-                "cluster_count_hf": 4,
+                "cluster_count_candidate": 4,
                 "changed_assignments": 0,
                 "missing_mentions": 0,
             },
@@ -200,8 +233,11 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     assert report_json["tracks"]["track_a"]["cosine_parity"]["comparisons"]["hf_api_truncated_vs_local_gpu"][
         "compared_count"
     ] == 2
+    assert report_json["tracks"]["track_a"]["warmed_throughput"]["modes"]["local_cpu_transformers"]["texts_total"] == 2
+    assert report_json["tracks"]["track_a"]["warmed_throughput"]["modes"]["local_cpu_onnx_fp32"]["texts_total"] == 2
     assert report_json["raw_hf_probe"]["mode"]["texts_successful"] == report_json["raw_hf_probe"]["mode"]["texts_total"]
-    assert report_json["tracks"]["track_b"]["downstream_track_b"]["smoke"]["passed"] is True
+    assert report_json["tracks"]["track_b"]["downstream_track_b"]["hf_api_truncated"]["smoke"]["passed"] is True
+    assert report_json["tracks"]["track_b"]["downstream_track_b"]["local_cpu_onnx_fp32"]["smoke"]["passed"] is True
     assert report_json["extrapolation"]["track_b"]["cpu_infer_tail"]["chosen_method"] == "pair_scaled"
     assert "SPECTER Benchmark Report" in report_md
     assert "Raw HF Probe" in report_md

@@ -14,7 +14,7 @@ from author_name_disambiguation.features import embed_specter
 
 class _FakeTokenizer:
     @classmethod
-    def from_pretrained(cls, _model_name: str):
+    def from_pretrained(cls, _model_name: str, **_kwargs):
         return cls()
 
 
@@ -109,8 +109,10 @@ class _LengthSortingTokenizer:
     def __init__(self):
         self.seen_chunks: list[list[str]] = []
 
-    def __call__(self, chunk, padding=True, truncation=True, max_length=256, return_tensors="pt"):
+    def __call__(self, chunk, padding=True, truncation=True, max_length=256, return_tensors="pt", **kwargs):
         del padding, truncation, max_length, return_tensors
+        if kwargs.get("return_length"):
+            return {"length": [len(text) for text in chunk]}
         self.seen_chunks.append(list(chunk))
         lengths = torch.tensor([[len(text)] for text in chunk], dtype=torch.int64)
         return {"input_ids": lengths}
@@ -188,6 +190,7 @@ def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.Mo
     assert requested is None
     assert effective == 32
 
+    monkeypatch.setattr(embed_specter, "resolve_cpu_batch_size", lambda _batch_size: (None, 16))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cpu")
     assert requested is None
     assert effective == 16
@@ -241,7 +244,7 @@ class _FakeBatchTensor:
 
 
 class _OomBackoffTokenizer:
-    def __call__(self, chunk, padding=True, truncation=True, max_length=256, return_tensors="pt"):
+    def __call__(self, chunk, padding=True, truncation=True, max_length=256, return_tensors="pt", **_kwargs):
         del padding, truncation, max_length, return_tensors
         return {"input_ids": _FakeBatchTensor([[len(text)] for text in chunk])}
 

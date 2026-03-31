@@ -16,6 +16,17 @@ from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.embedding_contract import TEXT_EMBEDDING_DIM, build_source_text
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
+from author_name_disambiguation.features.specter_runtime import (
+    build_onnx_cache_path,
+    build_onnx_session,
+    compute_token_length_order,
+    export_specter_onnx,
+    load_tokenizer_prefer_fast,
+    normalize_runtime_backend,
+    resolve_cpu_batch_size,
+    resolve_cpu_thread_count,
+    temporary_torch_cpu_thread_policy,
+)
 
 _SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
 _SPECTER_DIM = TEXT_EMBEDDING_DIM
@@ -113,7 +124,7 @@ def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> t
     if requested is not None:
         return requested, requested
     if not str(device).startswith("cuda"):
-        return None, 16
+        return resolve_cpu_batch_size(batch_size)
 
     total_memory = _resolve_cuda_total_memory_bytes(torch, device)
     if total_memory is None:
@@ -367,7 +378,7 @@ def _load_specter_components(
     if reuse_model and cache_key in _SPECTER_MODEL_CACHE:
         return _SPECTER_MODEL_CACHE[cache_key]
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = load_tokenizer_prefer_fast(model_name)
     if backend == "transformers":
         from transformers import AutoModel
 
@@ -398,6 +409,7 @@ def generate_specter_embeddings(
     text_backend: str = "transformers",
     text_adapter_name: str | None = None,
     text_adapter_alias: str = "specter2",
+    runtime_backend: str = "transformers",
     batch_size: int | None = None,
     max_length: int = 256,
     device: str = "auto",
@@ -407,6 +419,7 @@ def generate_specter_embeddings(
     show_progress: bool = False,
     quiet_libraries: bool = False,
     reuse_model: bool = True,
+    onnx_cache_path: str | Path | None = None,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     titles = mentions["title"].fillna("").astype(str).tolist()
@@ -508,6 +521,12 @@ def generate_specter_embeddings(
 
     requested_device = str(device)
     device, runtime_meta = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
+    runtime_backend_clean = str(runtime_backend or "transformers").strip().lower() or "transformers"
+    if runtime_backend_clean == "onnx_fp32":
+        if requested_device.strip().lower() not in {"auto", "cpu"}:
+            raise ValueError("specter_runtime_backend='onnx_fp32' requires device='cpu' or device='auto'.")
+        device = "cpu"
+    runtime_backend_clean = normalize_runtime_backend(runtime_backend_clean, device=device)
     requested_batch_size, effective_batch_size = _resolve_specter_batch_size(torch, batch_size, device)
 
     tokenizer, model = _load_specter_components(
@@ -517,22 +536,51 @@ def generate_specter_embeddings(
         text_adapter_name=text_adapter_name,
         text_adapter_alias=text_adapter_alias,
     )
-    try:
-        model.to(device)
-    except Exception as exc:
-        if str(requested_device).strip().lower() == "auto" and str(device).startswith("cuda"):
-            device, runtime_meta = apply_auto_cuda_move_fallback(
-                requested_device=requested_device,
-                runtime_label="SPECTER embeddings",
-                runtime_meta=runtime_meta,
-                exc=exc,
-            )
-            requested_batch_size, effective_batch_size = _resolve_specter_batch_size(torch, batch_size, device)
+    onnx_session = None
+    onnx_path: Path | None = None
+    cpu_thread_count = resolve_cpu_thread_count() if str(device).startswith("cpu") else None
+    if runtime_backend_clean == "transformers":
+        try:
             model.to(device)
-        else:
-            raise
-    model.eval()
-    effective_precision_mode = _resolve_effective_precision_mode(torch=torch, precision_mode=precision_mode, device=device)
+        except Exception as exc:
+            if str(requested_device).strip().lower() == "auto" and str(device).startswith("cuda"):
+                device, runtime_meta = apply_auto_cuda_move_fallback(
+                    requested_device=requested_device,
+                    runtime_label="SPECTER embeddings",
+                    runtime_meta=runtime_meta,
+                    exc=exc,
+                )
+                requested_batch_size, effective_batch_size = _resolve_specter_batch_size(torch, batch_size, device)
+                model.to(device)
+            else:
+                raise
+        model.eval()
+    else:
+        if _normalize_text_backend(text_backend) != "transformers":
+            raise ValueError("specter_runtime_backend='onnx_fp32' requires text_backend='transformers'.")
+        model.to("cpu")
+        model.eval()
+        onnx_path = build_onnx_cache_path(output_path=onnx_cache_path, model_name=model_name, max_length=max_length)
+        sample_text = next((str(texts[idx]) for idx in missing_indices if str(texts[idx]).strip()), "")
+        if not sample_text:
+            sample_text = next((str(text) for text in texts if str(text).strip()), "SPECTER export sample text")
+        onnx_path = export_specter_onnx(
+            tokenizer=tokenizer,
+            model=model,
+            torch_module=torch,
+            export_path=onnx_path,
+            sample_text=sample_text,
+            max_length=max_length,
+        )
+        onnx_session = build_onnx_session(
+            onnx_path=onnx_path,
+            num_threads=resolve_cpu_thread_count(cpu_thread_count),
+        )
+    effective_precision_mode = (
+        "fp32"
+        if runtime_backend_clean == "onnx_fp32"
+        else _resolve_effective_precision_mode(torch=torch, precision_mode=precision_mode, device=device)
+    )
     runtime_meta["effective_precision_mode"] = effective_precision_mode
 
     out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
@@ -541,7 +589,15 @@ def generate_specter_embeddings(
             out[idx] = item
 
     vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
-    vectors_for_indices = sorted(vectors_for_indices, key=lambda idx: (len(texts[idx]), idx))
+    if str(device).startswith("cpu") and vectors_for_indices:
+        ordered = compute_token_length_order(
+            [texts[idx] for idx in vectors_for_indices],
+            tokenizer=tokenizer,
+            max_length=max_length,
+        )
+        vectors_for_indices = [vectors_for_indices[int(pos)] for pos in ordered.tolist()]
+    else:
+        vectors_for_indices = sorted(vectors_for_indices, key=lambda idx: (len(texts[idx]), idx))
     meta = {
         **_base_runtime_meta(
             requested_device=requested_device,
@@ -557,6 +613,9 @@ def generate_specter_embeddings(
             model_to_cuda_error=runtime_meta.get("model_to_cuda_error"),
         ),
     }
+    meta["runtime_backend"] = str(runtime_backend_clean)
+    if onnx_path is not None:
+        meta["onnx_path"] = str(onnx_path)
     observed_sequence_count = 0
     device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
         torch,
@@ -568,110 +627,163 @@ def generate_specter_embeddings(
         start = 0
         pending_cls_tensors: list[Any] = []
         pending_index_batches: list[np.ndarray] = []
+        cpu_thread_policy = (
+            temporary_torch_cpu_thread_policy(torch, intra_op_threads=cpu_thread_count)
+            if str(device).startswith("cpu")
+            else nullcontext({})
+        )
         with loop_progress(
             total=len(vectors_for_indices),
             label="SPECTER texts",
             enabled=show_progress,
             unit="text",
         ) as tracker:
-            with torch.inference_mode():
-                while start < len(vectors_for_indices):
-                    while True:
+            with cpu_thread_policy as cpu_thread_meta:
+                if isinstance(cpu_thread_meta, dict) and cpu_thread_meta:
+                    meta.update(cpu_thread_meta)
+                if runtime_backend_clean == "onnx_fp32":
+                    session_input_names = [item.name for item in onnx_session.get_inputs()]
+                    while start < len(vectors_for_indices):
                         current_batch_size = min(int(meta["effective_batch_size"]), len(vectors_for_indices) - start)
                         batch_indices = vectors_for_indices[start : start + current_batch_size]
                         chunk = [texts[idx] for idx in batch_indices]
-                        try:
-                            tokenize_started_at = perf_counter()
-                            enc = tokenizer(
-                                chunk,
-                                padding=True,
-                                truncation=True,
-                                max_length=max_length,
-                                return_tensors="pt",
-                            )
-                            meta["tokenize_seconds_total"] += perf_counter() - tokenize_started_at
-                            token_count, max_sequence_length, observed_count = _observed_token_stats(enc)
-                            meta["token_count_total"] += int(token_count)
-                            meta["max_sequence_length_observed"] = max(
-                                int(meta["max_sequence_length_observed"]),
-                                int(max_sequence_length),
-                            )
-                            observed_sequence_count += int(observed_count)
+                        tokenize_started_at = perf_counter()
+                        enc = tokenizer(
+                            chunk,
+                            padding=True,
+                            truncation=True,
+                            max_length=max_length,
+                            return_tensors="np",
+                        )
+                        meta["tokenize_seconds_total"] += perf_counter() - tokenize_started_at
+                        if "attention_mask" in enc:
+                            lengths = np.asarray(enc["attention_mask"], dtype=np.int64).sum(axis=1)
+                            token_count = int(lengths.sum())
+                            max_sequence_length = int(lengths.max()) if lengths.size else 0
+                            observed_count = int(lengths.size)
+                        else:
+                            input_ids = np.asarray(enc["input_ids"], dtype=np.int64)
+                            token_count = int(input_ids.size)
+                            max_sequence_length = int(input_ids.shape[1]) if input_ids.ndim >= 2 else 0
+                            observed_count = int(input_ids.shape[0]) if input_ids.ndim >= 1 else 0
+                        meta["token_count_total"] += int(token_count)
+                        meta["max_sequence_length_observed"] = max(
+                            int(meta["max_sequence_length_observed"]),
+                            int(max_sequence_length),
+                        )
+                        observed_sequence_count += int(observed_count)
+                        forward_started_at = perf_counter()
+                        ort_inputs = {
+                            name: np.asarray(enc[name], dtype=np.int64)
+                            for name in session_input_names
+                            if name in enc
+                        }
+                        last_hidden_state = onnx_session.run(None, ort_inputs)[0]
+                        cls = np.asarray(last_hidden_state[:, 0, :], dtype=np.float32)
+                        meta["forward_seconds_total"] += perf_counter() - forward_started_at
+                        out[np.asarray(batch_indices, dtype=np.int64)] = cls
+                        meta["batches_total"] += 1
+                        start += current_batch_size
+                        tracker.update(current_batch_size)
+                else:
+                    with torch.inference_mode():
+                        while start < len(vectors_for_indices):
+                            while True:
+                                current_batch_size = min(int(meta["effective_batch_size"]), len(vectors_for_indices) - start)
+                                batch_indices = vectors_for_indices[start : start + current_batch_size]
+                                chunk = [texts[idx] for idx in batch_indices]
+                                try:
+                                    tokenize_started_at = perf_counter()
+                                    enc = tokenizer(
+                                        chunk,
+                                        padding=True,
+                                        truncation=True,
+                                        max_length=max_length,
+                                        return_tensors="pt",
+                                    )
+                                    meta["tokenize_seconds_total"] += perf_counter() - tokenize_started_at
+                                    token_count, max_sequence_length, observed_count = _observed_token_stats(enc)
+                                    meta["token_count_total"] += int(token_count)
+                                    meta["max_sequence_length_observed"] = max(
+                                        int(meta["max_sequence_length_observed"]),
+                                        int(max_sequence_length),
+                                    )
+                                    observed_sequence_count += int(observed_count)
 
-                            host_to_device_started_at = perf_counter()
-                            enc = _encoding_to_device(enc, device)
-                            meta["host_to_device_seconds_total"] += perf_counter() - host_to_device_started_at
+                                    host_to_device_started_at = perf_counter()
+                                    enc = _encoding_to_device(enc, device)
+                                    meta["host_to_device_seconds_total"] += perf_counter() - host_to_device_started_at
 
-                            forward_started_at = perf_counter()
-                            with _autocast_context(torch, effective_precision_mode):
-                                batch_out = model(**enc)
-                            cls_tensor = batch_out.last_hidden_state[:, 0, :].detach()
-                            meta["forward_seconds_total"] += perf_counter() - forward_started_at
+                                    forward_started_at = perf_counter()
+                                    with _autocast_context(torch, effective_precision_mode):
+                                        batch_out = model(**enc)
+                                    cls_tensor = batch_out.last_hidden_state[:, 0, :].detach()
+                                    meta["forward_seconds_total"] += perf_counter() - forward_started_at
 
-                            pending_cls_tensors.append(cls_tensor)
-                            pending_index_batches.append(np.asarray(batch_indices, dtype=np.int64))
-                            if len(pending_cls_tensors) >= int(device_to_host_flush_batch_count):
-                                _flush_pending_cls_batches(
-                                    torch_module=torch,
-                                    pending_tensors=pending_cls_tensors,
-                                    pending_indices=pending_index_batches,
-                                    out=out,
-                                    meta=meta,
-                                )
-                            meta["batches_total"] += 1
-                            start += current_batch_size
-                            tracker.update(current_batch_size)
-                            break
-                        except Exception as exc:
-                            if not str(device).startswith("cuda") or not _is_cuda_oom(torch, exc):
-                                raise
-                            _flush_pending_cls_batches(
-                                torch_module=torch,
-                                pending_tensors=pending_cls_tensors,
-                                pending_indices=pending_index_batches,
-                                out=out,
-                                meta=meta,
-                            )
-                            _best_effort_clear_cuda_cache(torch)
-                            if int(meta["effective_batch_size"]) > 16:
-                                meta["oom_retry_count"] += 1
-                                meta["effective_batch_size"] = max(16, int(meta["effective_batch_size"]) // 2)
-                                device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
-                                    torch,
-                                    device=device,
-                                    effective_batch_size=int(meta["effective_batch_size"]),
-                                )
-                                meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
-                                continue
-                            if requested_device.strip().lower() == "auto":
-                                meta["oom_retry_count"] += 1
-                                meta["fallback_reason"] = "cuda_oom_cpu_fallback"
-                                device = "cpu"
-                                model.to(device)
-                                _best_effort_clear_cuda_cache(torch)
-                                effective_precision_mode = _resolve_effective_precision_mode(
-                                    torch=torch,
-                                    precision_mode=precision_mode,
-                                    device=device,
-                                )
-                                device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
-                                    torch,
-                                    device=device,
-                                    effective_batch_size=16,
-                                )
-                                meta["resolved_device"] = device
-                                meta["effective_precision_mode"] = effective_precision_mode
-                                meta["effective_batch_size"] = 16
-                                meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
-                                continue
-                            raise
-                _flush_pending_cls_batches(
-                    torch_module=torch,
-                    pending_tensors=pending_cls_tensors,
-                    pending_indices=pending_index_batches,
-                    out=out,
-                    meta=meta,
-                )
+                                    pending_cls_tensors.append(cls_tensor)
+                                    pending_index_batches.append(np.asarray(batch_indices, dtype=np.int64))
+                                    if len(pending_cls_tensors) >= int(device_to_host_flush_batch_count):
+                                        _flush_pending_cls_batches(
+                                            torch_module=torch,
+                                            pending_tensors=pending_cls_tensors,
+                                            pending_indices=pending_index_batches,
+                                            out=out,
+                                            meta=meta,
+                                        )
+                                    meta["batches_total"] += 1
+                                    start += current_batch_size
+                                    tracker.update(current_batch_size)
+                                    break
+                                except Exception as exc:
+                                    if not str(device).startswith("cuda") or not _is_cuda_oom(torch, exc):
+                                        raise
+                                    _flush_pending_cls_batches(
+                                        torch_module=torch,
+                                        pending_tensors=pending_cls_tensors,
+                                        pending_indices=pending_index_batches,
+                                        out=out,
+                                        meta=meta,
+                                    )
+                                    _best_effort_clear_cuda_cache(torch)
+                                    if int(meta["effective_batch_size"]) > 16:
+                                        meta["oom_retry_count"] += 1
+                                        meta["effective_batch_size"] = max(16, int(meta["effective_batch_size"]) // 2)
+                                        device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
+                                            torch,
+                                            device=device,
+                                            effective_batch_size=int(meta["effective_batch_size"]),
+                                        )
+                                        meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
+                                        continue
+                                    if requested_device.strip().lower() == "auto":
+                                        meta["oom_retry_count"] += 1
+                                        meta["fallback_reason"] = "cuda_oom_cpu_fallback"
+                                        device = "cpu"
+                                        model.to(device)
+                                        _best_effort_clear_cuda_cache(torch)
+                                        effective_precision_mode = _resolve_effective_precision_mode(
+                                            torch=torch,
+                                            precision_mode=precision_mode,
+                                            device=device,
+                                        )
+                                        device_to_host_flush_batch_count = _resolve_device_to_host_flush_batch_count(
+                                            torch,
+                                            device=device,
+                                            effective_batch_size=16,
+                                        )
+                                        meta["resolved_device"] = device
+                                        meta["effective_precision_mode"] = effective_precision_mode
+                                        meta["effective_batch_size"] = 16
+                                        meta["device_to_host_flush_batch_count"] = int(device_to_host_flush_batch_count)
+                                        continue
+                                    raise
+                        _flush_pending_cls_batches(
+                            torch_module=torch,
+                            pending_tensors=pending_cls_tensors,
+                            pending_indices=pending_index_batches,
+                            out=out,
+                            meta=meta,
+                        )
 
     if observed_sequence_count > 0:
         meta["mean_sequence_length_observed"] = float(meta["token_count_total"]) / float(observed_sequence_count)
@@ -695,6 +807,7 @@ def get_or_create_specter_embeddings(
     text_backend: str = "transformers",
     text_adapter_name: str | None = None,
     text_adapter_alias: str = "specter2",
+    runtime_backend: str = "transformers",
     batch_size: int | None = None,
     max_length: int = 256,
     device: str = "auto",
@@ -746,6 +859,7 @@ def get_or_create_specter_embeddings(
         text_backend=text_backend,
         text_adapter_name=text_adapter_name,
         text_adapter_alias=text_adapter_alias,
+        runtime_backend=runtime_backend,
         batch_size=batch_size,
         max_length=max_length,
         device=device,
@@ -755,6 +869,7 @@ def get_or_create_specter_embeddings(
         show_progress=show_progress,
         quiet_libraries=quiet_libraries,
         reuse_model=reuse_model,
+        onnx_cache_path=build_onnx_cache_path(output_path=output_path, model_name=model_name, max_length=max_length),
         return_meta=True,
     )
     emb, meta = emb_result

@@ -32,6 +32,7 @@ def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
         model_bundle=tmp_path / "bundle",
         uid_scope="dataset",
         uid_namespace="ads_prod_current",
+        specter_runtime_backend="onnx_fp32",
         progress=False,
     )
     result = run_infer_sources(request)
@@ -44,4 +45,5 @@ def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
     assert captured_request.dataset_id == "ads_prod_current"
     assert captured_request.uid_scope == "dataset"
     assert captured_request.uid_namespace == "ads_prod_current"
+    assert captured_request.specter_runtime_backend == "onnx_fp32"
     assert captured_request.progress is False

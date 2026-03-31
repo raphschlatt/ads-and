@@ -573,6 +573,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     specter_batch_size_override = infer_overrides.get("specter_batch_size")
     specter_batch_size = None if specter_batch_size_override is None else int(specter_batch_size_override)
     specter_precision_mode = str(infer_overrides.get("specter_precision_mode", "auto")).strip().lower()
+    specter_runtime_backend = (
+        str(request.specter_runtime_backend).strip().lower()
+        if getattr(request, "specter_runtime_backend", None) is not None
+        else str(infer_overrides.get("specter_runtime_backend", "transformers")).strip().lower()
+    )
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
     score_chunked_threshold = int(infer_overrides.get("score_chunked_threshold", 500_000))
     pair_chunk_rows = int(infer_overrides.get("pair_chunk_rows", 200_000))
@@ -617,6 +622,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "embedding_contract": dict(model_info.get("embedding_contract", {}) or {}),
         "device": str(request.device),
         "precision_mode": str(request.precision_mode),
+        "specter_runtime_backend": specter_runtime_backend,
         "cluster_backend": str(cluster_backend),
         "cpu_runtime_policy": {
             "cpu_workers": _format_worker_request(cpu_workers),
@@ -735,7 +741,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     name_embeddings_started_at = perf_counter()
     _ui_start("Name embeddings")
     chars_path = dirs["embeddings"] / "chars2vec.npy"
-    text_path = dirs["embeddings"] / "specter.npy"
+    text_cache_name = "specter.npy" if specter_runtime_backend == "transformers" else f"specter_{specter_runtime_backend}.npy"
+    text_path = dirs["embeddings"] / text_cache_name
     chars_cache_requested = chars_path.exists() and not bool(request.force)
     _ui_info(
         f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | backend=chars2vec/tensorflow"
@@ -773,6 +780,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
         f"precomputed={_format_count(precomputed_embeddings['mentions']['precomputed_embedding_count'])} | "
         f"batch_size={specter_batch_size_label} | device={str(request.device)} | "
+        f"backend={specter_runtime_backend} | "
         f"precision={specter_precision_mode}"
     )
     text_result = get_or_create_specter_embeddings(
@@ -783,6 +791,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         text_backend=model_info["model_cfg"].get("representation", {}).get("text_backend", "transformers"),
         text_adapter_name=model_info["model_cfg"].get("representation", {}).get("text_adapter_name"),
         text_adapter_alias=model_info["model_cfg"].get("representation", {}).get("text_adapter_alias", "specter2"),
+        runtime_backend=specter_runtime_backend,
         max_length=int(model_info["model_cfg"].get("representation", {}).get("max_length", 256)),
         batch_size=specter_batch_size,
         device=str(request.device),

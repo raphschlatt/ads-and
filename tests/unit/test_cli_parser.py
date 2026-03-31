@@ -130,6 +130,7 @@ def test_run_infer_sources_parser_defaults():
     assert args.infer_stage == "full"
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
+    assert args.specter_runtime_backend is None
     assert args.cluster_backend is None
     assert args.uid_scope == "dataset"
     assert args.uid_namespace is None
@@ -163,6 +164,8 @@ def test_run_infer_sources_parser_accepts_overrides():
             "--verbose-libs",
             "--precision-mode",
             "amp_bf16",
+            "--specter-runtime-backend",
+            "onnx_fp32",
             "--cluster-backend",
             "sklearn_cpu",
             "--uid-scope",
@@ -179,6 +182,7 @@ def test_run_infer_sources_parser_accepts_overrides():
     assert args.progress is False
     assert args.quiet_libs is False
     assert args.precision_mode == "amp_bf16"
+    assert args.specter_runtime_backend == "onnx_fp32"
     assert args.cluster_backend == "sklearn_cpu"
     assert args.uid_scope == "registry"
     assert args.uid_namespace == "stable_ads"

@@ -11,6 +11,7 @@ UidScope = Literal["dataset", "local", "registry"]
 InferStage = Literal["smoke", "mini", "mid", "full"]
 PrecisionMode = Literal["fp32", "amp_bf16"]
 ClusterBackend = Literal["auto", "sklearn_cpu", "cuml_gpu"]
+SpecterRuntimeBackend = Literal["transformers", "onnx_fp32"]
 
 
 @dataclass(slots=True)
@@ -27,6 +28,7 @@ class InferSourcesRequest:
     gates_config: str | Path | Mapping[str, Any] | None = None
     device: str = "auto"
     precision_mode: PrecisionMode = "fp32"
+    specter_runtime_backend: SpecterRuntimeBackend | None = None
     cluster_backend: ClusterBackend | None = None
     force: bool = False
     progress: bool = True

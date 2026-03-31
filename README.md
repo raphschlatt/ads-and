@@ -279,8 +279,24 @@ That benchmark intentionally separates:
 The main comparison is cap-aligned with the real inference path:
 
 - local GPU and local CPU both truncate at the track cap
+- the default local CPU backend is the exact `transformers` path
+- optional `onnx_fp32` is benchmarked separately when the `cpu_onnx` extra is installed
 - HF remote SPECTER also uses the same client-side tokenizer truncation
 - a small raw-HF probe stays in the report only as a long-text diagnostic
+
+For local CPU inference there is one explicit runtime switch:
+
+- `--specter-runtime-backend transformers|onnx_fp32`
+
+Effective default is `transformers`. `onnx_fp32` is opt-in, CPU-only, and initially experimental.
+Install the optional ONNX extra if you want to use or benchmark it:
+
+```bash
+source /home/ubuntu/.venv/bin/activate
+uv pip install \
+  --python /home/ubuntu/.venv/bin/python \
+  --editable ".[cpu_onnx,dev]"
+```
 
 Use `run-specter-hf-lab-benchmark` when you want the separate HF-only transport study.
 That lab runner intentionally measures aggressive async/pooling profiles on:

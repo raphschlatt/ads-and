@@ -1748,6 +1748,7 @@ def cmd_run_infer_sources(args):
                 gates_config=args.gates_config,
                 device=args.device,
                 precision_mode=args.precision_mode,
+                specter_runtime_backend=args.specter_runtime_backend,
                 cluster_backend=args.cluster_backend,
                 force=bool(args.force),
                 progress=bool(args.progress),
@@ -2544,6 +2545,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gates-config", default=None)
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
+    sp.add_argument("--specter-runtime-backend", choices=["transformers", "onnx_fp32"], default=None)
     sp.add_argument("--cluster-backend", choices=["auto", "sklearn_cpu", "cuml_gpu"], default=None)
     sp.add_argument("--uid-scope", choices=["dataset", "local", "registry"], default="dataset")
     sp.add_argument("--uid-namespace", default=None)

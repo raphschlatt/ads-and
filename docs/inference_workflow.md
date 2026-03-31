@@ -100,7 +100,8 @@ If the gate fails, the HF path stays experimental even if the remote vectors are
 Use the dedicated benchmark when you want a like-for-like comparison of:
 
 - local GPU SPECTER
-- local CPU SPECTER
+- local CPU SPECTER via the exact `transformers` backend
+- optional local CPU SPECTER via `onnx_fp32` when the ONNX extra is installed
 - HF remote SPECTER with the same client-side tokenizer truncation used by the live inference path
 
 The raw HF path is still probed, but only as a small diagnostic for long-text failures rather than as a first-class throughput mode.
@@ -131,7 +132,7 @@ It also reports:
 
 - whether the raw HF path breaks on long ADS-style texts
 - whether the cap-aligned truncated HF path stays viable against local CPU/GPU references
-- throughput and cosine parity across API, CPU, and GPU
+- throughput and cosine parity across GPU, exact CPU, optional ONNX CPU, and HF
 - a source-based full-run interpolation
 - a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
 
@@ -168,6 +169,7 @@ That runner is intentionally separate from the realistic package benchmark:
 - `--cluster-config <yaml>`
 - `--gates-config <yaml>`
 - `--device auto|cpu|cuda`
+- `--specter-runtime-backend transformers|onnx_fp32`
 - `--precision-mode fp32|amp_bf16`
 - `--cluster-backend auto|sklearn_cpu|cuml_gpu`
 - `--uid-scope dataset|local|registry`

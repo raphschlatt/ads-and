@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass
 import ast
 import importlib.util
@@ -24,6 +25,18 @@ from author_name_disambiguation.embedding_contract import (
     DEFAULT_TEXT_MODEL_NAME,
     build_bundle_embedding_contract,
     build_source_text,
+)
+from author_name_disambiguation.features.embed_specter import _load_specter_components
+from author_name_disambiguation.features.specter_runtime import (
+    build_onnx_cache_path,
+    build_onnx_session,
+    compute_token_length_order,
+    export_specter_onnx,
+    load_tokenizer_prefer_fast,
+    normalize_runtime_backend,
+    resolve_cpu_batch_size,
+    resolve_cpu_thread_count,
+    temporary_torch_cpu_thread_policy,
 )
 from author_name_disambiguation.hf_compatibility_report import _compare_infer_outputs, _standardize_sample_frame
 from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
@@ -107,8 +120,8 @@ class _TrackArtifacts:
     cold_start: dict[str, Any]
     warmed_throughput: dict[str, Any]
     cosine_parity: dict[str, Any]
-    reference_run: _ModeRun
-    hf_run: _ModeRun
+    mode_runs: dict[str, _ModeRun]
+    reference_mode_name: str
 
 
 def _resolved_path(value: str | Path) -> Path:
@@ -235,9 +248,7 @@ def _build_texts_from_frame(frame: pd.DataFrame) -> list[str]:
 
 
 def _build_tokenizer(model_name: str):
-    from transformers import AutoTokenizer
-
-    return AutoTokenizer.from_pretrained(model_name)
+    return load_tokenizer_prefer_fast(model_name)
 
 
 def _compute_raw_token_counts_for_texts(
@@ -724,30 +735,76 @@ def _run_hf_mode(
 
 
 class _LocalSpecterSession:
-    def __init__(self, *, model_name: str, device: str):
+    def __init__(self, *, model_name: str, device: str, runtime_backend: str = "transformers", cache_root: Path | None = None):
         started_at = perf_counter()
-        from transformers import AutoModel, AutoTokenizer
-
         self.device = str(device)
         self.model_name = str(model_name)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
+        self.runtime_backend = normalize_runtime_backend(runtime_backend, device=("cpu" if runtime_backend == "onnx_fp32" else device))
+        self.cache_root = None if cache_root is None else Path(cache_root).expanduser().resolve()
+        self.tokenizer, self.model = _load_specter_components(
+            model_name=model_name,
+            reuse_model=False,
+            text_backend="transformers",
+        )
 
         import torch
 
         self.torch = torch
         self.available = True
         self.load_seconds = 0.0
+        self.cpu_thread_count = resolve_cpu_thread_count() if self.device == "cpu" else None
+        self._onnx_sessions: dict[int, tuple[Path, Any]] = {}
         try:
             if self.device.startswith("cuda") and not torch.cuda.is_available():
                 raise RuntimeError("CUDA is not available in this environment.")
-            self.model.to(self.device)
+            if self.runtime_backend == "onnx_fp32" and self.device != "cpu":
+                raise RuntimeError("ONNX FP32 benchmark backend is only available on CPU.")
+            self.model.to(self.device if self.runtime_backend == "transformers" else "cpu")
             self.model.eval()
         except Exception:
             self.available = False
             raise
         finally:
             self.load_seconds = float(perf_counter() - started_at)
+
+    def _resolve_mode_name(self) -> str:
+        if self.device.startswith("cuda"):
+            return "local_gpu"
+        if self.runtime_backend == "onnx_fp32":
+            return "local_cpu_onnx_fp32"
+        return "local_cpu_transformers"
+
+    def _resolve_batch_size(self, batch_size: int | None) -> int:
+        if batch_size is not None:
+            return max(1, int(batch_size))
+        if self.device.startswith("cuda"):
+            return 128
+        return int(resolve_cpu_batch_size(None)[1])
+
+    def _ordered_indices(self, *, sample: _BenchmarkSample, cap: int) -> np.ndarray:
+        if self.device != "cpu" or len(sample.texts) <= 1:
+            return np.arange(len(sample.texts), dtype=np.int64)
+        order = compute_token_length_order(sample.texts, tokenizer=self.tokenizer, max_length=int(cap))
+        return np.asarray(order, dtype=np.int64)
+
+    def _get_onnx_session(self, *, cap: int, sample: _BenchmarkSample):
+        cached = self._onnx_sessions.get(int(cap))
+        if cached is not None:
+            return cached
+        cache_hint = None if self.cache_root is None else self.cache_root / f"specter_cap_{int(cap)}.npy"
+        onnx_path = build_onnx_cache_path(output_path=cache_hint, model_name=self.model_name, max_length=int(cap))
+        sample_text = next((text for text in sample.texts if text.strip()), "SPECTER benchmark export sample")
+        onnx_path = export_specter_onnx(
+            tokenizer=self.tokenizer,
+            model=self.model,
+            torch_module=self.torch,
+            export_path=onnx_path,
+            sample_text=sample_text,
+            max_length=int(cap),
+        )
+        session = build_onnx_session(onnx_path=onnx_path, num_threads=resolve_cpu_thread_count(self.cpu_thread_count))
+        self._onnx_sessions[int(cap)] = (onnx_path, session)
+        return onnx_path, session
 
     def run(self, *, sample: _BenchmarkSample, cap: int, batch_size: int | None, progress: bool) -> _ModeRun:
         texts_total = len(sample.texts)
@@ -759,54 +816,101 @@ class _LocalSpecterSession:
         raw_shapes: list[str | None] = [None] * texts_total
         errors: list[str | None] = [None] * texts_total
 
-        actual_batch_size = int(batch_size) if batch_size is not None else (16 if self.device == "cpu" else 128)
-        actual_batch_size = max(1, int(actual_batch_size))
+        actual_batch_size = self._resolve_batch_size(batch_size)
+        ordered_indices = self._ordered_indices(sample=sample, cap=int(cap))
         started_at = perf_counter()
+        if self.runtime_backend == "onnx_fp32":
+            onnx_path, onnx_session = self._get_onnx_session(cap=int(cap), sample=sample)
+            session_input_names = [item.name for item in onnx_session.get_inputs()]
+        else:
+            onnx_path = None
+            onnx_session = None
+            session_input_names = []
+        cpu_thread_policy = (
+            temporary_torch_cpu_thread_policy(self.torch, intra_op_threads=self.cpu_thread_count)
+            if self.device == "cpu"
+            else nullcontext({})
+        )
         with loop_progress(
             total=texts_total,
-            label=f"local_{self.device} {sample.name}",
+            label=f"{self._resolve_mode_name()} {sample.name}",
             enabled=bool(progress),
             unit="text",
         ) as tracker:
-            for start in range(0, texts_total, actual_batch_size):
-                stop = min(texts_total, start + actual_batch_size)
-                batch_indices = np.arange(start, stop, dtype=np.int64)
-                batch_texts = sample.texts[start:stop]
-                batch_started_at = perf_counter()
-                try:
-                    enc = self.tokenizer(
-                        batch_texts,
-                        padding=True,
-                        truncation=True,
-                        return_tensors="pt",
-                        max_length=int(cap),
-                    )
-                    sent_lengths = enc["attention_mask"].sum(dim=1).detach().cpu().numpy().astype(np.int32, copy=False)
-                    sent_token_counts[batch_indices] = sent_lengths.astype(np.float64, copy=False)
-                    enc = {key: value.to(self.device) for key, value in enc.items()}
-                    with self.torch.no_grad():
-                        if self.device.startswith("cuda"):
-                            self.torch.cuda.synchronize()
-                        outputs = self.model(**enc)
-                        if self.device.startswith("cuda"):
-                            self.torch.cuda.synchronize()
-                    cls = outputs.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32, copy=False)
-                    vectors[batch_indices] = cls
-                    success_mask[batch_indices] = True
-                    shape_repr = str(list(outputs.last_hidden_state.shape))
-                    for idx in batch_indices:
-                        raw_shapes[int(idx)] = shape_repr
-                except Exception as exc:
-                    for idx in batch_indices:
-                        errors[int(idx)] = str(exc)
-                batch_wall_seconds = perf_counter() - batch_started_at
-                if len(batch_indices):
-                    per_item_wall_seconds[batch_indices] = float(batch_wall_seconds / len(batch_indices))
-                tracker.update(int(len(batch_indices)))
+            with cpu_thread_policy as cpu_thread_meta:
+                meta: dict[str, Any] = {
+                    "device": self.device,
+                    "batch_size": int(actual_batch_size),
+                    "cap": int(cap),
+                    "model_name": self.model_name,
+                    "runtime_backend": self.runtime_backend,
+                }
+                if isinstance(cpu_thread_meta, dict) and cpu_thread_meta:
+                    meta.update(cpu_thread_meta)
+                for start in range(0, texts_total, actual_batch_size):
+                    stop = min(texts_total, start + actual_batch_size)
+                    batch_indices = ordered_indices[start:stop]
+                    batch_texts = [sample.texts[int(idx)] for idx in batch_indices.tolist()]
+                    batch_started_at = perf_counter()
+                    try:
+                        if self.runtime_backend == "onnx_fp32":
+                            enc = self.tokenizer(
+                                batch_texts,
+                                padding=True,
+                                truncation=True,
+                                return_tensors="np",
+                                max_length=int(cap),
+                            )
+                            sent_lengths = (
+                                np.asarray(enc["attention_mask"], dtype=np.int64).sum(axis=1).astype(np.int32, copy=False)
+                                if "attention_mask" in enc
+                                else np.full((len(batch_indices),), int(cap), dtype=np.int32)
+                            )
+                            sent_token_counts[batch_indices] = sent_lengths.astype(np.float64, copy=False)
+                            ort_inputs = {
+                                name: np.asarray(enc[name], dtype=np.int64)
+                                for name in session_input_names
+                                if name in enc
+                            }
+                            last_hidden_state = onnx_session.run(None, ort_inputs)[0]
+                            cls = np.asarray(last_hidden_state[:, 0, :], dtype=np.float32)
+                            vectors[batch_indices] = cls
+                            success_mask[batch_indices] = True
+                            shape_repr = str(list(np.asarray(last_hidden_state).shape))
+                        else:
+                            enc = self.tokenizer(
+                                batch_texts,
+                                padding=True,
+                                truncation=True,
+                                return_tensors="pt",
+                                max_length=int(cap),
+                            )
+                            sent_lengths = enc["attention_mask"].sum(dim=1).detach().cpu().numpy().astype(np.int32, copy=False)
+                            sent_token_counts[batch_indices] = sent_lengths.astype(np.float64, copy=False)
+                            enc = {key: value.to(self.device) for key, value in enc.items()}
+                            with self.torch.inference_mode():
+                                if self.device.startswith("cuda"):
+                                    self.torch.cuda.synchronize()
+                                outputs = self.model(**enc)
+                                if self.device.startswith("cuda"):
+                                    self.torch.cuda.synchronize()
+                            cls = outputs.last_hidden_state[:, 0, :].detach().cpu().numpy().astype(np.float32, copy=False)
+                            vectors[batch_indices] = cls
+                            success_mask[batch_indices] = True
+                            shape_repr = str(list(outputs.last_hidden_state.shape))
+                        for idx in batch_indices:
+                            raw_shapes[int(idx)] = shape_repr
+                    except Exception as exc:
+                        for idx in batch_indices:
+                            errors[int(idx)] = str(exc)
+                    batch_wall_seconds = perf_counter() - batch_started_at
+                    if len(batch_indices):
+                        per_item_wall_seconds[batch_indices] = float(batch_wall_seconds / len(batch_indices))
+                    tracker.update(int(len(batch_indices)))
 
         total_wall_seconds = perf_counter() - started_at
         return _ModeRun(
-            mode=f"local_{'gpu' if self.device.startswith('cuda') else 'cpu'}",
+            mode=self._resolve_mode_name(),
             available=True,
             vectors=vectors,
             attempted_mask=attempted_mask,
@@ -819,52 +923,57 @@ class _LocalSpecterSession:
             processing_wall_seconds=float(total_wall_seconds),
             total_wall_seconds=float(self.load_seconds + total_wall_seconds),
             meta={
-                "device": self.device,
-                "batch_size": int(actual_batch_size),
-                "cap": int(cap),
-                "model_name": self.model_name,
+                **meta,
+                "onnx_path": None if onnx_path is None else str(onnx_path),
             },
         )
 
 
-def _try_create_local_session(*, model_name: str, device: str) -> tuple[_LocalSpecterSession | None, dict[str, Any]]:
+def _try_create_local_session(
+    *,
+    model_name: str,
+    device: str,
+    runtime_backend: str = "transformers",
+    cache_root: Path | None = None,
+) -> tuple[_LocalSpecterSession | None, dict[str, Any]]:
     try:
-        session = _LocalSpecterSession(model_name=model_name, device=device)
-        return session, {"available": True, "device": device}
+        session = _LocalSpecterSession(
+            model_name=model_name,
+            device=device,
+            runtime_backend=runtime_backend,
+            cache_root=cache_root,
+        )
+        return session, {"available": True, "device": device, "runtime_backend": runtime_backend}
     except Exception as exc:
-        return None, {"available": False, "device": device, "error": str(exc)}
+        return None, {"available": False, "device": device, "runtime_backend": runtime_backend, "error": str(exc)}
 
 
 def _build_track_sample_report(
     *,
     sample: _BenchmarkSample,
     cap: int,
-    reference: _ModeRun,
-    local_cpu: _ModeRun,
-    hf_api: _ModeRun,
+    modes: dict[str, _ModeRun],
+    reference_mode_name: str,
 ) -> dict[str, Any]:
+    reference = modes[reference_mode_name]
+    mode_payload: dict[str, Any] = {}
+    for mode_name, run in modes.items():
+        if mode_name == reference_mode_name:
+            mode_payload[mode_name] = _summarize_mode_run(run, sample, cap=cap)
+            continue
+        mode_payload[mode_name] = _summarize_mode_run(
+            run,
+            sample,
+            cap=cap,
+            reference_vectors=reference.vectors,
+            reference_success_mask=reference.success_mask,
+        )
     return {
         "sample_name": sample.name,
         "sample_size": int(len(sample.texts)),
         "sample_manifest": list(sample.manifest),
         "bucket_counts": _bucket_counts(sample.raw_token_counts, cap),
-        "modes": {
-            reference.mode: _summarize_mode_run(reference, sample, cap=cap),
-            local_cpu.mode: _summarize_mode_run(
-                local_cpu,
-                sample,
-                cap=cap,
-                reference_vectors=reference.vectors,
-                reference_success_mask=reference.success_mask,
-            ),
-            hf_api.mode: _summarize_mode_run(
-                hf_api,
-                sample,
-                cap=cap,
-                reference_vectors=reference.vectors,
-                reference_success_mask=reference.success_mask,
-            ),
-        },
+        "modes": mode_payload,
     }
 
 
@@ -872,39 +981,44 @@ def _build_cold_start_report(
     *,
     sample: _BenchmarkSample,
     cap: int,
-    reference: _ModeRun,
-    local_cpu: _ModeRun,
-    hf_api: _ModeRun,
-    local_gpu_load_seconds: float,
-    local_cpu_load_seconds: float,
+    modes: dict[str, _ModeRun],
+    reference_mode_name: str,
+    session_load_seconds: dict[str, float],
 ) -> dict[str, Any]:
+    reference = modes[reference_mode_name]
+    mode_payload: dict[str, Any] = {}
+    for mode_name, run in modes.items():
+        if mode_name == reference_mode_name:
+            mode_payload[mode_name] = _summarize_mode_run(run, sample, cap=cap)
+            continue
+        mode_payload[mode_name] = _summarize_mode_run(
+            run,
+            sample,
+            cap=cap,
+            reference_vectors=reference.vectors,
+            reference_success_mask=reference.success_mask,
+        )
     return {
         "sample_name": sample.name,
         "sample_size": int(len(sample.texts)),
         "sample_manifest": list(sample.manifest),
         "bucket_counts": _bucket_counts(sample.raw_token_counts, cap),
-        "session_load_seconds": {
-            "local_gpu": float(local_gpu_load_seconds),
-            "local_cpu": float(local_cpu_load_seconds),
-            "hf_api_truncated": 0.0,
-        },
-        "modes": {
-            reference.mode: _summarize_mode_run(reference, sample, cap=cap),
-            local_cpu.mode: _summarize_mode_run(local_cpu, sample, cap=cap),
-            hf_api.mode: _summarize_mode_run(hf_api, sample, cap=cap),
-        },
+        "session_load_seconds": {str(key): float(value) for key, value in session_load_seconds.items()},
+        "modes": mode_payload,
     }
 
 
-def _build_cosine_parity_report(section_report: dict[str, Any]) -> dict[str, Any]:
+def _build_cosine_parity_report(section_report: dict[str, Any], *, reference_mode_name: str) -> dict[str, Any]:
     modes = dict(section_report.get("modes") or {})
+    comparisons = {
+        f"{mode_name}_vs_{reference_mode_name}": dict(mode_payload.get("cosine_vs_local_gpu") or {})
+        for mode_name, mode_payload in modes.items()
+        if mode_name != reference_mode_name
+    }
     return {
         "sample_name": str(section_report.get("sample_name", "")),
         "sample_size": int(section_report.get("sample_size", 0) or 0),
-        "comparisons": {
-            "local_cpu_vs_local_gpu": dict(modes.get("local_cpu", {}).get("cosine_vs_local_gpu") or {}),
-            "hf_api_truncated_vs_local_gpu": dict(modes.get("hf_api_truncated", {}).get("cosine_vs_local_gpu") or {}),
-        },
+        "comparisons": comparisons,
     }
 
 
@@ -913,7 +1027,8 @@ def _run_track_b_downstream(
     output_root: Path,
     sample: _BenchmarkSample,
     local_gpu_vectors: np.ndarray,
-    hf_vectors: np.ndarray,
+    candidate_vectors: np.ndarray,
+    candidate_label: str,
     model_bundle: str | Path,
     dataset_id: str,
 ) -> dict[str, Any]:
@@ -922,33 +1037,39 @@ def _run_track_b_downstream(
     ref_mask = combined["_benchmark_source"].eq("references")
 
     local_publications = _standardize_sample_frame(combined.loc[pub_mask].reset_index(drop=True), local_gpu_vectors[pub_mask.to_numpy()])
-    hf_publications = _standardize_sample_frame(combined.loc[pub_mask].reset_index(drop=True), hf_vectors[pub_mask.to_numpy()])
+    candidate_publications = _standardize_sample_frame(
+        combined.loc[pub_mask].reset_index(drop=True),
+        candidate_vectors[pub_mask.to_numpy()],
+    )
 
     local_references = None
-    hf_references = None
+    candidate_references = None
     if bool(ref_mask.any()):
         local_references = _standardize_sample_frame(combined.loc[ref_mask].reset_index(drop=True), local_gpu_vectors[ref_mask.to_numpy()])
-        hf_references = _standardize_sample_frame(combined.loc[ref_mask].reset_index(drop=True), hf_vectors[ref_mask.to_numpy()])
+        candidate_references = _standardize_sample_frame(
+            combined.loc[ref_mask].reset_index(drop=True),
+            candidate_vectors[ref_mask.to_numpy()],
+        )
 
     temp_root = Path(tempfile.mkdtemp(prefix="specter_benchmark_", dir=str(output_root)))
     try:
         local_root = temp_root / "sample_local"
-        hf_root = temp_root / "sample_hf"
+        candidate_root = temp_root / f"sample_{candidate_label}"
         local_root.mkdir(parents=True, exist_ok=True)
-        hf_root.mkdir(parents=True, exist_ok=True)
+        candidate_root.mkdir(parents=True, exist_ok=True)
 
         local_publications_path = local_root / "publications.parquet"
-        hf_publications_path = hf_root / "publications.parquet"
+        candidate_publications_path = candidate_root / "publications.parquet"
         local_publications.to_parquet(local_publications_path, index=False)
-        hf_publications.to_parquet(hf_publications_path, index=False)
+        candidate_publications.to_parquet(candidate_publications_path, index=False)
 
         local_references_path = None
-        hf_references_path = None
-        if local_references is not None and hf_references is not None:
+        candidate_references_path = None
+        if local_references is not None and candidate_references is not None:
             local_references_path = local_root / "references.parquet"
-            hf_references_path = hf_root / "references.parquet"
+            candidate_references_path = candidate_root / "references.parquet"
             local_references.to_parquet(local_references_path, index=False)
-            hf_references.to_parquet(hf_references_path, index=False)
+            candidate_references.to_parquet(candidate_references_path, index=False)
 
         smoke_local = run_infer_sources(
             InferSourcesRequest(
@@ -965,12 +1086,12 @@ def _run_track_b_downstream(
                 progress=False,
             )
         )
-        smoke_hf = run_infer_sources(
+        smoke_candidate = run_infer_sources(
             InferSourcesRequest(
-                publications_path=hf_publications_path,
-                references_path=hf_references_path,
-                output_root=temp_root / "infer_smoke_hf",
-                dataset_id=f"{dataset_id}__benchmark_hf",
+                publications_path=candidate_publications_path,
+                references_path=candidate_references_path,
+                output_root=temp_root / f"infer_smoke_{candidate_label}",
+                dataset_id=f"{dataset_id}__benchmark_{candidate_label}",
                 model_bundle=model_bundle,
                 infer_stage="smoke",
                 device="cpu",
@@ -980,17 +1101,28 @@ def _run_track_b_downstream(
                 progress=False,
             )
         )
-        smoke_compare = _compare_infer_outputs(smoke_local, smoke_hf)
+        smoke_compare_raw = _compare_infer_outputs(smoke_local, smoke_candidate)
+        smoke_compare = {
+            "passed": bool(smoke_compare_raw["passed"]),
+            "go_local": smoke_compare_raw["go_local"],
+            "go_candidate": smoke_compare_raw["go_hf"],
+            "mention_count_local": smoke_compare_raw["mention_count_local"],
+            "mention_count_candidate": smoke_compare_raw["mention_count_hf"],
+            "cluster_count_local": smoke_compare_raw["cluster_count_local"],
+            "cluster_count_candidate": smoke_compare_raw["cluster_count_hf"],
+            "changed_assignments": smoke_compare_raw["changed_assignments"],
+            "missing_mentions": smoke_compare_raw["missing_mentions"],
+        }
 
         mini_payload = None
         if smoke_compare["passed"]:
             mini_started_at = perf_counter()
             mini_result = run_infer_sources(
                 InferSourcesRequest(
-                    publications_path=hf_publications_path,
-                    references_path=hf_references_path,
-                    output_root=temp_root / "infer_mini_hf",
-                    dataset_id=f"{dataset_id}__benchmark_hf_mini",
+                    publications_path=candidate_publications_path,
+                    references_path=candidate_references_path,
+                    output_root=temp_root / f"infer_mini_{candidate_label}",
+                    dataset_id=f"{dataset_id}__benchmark_{candidate_label}_mini",
                     model_bundle=model_bundle,
                     infer_stage="mini",
                     device="cpu",
@@ -1013,6 +1145,7 @@ def _run_track_b_downstream(
                 "stage_metrics": mini_stage_metrics,
             }
         return {
+            "candidate_label": str(candidate_label),
             "smoke": smoke_compare,
             "mini": mini_payload,
         }
@@ -1142,7 +1275,12 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Cold-start warmup sample size: `{track_a['cold_start']['sample_size']}`",
         f"- Warmed throughput sample size: `{track_a['warmed_throughput']['sample_size']}`",
         f"- local_gpu texts/sec: `{throughput_a['local_gpu']['texts_per_second']}`",
-        f"- local_cpu texts/sec: `{throughput_a['local_cpu']['texts_per_second']}`",
+        f"- local_cpu_transformers texts/sec: `{throughput_a['local_cpu_transformers']['texts_per_second']}`",
+        (
+            f"- local_cpu_onnx_fp32 texts/sec: `{throughput_a['local_cpu_onnx_fp32']['texts_per_second']}`"
+            if 'local_cpu_onnx_fp32' in throughput_a
+            else "- local_cpu_onnx_fp32 texts/sec: `unavailable`"
+        ),
         f"- hf_api_truncated texts/sec: `{throughput_a['hf_api_truncated']['texts_per_second']}`",
         f"- hf_api_truncated api_concurrency: `{throughput_a['hf_api_truncated']['meta']['api_concurrency']}`",
         f"- hf_api_truncated mean cosine vs local_gpu: `{track_a['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
@@ -1152,7 +1290,12 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Cold-start warmup sample size: `{track_b['cold_start']['sample_size']}`",
         f"- Warmed throughput sample size: `{track_b['warmed_throughput']['sample_size']}`",
         f"- local_gpu texts/sec: `{throughput_b['local_gpu']['texts_per_second']}`",
-        f"- local_cpu texts/sec: `{throughput_b['local_cpu']['texts_per_second']}`",
+        f"- local_cpu_transformers texts/sec: `{throughput_b['local_cpu_transformers']['texts_per_second']}`",
+        (
+            f"- local_cpu_onnx_fp32 texts/sec: `{throughput_b['local_cpu_onnx_fp32']['texts_per_second']}`"
+            if 'local_cpu_onnx_fp32' in throughput_b
+            else "- local_cpu_onnx_fp32 texts/sec: `unavailable`"
+        ),
         f"- hf_api_truncated texts/sec: `{throughput_b['hf_api_truncated']['texts_per_second']}`",
         f"- hf_api_truncated cosine mean vs local_gpu: `{track_b['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
         "",
@@ -1161,12 +1304,14 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Success/full on parity sample: `{raw_probe['texts_successful']}` / `{raw_probe['texts_total']}`",
         f"- Failed texts on parity sample: `{raw_probe['texts_failed']}`",
     ]
-    downstream = track_b.get("downstream_track_b")
+    downstream_block = track_b.get("downstream_track_b") or {}
+    downstream = downstream_block.get("hf_api_truncated")
+    downstream_onnx = downstream_block.get("local_cpu_onnx_fp32")
     if downstream:
         lines.extend(
             [
                 "",
-                "## Track B Downstream",
+                "## Track B Downstream (HF)",
                 "",
                 f"- Smoke passed: `{downstream['smoke']['passed']}`",
                 f"- Changed assignments: `{downstream['smoke']['changed_assignments']}`",
@@ -1182,6 +1327,17 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
                     f"- Mini clusters: `{mini['cluster_count']}`",
                 ]
             )
+    if downstream_onnx:
+        lines.extend(
+            [
+                "",
+                "## Track B Downstream (ONNX)",
+                "",
+                f"- Smoke passed: `{downstream_onnx['smoke']['passed']}`",
+                f"- Changed assignments: `{downstream_onnx['smoke']['changed_assignments']}`",
+                f"- Mini run available: `{bool(downstream_onnx.get('mini'))}`",
+            ]
+        )
     extrap = payload["extrapolation"]
     lines.extend(
         [
@@ -1189,7 +1345,12 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
             "## Full-Run Estimates",
             "",
             f"- Track A local_gpu embed-only full seconds: `{extrap['track_a']['embedding_only']['local_gpu']['full_embed_seconds']}`",
-            f"- Track B local_cpu embed-only full seconds: `{extrap['track_b']['embedding_only']['local_cpu']['full_embed_seconds']}`",
+            f"- Track B local_cpu_transformers embed-only full seconds: `{extrap['track_b']['embedding_only']['local_cpu_transformers']['full_embed_seconds']}`",
+            (
+                f"- Track B local_cpu_onnx_fp32 embed-only full seconds: `{extrap['track_b']['embedding_only']['local_cpu_onnx_fp32']['full_embed_seconds']}`"
+                if 'local_cpu_onnx_fp32' in extrap['track_b']['embedding_only']
+                else "- Track B local_cpu_onnx_fp32 embed-only full seconds: `unavailable`"
+            ),
             f"- Track B hf_api_truncated embed-only full seconds: `{extrap['track_b']['embedding_only']['hf_api_truncated']['full_embed_seconds']}`",
         ]
     )
@@ -1199,6 +1360,8 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
             [
                 f"- Track B chosen CPU tail seconds: `{tail['chosen_tail_seconds']}`",
                 f"- Track B hf_api_truncated end-to-end full seconds: `{extrap['track_b']['end_to_end']['hf_api_truncated_full_seconds']}`",
+                f"- Track B local_cpu_transformers end-to-end full seconds: `{extrap['track_b']['end_to_end']['local_cpu_transformers_full_seconds']}`",
+                f"- Track B local_cpu_onnx_fp32 end-to-end full seconds: `{extrap['track_b']['end_to_end']['local_cpu_onnx_fp32_full_seconds']}`",
             ]
         )
     lines.extend(
@@ -1310,8 +1473,24 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             ],
         )
 
-        local_cpu_session, local_cpu_meta = _try_create_local_session(model_name=model_name, device=request.cpu_device)
-        local_gpu_session, local_gpu_meta = _try_create_local_session(model_name=model_name, device=request.gpu_device)
+        local_cpu_session, local_cpu_meta = _try_create_local_session(
+            model_name=model_name,
+            device=request.cpu_device,
+            runtime_backend="transformers",
+            cache_root=output_root,
+        )
+        local_cpu_onnx_session, local_cpu_onnx_meta = _try_create_local_session(
+            model_name=model_name,
+            device=request.cpu_device,
+            runtime_backend="onnx_fp32",
+            cache_root=output_root,
+        )
+        local_gpu_session, local_gpu_meta = _try_create_local_session(
+            model_name=model_name,
+            device=request.gpu_device,
+            runtime_backend="transformers",
+            cache_root=output_root,
+        )
         if local_gpu_session is None:
             raise RuntimeError(
                 f"Benchmark requires a working GPU session for local reference: {local_gpu_meta.get('error')}"
@@ -1335,111 +1514,147 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
         )
 
         def _run_track(cap: int) -> _TrackArtifacts:
-            warmup_local_gpu = local_gpu_session.run(
-                sample=warmup_sample,
-                cap=int(cap),
-                batch_size=request.local_batch_size,
-                progress=bool(request.progress),
-            )
-            warmup_local_cpu = local_cpu_session.run(
-                sample=warmup_sample,
-                cap=int(cap),
-                batch_size=request.local_batch_size,
-                progress=bool(request.progress),
-            )
-            warmup_hf = _run_hf_mode(
-                sample=warmup_sample,
-                mode_name="hf_api_truncated",
-                model_name=model_name,
-                provider=request.provider,
-                hf_token_env_var=request.hf_token_env_var,
-                tokenizer=tokenizer,
-                cap=int(cap),
-                progress=bool(request.progress),
-                api_concurrency=int(request.api_concurrency),
-            )
+            warmup_modes = {
+                "local_gpu": local_gpu_session.run(
+                    sample=warmup_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                ),
+                "local_cpu_transformers": local_cpu_session.run(
+                    sample=warmup_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                ),
+                "hf_api_truncated": _run_hf_mode(
+                    sample=warmup_sample,
+                    mode_name="hf_api_truncated",
+                    model_name=model_name,
+                    provider=request.provider,
+                    hf_token_env_var=request.hf_token_env_var,
+                    tokenizer=tokenizer,
+                    cap=int(cap),
+                    progress=bool(request.progress),
+                    api_concurrency=int(request.api_concurrency),
+                ),
+            }
+            if local_cpu_onnx_session is not None:
+                warmup_modes["local_cpu_onnx_fp32"] = local_cpu_onnx_session.run(
+                    sample=warmup_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                )
+            parity_modes = {
+                "local_gpu": local_gpu_session.run(
+                    sample=parity_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                ),
+                "local_cpu_transformers": local_cpu_session.run(
+                    sample=parity_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                ),
+                "hf_api_truncated": _run_hf_mode(
+                    sample=parity_sample,
+                    mode_name="hf_api_truncated",
+                    model_name=model_name,
+                    provider=request.provider,
+                    hf_token_env_var=request.hf_token_env_var,
+                    tokenizer=tokenizer,
+                    cap=int(cap),
+                    progress=bool(request.progress),
+                    api_concurrency=int(request.api_concurrency),
+                ),
+            }
+            if local_cpu_onnx_session is not None:
+                parity_modes["local_cpu_onnx_fp32"] = local_cpu_onnx_session.run(
+                    sample=parity_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                )
 
-            parity_local_gpu = local_gpu_session.run(
-                sample=parity_sample,
-                cap=int(cap),
-                batch_size=request.local_batch_size,
-                progress=bool(request.progress),
-            )
-            parity_local_cpu = local_cpu_session.run(
-                sample=parity_sample,
-                cap=int(cap),
-                batch_size=request.local_batch_size,
-                progress=bool(request.progress),
-            )
-            parity_hf = _run_hf_mode(
-                sample=parity_sample,
-                mode_name="hf_api_truncated",
-                model_name=model_name,
-                provider=request.provider,
-                hf_token_env_var=request.hf_token_env_var,
-                tokenizer=tokenizer,
-                cap=int(cap),
-                progress=bool(request.progress),
-                api_concurrency=int(request.api_concurrency),
-            )
-
-            throughput_local_gpu = local_gpu_session.run(
-                sample=throughput_sample,
-                cap=int(cap),
-                batch_size=request.local_batch_size,
-                progress=bool(request.progress),
-            )
-            throughput_local_cpu = local_cpu_session.run(
-                sample=throughput_sample,
-                cap=int(cap),
-                batch_size=request.local_batch_size,
-                progress=bool(request.progress),
-            )
-            throughput_hf = _run_hf_mode(
-                sample=throughput_sample,
-                mode_name="hf_api_truncated",
-                model_name=model_name,
-                provider=request.provider,
-                hf_token_env_var=request.hf_token_env_var,
-                tokenizer=tokenizer,
-                cap=int(cap),
-                progress=bool(request.progress),
-                api_concurrency=int(request.api_concurrency),
-            )
+            throughput_modes = {
+                "local_gpu": local_gpu_session.run(
+                    sample=throughput_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                ),
+                "local_cpu_transformers": local_cpu_session.run(
+                    sample=throughput_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                ),
+                "hf_api_truncated": _run_hf_mode(
+                    sample=throughput_sample,
+                    mode_name="hf_api_truncated",
+                    model_name=model_name,
+                    provider=request.provider,
+                    hf_token_env_var=request.hf_token_env_var,
+                    tokenizer=tokenizer,
+                    cap=int(cap),
+                    progress=bool(request.progress),
+                    api_concurrency=int(request.api_concurrency),
+                ),
+            }
+            if local_cpu_onnx_session is not None:
+                throughput_modes["local_cpu_onnx_fp32"] = local_cpu_onnx_session.run(
+                    sample=throughput_sample,
+                    cap=int(cap),
+                    batch_size=request.local_batch_size,
+                    progress=bool(request.progress),
+                )
 
             cold_start = _build_cold_start_report(
                 sample=warmup_sample,
                 cap=int(cap),
-                reference=warmup_local_gpu,
-                local_cpu=warmup_local_cpu,
-                hf_api=warmup_hf,
-                local_gpu_load_seconds=float(getattr(local_gpu_session, "load_seconds", 0.0) or 0.0),
-                local_cpu_load_seconds=float(getattr(local_cpu_session, "load_seconds", 0.0) or 0.0),
+                modes=warmup_modes,
+                reference_mode_name="local_gpu",
+                session_load_seconds={
+                    "local_gpu": float(getattr(local_gpu_session, "load_seconds", 0.0) or 0.0),
+                    "local_cpu_transformers": float(getattr(local_cpu_session, "load_seconds", 0.0) or 0.0),
+                    "local_cpu_onnx_fp32": (
+                        float(getattr(local_cpu_onnx_session, "load_seconds", 0.0) or 0.0)
+                        if local_cpu_onnx_session is not None
+                        else 0.0
+                    ),
+                    "hf_api_truncated": 0.0,
+                },
             )
             cosine_parity = _build_track_sample_report(
                 sample=parity_sample,
                 cap=int(cap),
-                reference=parity_local_gpu,
-                local_cpu=parity_local_cpu,
-                hf_api=parity_hf,
+                modes=parity_modes,
+                reference_mode_name="local_gpu",
             )
             warmed_throughput = _build_track_sample_report(
                 sample=throughput_sample,
                 cap=int(cap),
-                reference=throughput_local_gpu,
-                local_cpu=throughput_local_cpu,
-                hf_api=throughput_hf,
+                modes=throughput_modes,
+                reference_mode_name="local_gpu",
             )
             return _TrackArtifacts(
                 cold_start=cold_start,
                 warmed_throughput=warmed_throughput,
-                cosine_parity=_build_cosine_parity_report(cosine_parity),
-                reference_run=throughput_local_gpu,
-                hf_run=throughput_hf,
+                cosine_parity=_build_cosine_parity_report(cosine_parity, reference_mode_name="local_gpu"),
+                mode_runs=throughput_modes,
+                reference_mode_name="local_gpu",
             )
 
         mwe_local_gpu = local_gpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
         mwe_local_cpu = local_cpu_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
+        mwe_local_cpu_onnx = (
+            None
+            if local_cpu_onnx_session is None
+            else local_cpu_onnx_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
+        )
         mwe_hf_raw = _run_hf_mode(
             sample=mwe_sample,
             mode_name="hf_api_raw_probe",
@@ -1464,17 +1679,35 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
         track_a = _run_track(_TRACK_A_CAP)
         track_b = _run_track(track_b_cap)
 
-        downstream = None
+        downstream_hf = None
         track_b_candidate_summary = track_b.warmed_throughput["modes"]["hf_api_truncated"]
         if (
             isinstance(track_b_candidate_summary.get("cosine_vs_local_gpu"), dict)
             and bool(track_b_candidate_summary["texts_successful"] == track_b_candidate_summary["texts_total"])
         ):
-            downstream = _run_track_b_downstream(
+            downstream_hf = _run_track_b_downstream(
                 output_root=output_root,
                 sample=throughput_sample,
-                local_gpu_vectors=track_b.reference_run.vectors,
-                hf_vectors=track_b.hf_run.vectors,
+                local_gpu_vectors=track_b.mode_runs[track_b.reference_mode_name].vectors,
+                candidate_vectors=track_b.mode_runs["hf_api_truncated"].vectors,
+                candidate_label="hf_api_truncated",
+                model_bundle=request.model_bundle,
+                dataset_id=request.dataset_id,
+            )
+
+        downstream_onnx = None
+        track_b_onnx_summary = track_b.warmed_throughput["modes"].get("local_cpu_onnx_fp32")
+        if (
+            isinstance(track_b_onnx_summary, dict)
+            and isinstance(track_b_onnx_summary.get("cosine_vs_local_gpu"), dict)
+            and bool(track_b_onnx_summary["texts_successful"] == track_b_onnx_summary["texts_total"])
+        ):
+            downstream_onnx = _run_track_b_downstream(
+                output_root=output_root,
+                sample=throughput_sample,
+                local_gpu_vectors=track_b.mode_runs[track_b.reference_mode_name].vectors,
+                candidate_vectors=track_b.mode_runs["local_cpu_onnx_fp32"].vectors,
+                candidate_label="local_cpu_onnx_fp32",
                 model_bundle=request.model_bundle,
                 dataset_id=request.dataset_id,
             )
@@ -1487,41 +1720,65 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
 
         track_a_embedding_only = {
             "local_gpu": _embedding_extrapolation(track_a.warmed_throughput["modes"]["local_gpu"], full_source_rows),
-            "local_cpu": _embedding_extrapolation(track_a.warmed_throughput["modes"]["local_cpu"], full_source_rows),
+            "local_cpu_transformers": _embedding_extrapolation(
+                track_a.warmed_throughput["modes"]["local_cpu_transformers"],
+                full_source_rows,
+            ),
             "hf_api_truncated": _embedding_extrapolation(
                 track_a.warmed_throughput["modes"]["hf_api_truncated"],
                 full_source_rows,
             ),
         }
+        if "local_cpu_onnx_fp32" in track_a.warmed_throughput["modes"]:
+            track_a_embedding_only["local_cpu_onnx_fp32"] = _embedding_extrapolation(
+                track_a.warmed_throughput["modes"]["local_cpu_onnx_fp32"],
+                full_source_rows,
+            )
         track_b_embedding_only = {
             "local_gpu": _embedding_extrapolation(track_b.warmed_throughput["modes"]["local_gpu"], full_source_rows),
-            "local_cpu": _embedding_extrapolation(track_b.warmed_throughput["modes"]["local_cpu"], full_source_rows),
+            "local_cpu_transformers": _embedding_extrapolation(
+                track_b.warmed_throughput["modes"]["local_cpu_transformers"],
+                full_source_rows,
+            ),
             "hf_api_truncated": _embedding_extrapolation(
                 track_b.warmed_throughput["modes"]["hf_api_truncated"],
                 full_source_rows,
             ),
         }
+        if "local_cpu_onnx_fp32" in track_b.warmed_throughput["modes"]:
+            track_b_embedding_only["local_cpu_onnx_fp32"] = _embedding_extrapolation(
+                track_b.warmed_throughput["modes"]["local_cpu_onnx_fp32"],
+                full_source_rows,
+            )
         cpu_tail = _build_tail_extrapolation(
-            downstream_payload=downstream,
+            downstream_payload=downstream_hf,
             full_source_rows=full_source_rows,
             full_mentions=int(full_ads_scaling["mentions_total"]),
             full_pairs=int(full_ads_scaling["pair_upper_bound"]),
         )
         end_to_end = {
             "hf_api_truncated_full_seconds": None,
-            "local_cpu_full_seconds": None,
+            "local_cpu_transformers_full_seconds": None,
+            "local_cpu_onnx_fp32_full_seconds": None,
         }
         if cpu_tail is not None:
             hf_embed = track_b_embedding_only["hf_api_truncated"].get("full_embed_seconds")
-            cpu_embed = track_b_embedding_only["local_cpu"].get("full_embed_seconds")
+            cpu_embed = track_b_embedding_only["local_cpu_transformers"].get("full_embed_seconds")
+            onnx_embed = (
+                track_b_embedding_only["local_cpu_onnx_fp32"].get("full_embed_seconds")
+                if "local_cpu_onnx_fp32" in track_b_embedding_only
+                else None
+            )
             if isinstance(hf_embed, (int, float)):
                 end_to_end["hf_api_truncated_full_seconds"] = float(hf_embed + cpu_tail["chosen_tail_seconds"])
             if isinstance(cpu_embed, (int, float)):
-                end_to_end["local_cpu_full_seconds"] = float(cpu_embed + cpu_tail["chosen_tail_seconds"])
+                end_to_end["local_cpu_transformers_full_seconds"] = float(cpu_embed + cpu_tail["chosen_tail_seconds"])
+            if isinstance(onnx_embed, (int, float)):
+                end_to_end["local_cpu_onnx_fp32_full_seconds"] = float(onnx_embed + cpu_tail["chosen_tail_seconds"])
 
         recommendation = (
             "Track B warmed benchmark passes with the cap-aligned HF API path."
-            if downstream and downstream.get("smoke", {}).get("passed")
+            if downstream_hf and downstream_hf.get("smoke", {}).get("passed")
             else "HF stays experimental unless the warmed Track B benchmark passes downstream parity."
         )
         payload = {
@@ -1544,12 +1801,25 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                 "raw_token_count": int(mwe_counts[0]),
                 "modes": {
                     "local_gpu": _summarize_mode_run(mwe_local_gpu, mwe_sample, cap=_TRACK_A_CAP),
-                    "local_cpu": _summarize_mode_run(
+                    "local_cpu_transformers": _summarize_mode_run(
                         mwe_local_cpu,
                         mwe_sample,
                         cap=_TRACK_A_CAP,
                         reference_vectors=mwe_local_gpu.vectors,
                         reference_success_mask=mwe_local_gpu.success_mask,
+                    ),
+                    **(
+                        {}
+                        if mwe_local_cpu_onnx is None
+                        else {
+                            "local_cpu_onnx_fp32": _summarize_mode_run(
+                                mwe_local_cpu_onnx,
+                                mwe_sample,
+                                cap=_TRACK_A_CAP,
+                                reference_vectors=mwe_local_gpu.vectors,
+                                reference_success_mask=mwe_local_gpu.success_mask,
+                            )
+                        }
                     ),
                     "hf_api_raw": _summarize_mode_run(
                         mwe_hf_raw,
@@ -1595,7 +1865,10 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                     "cold_start": track_b.cold_start,
                     "warmed_throughput": track_b.warmed_throughput,
                     "cosine_parity": track_b.cosine_parity,
-                    "downstream_track_b": downstream,
+                    "downstream_track_b": {
+                        "hf_api_truncated": downstream_hf,
+                        "local_cpu_onnx_fp32": downstream_onnx,
+                    },
                 },
             },
             "extrapolation": {
@@ -1610,7 +1883,12 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             },
             "decision": {
                 "hf_api_raw_long_text_feasible": not bool(raw_long_text_failure),
-                "hf_api_truncated_track_b_viable": bool(downstream and downstream.get("smoke", {}).get("passed")),
+                "hf_api_truncated_track_b_viable": bool(
+                    downstream_hf and downstream_hf.get("smoke", {}).get("passed")
+                ),
+                "local_cpu_onnx_track_b_viable": bool(
+                    downstream_onnx and downstream_onnx.get("smoke", {}).get("passed")
+                ),
                 "recommendation": recommendation,
             },
             "artifacts": {

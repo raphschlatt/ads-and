@@ -56,6 +56,10 @@ bench = [
   "aiohttp>=3.10",
   "uvloop>=0.20; platform_system != 'Windows'",
 ]
+cpu_onnx = [
+  "onnx>=1.16",
+  "onnxruntime>=1.18",
+]
 research = [
   "jupyter>=1.0",
   "notebook>=7.0",
