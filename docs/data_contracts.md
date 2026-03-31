@@ -15,10 +15,40 @@ Optionale Felder:
 - `Title_en` oder `Title`
 - `Abstract_en` oder `Abstract`
 - `Affiliation`
-- `embedding`
-- `precomputed_embedding` als 768-dim Text-Embedding
+- legacy alias: `embedding`
+- canonical field: `precomputed_embedding`
 
 Records ohne `Bibcode` oder `Author` werden intern nicht in Mentions umgewandelt. Source-mirrored Outputs behalten rohe Zeilen mit leerem `Author`-Feld trotzdem bei und schreiben dafuer leere `AuthorUID`-/`AuthorDisplayName`-Listen.
+
+### Aktiver Text-Embedding-Vertrag
+
+Fuer das aktuelle produktive Bundle bedeutet `precomputed_embedding` nicht “beliebiger 768-dim Vektor”, sondern:
+
+- Modellfamilie: `allenai/specter`
+- Dimension: `768`
+- Textaufbau: `Title [SEP] Abstract`
+- Pooling: `cls_first_token`
+- Tokenisierung: `truncation=True`, `max_length=256`
+
+Nur gleiche Dimension reicht nicht als Bundle-Kompatibilitaet.
+
+### CPU-First Precompute
+
+Die offizielle Welle-1-Story fuer CPU-User ist ein separater Precompute-Schritt:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation precompute-source-embeddings \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/precomputed/ads_prod_current
+```
+
+Die angereicherten Dateien werden immer als Parquet unter `output_root` geschrieben:
+
+- `publications_precomputed.parquet`
+- optional `references_precomputed.parquet`
+- `precompute_source_embeddings_report.json`
 
 ## Public Infer Outputs
 
@@ -149,5 +179,8 @@ Bundle-Inhalt:
 - `selected_eps`
 - `best_threshold`
 - `precision_mode`
+- `embedding_contract`
 
 `run-infer-sources --model-bundle <dir>` konsumiert dieses Bundle direkt.
+
+`embedding_contract` dokumentiert den erwarteten Text- und Name-Embedding-Raum des Bundles. Bestehende `v1`-Bundles ohne dieses Feld bleiben lesbar; der Vertrag wird dann aus `model_config.yaml` abgeleitet.

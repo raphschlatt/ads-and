@@ -63,3 +63,42 @@ def test_resolve_model_run_for_inference_loads_run_and_model_cfg(tmp_path: Path)
     assert resolved["best_threshold"] == 0.31
     assert resolved["run_cfg"]["max_pairs_per_block"] == 123
     assert resolved["model_cfg"]["representation"]["text_model_name"] == "mock-model"
+
+
+def test_write_model_bundle_includes_embedding_contract(tmp_path: Path):
+    artifacts_root = tmp_path / "artifacts"
+    metrics_dir = artifacts_root / "metrics" / "model_run_1"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = artifacts_root / "checkpoints" / "best.pt"
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_text("checkpoint", encoding="utf-8")
+
+    run_cfg_path = tmp_path / "cfg" / "run.yaml"
+    model_cfg_path = tmp_path / "cfg" / "model.yaml"
+    run_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    with run_cfg_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump({"max_pairs_per_block": 123, "pair_building": {"exclude_same_bibcode": True}}, handle, sort_keys=False)
+    with model_cfg_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(
+            {"name": "nand", "representation": {"text_model_name": "allenai/specter", "max_length": 256}},
+            handle,
+            sort_keys=False,
+        )
+
+    with (metrics_dir / "03_train_manifest.json").open("w", encoding="utf-8") as handle:
+        json.dump({"best_checkpoint": str(ckpt), "best_threshold": 0.31}, handle)
+    with (metrics_dir / "04_clustering_config_used.json").open("w", encoding="utf-8") as handle:
+        json.dump({"eps_resolution": {"selected_eps": 0.42}}, handle)
+    with (metrics_dir / "00_context.json").open("w", encoding="utf-8") as handle:
+        json.dump({"run_config": str(run_cfg_path), "model_config": str(model_cfg_path)}, handle)
+
+    meta = cli._write_model_bundle(
+        artifacts_root=artifacts_root,
+        model_run_id="model_run_1",
+        output_dir=tmp_path / "bundle",
+    )
+
+    manifest = json.loads(Path(meta["bundle_manifest_path"]).read_text(encoding="utf-8"))
+    assert manifest["embedding_contract"]["text"]["model_name"] == "allenai/specter"
+    assert manifest["embedding_contract"]["text"]["dimension"] == 768
+    assert manifest["embedding_contract"]["name"]["dimension"] == 50

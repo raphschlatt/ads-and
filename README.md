@@ -7,12 +7,17 @@ The installed surface is intentionally small:
 - `run-train-stage`
 - `run-cluster-test-report`
 - `export-model-bundle`
+- `precompute-source-embeddings`
 - `run-infer-sources`
+- `run-hf-compatibility-report`
 
-The public Python API is inference-only:
+The public Python API for inference surfaces is intentionally small:
 
 - `InferSourcesRequest`
 - `InferSourcesResult`
+- `PrecomputeSourceEmbeddingsRequest`
+- `PrecomputeSourceEmbeddingsResult`
+- `precompute_source_embeddings()`
 - `run_infer_sources()`
 
 ## Install
@@ -123,15 +128,51 @@ author-name-disambiguation run-infer-sources \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
 ```
 
+Precompute remote SPECTER embeddings for CPU-first inference:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation precompute-source-embeddings \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/precomputed/ads_prod_current
+```
+
+Run the strict HF compatibility gate for the current bundle:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-hf-compatibility-report \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/compat/ads_prod_current \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
+```
+
 ## Programmatic Inference
 
 ```python
-from author_name_disambiguation import InferSourcesRequest, run_infer_sources
+from author_name_disambiguation import (
+    InferSourcesRequest,
+    PrecomputeSourceEmbeddingsRequest,
+    precompute_source_embeddings,
+    run_infer_sources,
+)
+
+precompute_source_embeddings(
+    PrecomputeSourceEmbeddingsRequest(
+        publications_path="data/raw/ads/ads_prod_current/publications.parquet",
+        references_path="data/raw/ads/ads_prod_current/references.parquet",
+        output_root="artifacts/precomputed/ads_prod_current",
+        progress=False,
+    )
+)
 
 result = run_infer_sources(
     InferSourcesRequest(
-        publications_path="data/raw/ads/ads_prod_current/publications.parquet",
-        references_path="data/raw/ads/ads_prod_current/references.parquet",
+        publications_path="artifacts/precomputed/ads_prod_current/publications_precomputed.parquet",
+        references_path="artifacts/precomputed/ads_prod_current/references_precomputed.parquet",
         output_root="artifacts/exports/ads_prod_current",
         dataset_id="ads_prod_current",
         model_bundle="artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1",
@@ -150,9 +191,36 @@ Input fields per source record:
 - optional: `Title_en` or `Title`
 - optional: `Abstract_en` or `Abstract`
 - optional: `Affiliation`
-- optional: `embedding` or `precomputed_embedding` as a 768-dim text embedding
+- optional legacy alias: `embedding`
+- optional canonical field: `precomputed_embedding`
 
 Records without `Bibcode` or `Author` are skipped during inference. Source-mirrored outputs still preserve raw rows with empty `Author` lists and add `AuthorUID=[]` plus `AuthorDisplayName=[]`.
+
+For the current promoted NAND bundle, text embeddings are not “any 768-dim vectors”. The active contract is:
+
+- model family: `allenai/specter`
+- dimension: `768`
+- text assembly: `Title [SEP] Abstract`
+- pooling: first-token / CLS from `last_hidden_state[:, 0, :]`
+- tokenization: truncation with `max_length=256`
+
+Equal dimensionality alone is not a quality-compatibility guarantee.
+
+## CPU + HF Path
+
+The supported CPU-first MVP is:
+
+1. precompute `precomputed_embedding` with `hf-inference + allenai/specter`
+2. run `run-infer-sources` locally on CPU, ideally with `--device cpu --cluster-backend sklearn_cpu`
+
+This keeps the expensive text-embedding step remote while the disambiguation run stays local.
+The HF path is intentionally narrow in Welle 1:
+
+- provider: `hf-inference`
+- model: `allenai/specter`
+- token source: `HF_TOKEN`
+
+Promotion of the HF path is gated by `run-hf-compatibility-report`. Until that report passes for a given bundle, treat remote HF SPECTER as experimental rather than automatically bundle-compatible.
 
 Inference outputs under `output_root`:
 

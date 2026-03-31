@@ -1,6 +1,7 @@
 # Inference Workflow
 
 Public inference is source-based and bundle-based.
+Welle 1 now also supports a separate remote precompute step for CPU-first users.
 
 ## Required Inputs
 
@@ -9,6 +10,52 @@ Public inference is source-based and bundle-based.
 - exported `model_bundle`
 - explicit `output_root`
 - explicit `dataset_id`
+
+## CPU-First Flow
+
+For laptop users without a local GPU, the intended path is:
+
+1. precompute text embeddings into `precomputed_embedding`
+2. run normal source inference on those enriched source files
+
+Example:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation precompute-source-embeddings \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/precomputed/ads_prod_current
+
+author-name-disambiguation run-infer-sources \
+  --publications-path artifacts/precomputed/ads_prod_current/publications_precomputed.parquet \
+  --references-path artifacts/precomputed/ads_prod_current/references_precomputed.parquet \
+  --output-root artifacts/exports/ads_prod_current_cpu \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
+  --device cpu \
+  --cluster-backend sklearn_cpu
+```
+
+The Welle-1 remote path is intentionally fixed to:
+
+- provider: `hf-inference`
+- model: `allenai/specter`
+- env var: `HF_TOKEN`
+
+## Embedding Contract
+
+The current productive NAND bundle expects this text embedding contract:
+
+- `precomputed_embedding` is the canonical field name
+- `embedding` remains a legacy alias on input
+- model family: `allenai/specter`
+- dimension: `768`
+- text assembly: `Title [SEP] Abstract`
+- pooling: first-token / CLS from `last_hidden_state[:, 0, :]`
+- tokenization: `truncation=True`, `max_length=256`
+
+Do not treat “same dimension” as compatibility. A different embedding family can fit into the tensor shape and still be semantically wrong for the active bundle.
 
 ## Minimal Command
 
@@ -20,6 +67,33 @@ author-name-disambiguation run-infer-sources \
   --dataset-id ads_prod_current \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
 ```
+
+## HF Compatibility Gate
+
+Use the dedicated compatibility report before promoting remote HF SPECTER as an official path for a bundle:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-hf-compatibility-report \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/compat/ads_prod_current \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
+```
+
+This writes:
+
+- `hf_compatibility_report.json`
+- `hf_compatibility_report.md`
+
+The report includes:
+
+- a 128-record raw-vector probe against local SPECTER
+- a strict downstream smoke comparison with zero changed mention assignments required
+- an extra mini CPU run if the smoke gate passes
+
+If the gate fails, the HF path stays experimental even if the remote vectors are shape-compatible.
 
 ## Optional Controls
 

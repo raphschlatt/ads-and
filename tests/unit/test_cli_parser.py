@@ -9,7 +9,9 @@ def test_build_parser_exposes_only_public_commands():
     assert commands == {
         "run-train-stage",
         "run-infer-sources",
+        "precompute-source-embeddings",
         "compare-infer-baseline",
+        "run-hf-compatibility-report",
         "run-cluster-test-report",
         "export-model-bundle",
     }
@@ -198,6 +200,66 @@ def test_export_model_bundle_parser():
     assert args.artifacts_root == "/tmp/artifacts"
     assert args.output_dir == "/tmp/out"
     assert args.func is cli.cmd_export_model_bundle
+
+
+def test_precompute_source_embeddings_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "precompute-source-embeddings",
+            "--publications-path",
+            "publications.parquet",
+            "--output-root",
+            "out",
+        ]
+    )
+    assert args.command == "precompute-source-embeddings"
+    assert args.publications_path == "publications.parquet"
+    assert args.references_path is None
+    assert args.output_root == "out"
+    assert args.dataset_id is None
+    assert args.provider == "hf-inference"
+    assert args.model_name == "allenai/specter"
+    assert args.hf_token_env_var == "HF_TOKEN"
+    assert args.batch_size == 32
+    assert args.max_retries == 5
+    assert args.base_backoff_seconds == 1.0
+    assert args.max_backoff_seconds == 30.0
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_precompute_source_embeddings
+
+
+def test_run_hf_compatibility_report_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-hf-compatibility-report",
+            "--publications-path",
+            "publications.parquet",
+            "--output-root",
+            "out",
+            "--dataset-id",
+            "my_ads_2026",
+            "--model-bundle",
+            "/tmp/bundle",
+        ]
+    )
+    assert args.command == "run-hf-compatibility-report"
+    assert args.publications_path == "publications.parquet"
+    assert args.references_path is None
+    assert args.output_root == "out"
+    assert args.dataset_id == "my_ads_2026"
+    assert args.model_bundle == "/tmp/bundle"
+    assert args.sample_size == 128
+    assert args.provider == "hf-inference"
+    assert args.model_name == "allenai/specter"
+    assert args.hf_token_env_var == "HF_TOKEN"
+    assert args.batch_size == 32
+    assert args.device == "auto"
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_run_hf_compatibility_report
 
 
 def test_run_cluster_test_report_parser_defaults():

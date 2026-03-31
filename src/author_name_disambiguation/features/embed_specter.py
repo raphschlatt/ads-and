@@ -13,11 +13,12 @@ import numpy as np
 import pandas as pd
 
 from author_name_disambiguation.common.cli_ui import loop_progress
+from author_name_disambiguation.embedding_contract import TEXT_EMBEDDING_DIM, build_source_text
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 
 _SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
-_SPECTER_DIM = 768
+_SPECTER_DIM = TEXT_EMBEDDING_DIM
 
 
 def _hash_stub_embedding(text: str, dim: int = 768) -> np.ndarray:
@@ -30,11 +31,7 @@ def _hash_stub_embedding(text: str, dim: int = 768) -> np.ndarray:
 
 
 def _to_text(title: str, abstract: str) -> str:
-    title = (title or "").strip()
-    abstract = (abstract or "").strip()
-    if title and abstract:
-        return f"{title} [SEP] {abstract}"
-    return title or abstract
+    return build_source_text(title, abstract)
 
 
 def _coerce_precomputed_embedding(item: Any, dim: int = _SPECTER_DIM) -> np.ndarray | None:

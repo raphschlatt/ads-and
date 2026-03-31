@@ -34,6 +34,7 @@ from author_name_disambiguation.common.run_report import evaluate_go_no_go, writ
 from author_name_disambiguation.common.subset_builder import build_stage_subset
 from author_name_disambiguation.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
 from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
+from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings, summarize_precomputed_embeddings
 
@@ -226,6 +227,7 @@ def _resolve_model_bundle(model_bundle: str | Path) -> dict[str, Any]:
         "max_pairs_per_block": manifest.get("max_pairs_per_block"),
         "pair_building": dict(manifest.get("pair_building", {}) or {}),
     }
+    embedding_contract = dict(manifest.get("embedding_contract") or build_bundle_embedding_contract(model_cfg))
     return {
         "bundle_dir": bundle_dir,
         "manifest": manifest,
@@ -235,6 +237,7 @@ def _resolve_model_bundle(model_bundle: str | Path) -> dict[str, Any]:
         "selected_eps": float(selected_eps),
         "eps_resolution": eps_resolution,
         "run_cfg": run_cfg,
+        "embedding_contract": embedding_contract,
         "source_model_run_id": str(manifest.get("source_model_run_id", "bundle")),
     }
 
@@ -611,6 +614,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "source_model_run_id": model_info["source_model_run_id"],
         "selected_eps": float(model_info["selected_eps"]),
         "best_threshold": float(model_info["best_threshold"]),
+        "embedding_contract": dict(model_info.get("embedding_contract", {}) or {}),
         "device": str(request.device),
         "precision_mode": str(request.precision_mode),
         "cluster_backend": str(cluster_backend),
@@ -1170,6 +1174,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         },
         precomputed_embeddings=precomputed_embeddings,
     )
+    stage_metrics["embedding_contract"] = dict(model_info.get("embedding_contract", {}) or {})
     _ui_info(f"writing {result_paths['stage_metrics'].name}")
     write_json(stage_metrics, result_paths["stage_metrics"])
     consistency_paths.append(

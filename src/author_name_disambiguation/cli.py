@@ -61,6 +61,7 @@ from author_name_disambiguation.common.subset_artifacts import (
 )
 from author_name_disambiguation.common.subset_builder import build_stage_subset, write_subset_manifest
 from author_name_disambiguation.data.prepare_lspo import prepare_lspo_mentions
+from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
 
@@ -417,6 +418,7 @@ def _write_model_bundle(
         "best_test_class_counts": model_info["train_manifest"].get("best_test_class_counts", {}),
         "max_pairs_per_block": run_cfg.get("max_pairs_per_block"),
         "pair_building": pair_building,
+        "embedding_contract": build_bundle_embedding_contract(model_info["model_cfg"]),
         "paths": {
             "checkpoint": str(checkpoint_dst.name),
             "model_config": str(model_cfg_dst.name),
@@ -1774,6 +1776,53 @@ def cmd_run_infer_sources(args):
         ui.close()
 
 
+def cmd_precompute_source_embeddings(args):
+    ui = CliUI(total_steps=1, progress=args.progress)
+    try:
+        from author_name_disambiguation.precompute_source_embeddings import (
+            PrecomputeSourceEmbeddingsRequest,
+            precompute_source_embeddings,
+        )
+
+        ui.start("Precompute remote source embeddings")
+        ui.info(
+            f"provider={args.provider} | model={args.model_name} | batch_size={int(args.batch_size)} | "
+            f"output_root={Path(args.output_root).expanduser().resolve()}"
+        )
+        result = precompute_source_embeddings(
+            PrecomputeSourceEmbeddingsRequest(
+                publications_path=args.publications_path,
+                references_path=args.references_path,
+                output_root=args.output_root,
+                dataset_id=args.dataset_id,
+                provider=args.provider,
+                model_name=args.model_name,
+                hf_token_env_var=args.hf_token_env_var,
+                batch_size=int(args.batch_size),
+                max_retries=int(args.max_retries),
+                base_backoff_seconds=float(args.base_backoff_seconds),
+                max_backoff_seconds=float(args.max_backoff_seconds),
+                force=bool(args.force),
+                progress=bool(args.progress),
+            )
+        )
+        payload = {
+            "run_id": result.run_id,
+            "output_root": str(result.output_root),
+            "publications_output_path": str(result.publications_output_path),
+            "references_output_path": None if result.references_output_path is None else str(result.references_output_path),
+            "report_path": str(result.report_path),
+        }
+        ui.done(f"Wrote precomputed source artifacts to {result.output_root}")
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
 def cmd_compare_infer_baseline(args):
     payload = None
     ui = CliUI(total_steps=1, progress=args.progress)
@@ -1800,6 +1849,53 @@ def cmd_compare_infer_baseline(args):
         payload = load_json(report_path)
         payload["output_path"] = str(report_path)
         ui.done(f"Wrote {report_path.name}")
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
+def cmd_run_hf_compatibility_report(args):
+    ui = CliUI(total_steps=1, progress=args.progress)
+    try:
+        from author_name_disambiguation.hf_compatibility_report import (
+            HfCompatibilityReportRequest,
+            run_hf_compatibility_report,
+        )
+
+        ui.start("Run HF compatibility report")
+        ui.info(
+            f"dataset={args.dataset_id} | bundle={Path(args.model_bundle).expanduser().resolve()} | "
+            f"sample_size={int(args.sample_size)} | provider={args.provider} | model={args.model_name}"
+        )
+        result = run_hf_compatibility_report(
+            HfCompatibilityReportRequest(
+                publications_path=args.publications_path,
+                references_path=args.references_path,
+                output_root=args.output_root,
+                dataset_id=args.dataset_id,
+                model_bundle=args.model_bundle,
+                sample_size=int(args.sample_size),
+                provider=args.provider,
+                model_name=args.model_name,
+                hf_token_env_var=args.hf_token_env_var,
+                batch_size=int(args.batch_size),
+                device=args.device,
+                force=bool(args.force),
+                progress=bool(args.progress),
+            )
+        )
+        payload = {
+            "run_id": result.run_id,
+            "output_root": str(result.output_root),
+            "report_json_path": str(result.report_json_path),
+            "report_markdown_path": str(result.report_markdown_path),
+            "compatible": bool(result.compatible),
+        }
+        ui.done(f"Compatibility={result.compatible}")
         print(json.dumps(payload, indent=2))
         return payload
     except Exception as exc:
@@ -2352,6 +2448,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_infer_sources)
 
+    sp = sub.add_parser("precompute-source-embeddings")
+    sp.add_argument("--publications-path", required=True)
+    sp.add_argument("--references-path", default=None)
+    sp.add_argument("--output-root", required=True)
+    sp.add_argument("--dataset-id", default=None)
+    sp.add_argument("--provider", default="hf-inference")
+    sp.add_argument("--model-name", default="allenai/specter")
+    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
+    sp.add_argument("--batch-size", type=int, default=32)
+    sp.add_argument("--max-retries", type=int, default=5)
+    sp.add_argument("--base-backoff-seconds", type=float, default=1.0)
+    sp.add_argument("--max-backoff-seconds", type=float, default=30.0)
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_precompute_source_embeddings)
+
     sp = sub.add_parser("compare-infer-baseline")
     sp.add_argument("--baseline-run-id", required=True)
     sp.add_argument("--current-run-id", required=True)
@@ -2359,6 +2471,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output-path", default=None)
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_compare_infer_baseline)
+
+    sp = sub.add_parser("run-hf-compatibility-report")
+    sp.add_argument("--publications-path", required=True)
+    sp.add_argument("--references-path", default=None)
+    sp.add_argument("--output-root", required=True)
+    sp.add_argument("--dataset-id", required=True)
+    sp.add_argument("--model-bundle", required=True)
+    sp.add_argument("--sample-size", type=int, default=128)
+    sp.add_argument("--provider", default="hf-inference")
+    sp.add_argument("--model-name", default="allenai/specter")
+    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
+    sp.add_argument("--batch-size", type=int, default=32)
+    sp.add_argument("--device", default="auto")
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_run_hf_compatibility_report)
 
     sp = sub.add_parser("run-cluster-test-report")
     sp.add_argument("--model-run-id", required=True)
