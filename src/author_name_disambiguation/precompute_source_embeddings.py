@@ -186,26 +186,45 @@ def _request_hf_batch(
     started_at = perf_counter()
     attempts = 0
     backoff_seconds_total = 0.0
-    while True:
-        attempts += 1
-        try:
-            response = client.feature_extraction(texts, model=model_name)
-            vectors = _normalize_hf_batch_response(response, expected_items=len(texts), dim=TEXT_EMBEDDING_DIM)
-            return vectors, {
-                "attempts": int(attempts),
-                "backoff_seconds_total": float(backoff_seconds_total),
-                "wall_seconds": float(perf_counter() - started_at),
-                "response_shape": [int(v) for v in vectors.shape],
-            }
-        except Exception as exc:
-            should_retry = attempts <= int(max_retries) and _is_retryable_hf_error(exc)
-            if not should_retry:
-                raise RuntimeError(
-                    f"HF feature_extraction failed after {attempts} attempt(s): {type(exc).__name__}: {exc}"
-                ) from exc
-            delay = min(float(max_backoff_seconds), float(base_backoff_seconds) * (2 ** (attempts - 1)))
-            sleep(delay)
-            backoff_seconds_total += float(delay)
+    rows: list[np.ndarray] = []
+    for text in texts:
+        text_attempts = 0
+        while True:
+            attempts += 1
+            text_attempts += 1
+            try:
+                try:
+                    response = client.feature_extraction(
+                        text,
+                        model=model_name,
+                        truncate=True,
+                        truncation_direction="Right",
+                    )
+                except TypeError as exc:
+                    message = str(exc)
+                    if "truncate" not in message and "truncation_direction" not in message:
+                        raise
+                    response = client.feature_extraction(text, model=model_name)
+                vector = _normalize_hf_batch_response(response, expected_items=1, dim=TEXT_EMBEDDING_DIM)
+                rows.append(vector[0].astype(np.float32, copy=False))
+                break
+            except Exception as exc:
+                should_retry = text_attempts <= int(max_retries) and _is_retryable_hf_error(exc)
+                if not should_retry:
+                    raise RuntimeError(
+                        f"HF feature_extraction failed after {text_attempts} attempt(s): {type(exc).__name__}: {exc}"
+                    ) from exc
+                delay = min(float(max_backoff_seconds), float(base_backoff_seconds) * (2 ** (text_attempts - 1)))
+                sleep(delay)
+                backoff_seconds_total += float(delay)
+
+    vectors = np.vstack(rows).astype(np.float32, copy=False) if rows else np.zeros((0, TEXT_EMBEDDING_DIM), dtype=np.float32)
+    return vectors, {
+        "attempts": int(attempts),
+        "backoff_seconds_total": float(backoff_seconds_total),
+        "wall_seconds": float(perf_counter() - started_at),
+        "response_shape": [int(v) for v in vectors.shape],
+    }
 
 
 def _load_source(
