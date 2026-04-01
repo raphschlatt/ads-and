@@ -172,21 +172,51 @@ def _import_httpx():
         ) from exc
 
 
-async def _request_hf_single_async(
+def _summarize_hf_payload_shape(payload: Any) -> list[int] | str | None:
+    try:
+        arr = np.asarray(payload, dtype=np.float32)
+    except Exception:
+        if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes)):
+            outer = int(len(payload))
+            inner_kinds: list[str] = []
+            for item in payload[:3]:
+                try:
+                    inner = np.asarray(item, dtype=np.float32)
+                    inner_kinds.append(str(tuple(int(v) for v in inner.shape)))
+                except Exception:
+                    inner_kinds.append(type(item).__name__)
+            inner_summary = ",".join(inner_kinds) if inner_kinds else "empty"
+            suffix = ",..." if outer > 3 else ""
+            return f"ragged[{outer}]<{inner_summary}{suffix}>"
+        return None
+    return [int(v) for v in arr.shape]
+
+
+async def _request_hf_batch_async(
     *,
     client: Any,
     url: str,
-    text: str,
+    texts: Sequence[str],
     max_retries: int,
     base_backoff_seconds: float,
     max_backoff_seconds: float,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     httpx = _import_httpx()
+    texts_batch = [str(text) for text in texts]
+    if len(texts_batch) == 0:
+        return np.zeros((0, TEXT_EMBEDDING_DIM), dtype=np.float32), {
+            "attempts": 0,
+            "backoff_seconds_total": 0.0,
+            "wall_seconds": 0.0,
+            "raw_shape": [0, TEXT_EMBEDDING_DIM],
+            "batch_size": 0,
+        }
+
     started_at = perf_counter()
     attempts = 0
     backoff_seconds_total = 0.0
     request_payload = {
-        "inputs": text,
+        "inputs": texts_batch[0] if len(texts_batch) == 1 else texts_batch,
         "parameters": {
             "truncate": True,
             "truncation_direction": "Right",
@@ -198,13 +228,13 @@ async def _request_hf_single_async(
             response = await client.post(url, json=request_payload)
             response.raise_for_status()
             payload = response.json()
-            arr = np.asarray(payload, dtype=np.float32)
-            vector = normalize_hf_batch_response(arr, expected_items=1)[0]
-            return vector.astype(np.float32, copy=False), {
+            vectors = normalize_hf_batch_response(payload, expected_items=len(texts_batch))
+            return vectors.astype(np.float32, copy=False), {
                 "attempts": int(attempts),
                 "backoff_seconds_total": float(backoff_seconds_total),
                 "wall_seconds": float(perf_counter() - started_at),
-                "raw_shape": [int(v) for v in arr.shape],
+                "raw_shape": _summarize_hf_payload_shape(payload),
+                "batch_size": int(len(texts_batch)),
             }
         except Exception as exc:
             should_retry = attempts <= int(max_retries) and is_retryable_hf_error(exc)
@@ -215,7 +245,8 @@ async def _request_hf_single_async(
                     if body:
                         detail = f"HTTP {exc.response.status_code}: {body[:240]}"
                 raise RuntimeError(
-                    f"HF feature_extraction failed after {attempts} attempt(s): {type(exc).__name__}: {detail}"
+                    f"HF feature_extraction batch failed after {attempts} attempt(s) "
+                    f"for {len(texts_batch)} text(s): {type(exc).__name__}: {detail}"
                 ) from exc
             delay = min(float(max_backoff_seconds), float(base_backoff_seconds) * (2 ** (attempts - 1)))
             await asyncio.sleep(delay)
@@ -313,7 +344,9 @@ def _run_httpx_profile(
     backoff_seconds_total = 0.0
     request_url = build_hf_feature_extraction_url(provider=provider, model_name=model_name)
     effective_http2 = bool(profile.http2_requested and hf_http2_enabled())
-    batch_size = max(int(profile.concurrency), int(chunk_size))
+    request_batch_size = max(1, int(chunk_size))
+    text_batches = _batched(list(range(texts_total)), batch_size=request_batch_size)
+    batch_indices_list = [batch for batch in text_batches if batch]
 
     async def _run_all(tracker: Any) -> None:
         nonlocal attempts_total, backoff_seconds_total
@@ -333,31 +366,35 @@ def _run_httpx_profile(
             verify=bool(profile.verify),
         ) as client:
 
-            async def _run_one(idx: int) -> None:
+            async def _run_batch(batch_indices: list[int]) -> None:
                 nonlocal attempts_total, backoff_seconds_total
                 try:
                     async with semaphore:
-                        vector, meta = await _request_hf_single_async(
+                        batch_vectors, meta = await _request_hf_batch_async(
                             client=client,
                             url=request_url,
-                            text=str(texts[idx]),
+                            texts=[str(texts[idx]) for idx in batch_indices],
                             max_retries=max_retries,
                             base_backoff_seconds=base_backoff_seconds,
                             max_backoff_seconds=max_backoff_seconds,
                         )
-                    vectors[idx] = vector
-                    success_mask[idx] = True
-                    per_item_wall_seconds[idx] = float(meta.get("wall_seconds") or 0.0)
-                    raw_shapes[idx] = None if meta.get("raw_shape") is None else str(meta["raw_shape"])
+                    for offset, idx in enumerate(batch_indices):
+                        vectors[idx] = batch_vectors[offset]
+                        success_mask[idx] = True
+                        per_item_wall_seconds[idx] = float(meta.get("wall_seconds") or 0.0) / max(
+                            1, len(batch_indices)
+                        )
+                        raw_shapes[idx] = None if meta.get("raw_shape") is None else str(meta["raw_shape"])
                     attempts_total += int(meta.get("attempts") or 0)
                     backoff_seconds_total += float(meta.get("backoff_seconds_total") or 0.0)
                 except Exception as exc:
-                    errors[idx] = str(exc)
+                    for idx in batch_indices:
+                        errors[idx] = str(exc)
                 finally:
-                    tracker.update(1)
+                    tracker.update(len(batch_indices))
 
-            for batch_indices in _batched(list(range(texts_total)), batch_size=batch_size):
-                await asyncio.gather(*(_run_one(idx) for idx in batch_indices))
+            for launch_group in _batched(batch_indices_list, batch_size=max(1, int(profile.concurrency))):
+                await asyncio.gather(*(_run_batch(batch_indices) for batch_indices in launch_group))
 
     started_at = perf_counter()
     with loop_progress(
@@ -384,6 +421,7 @@ def _run_httpx_profile(
         "http2_requested": bool(profile.http2_requested),
         "http2_enabled": bool(effective_http2),
         "verify": bool(profile.verify),
+        "request_batch_size": int(request_batch_size),
         "texts_total": int(texts_total),
         "texts_successful": int(success_mask.sum()),
         "texts_failed": int(failed_count),
