@@ -15,6 +15,7 @@ import pandas as pd
 from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.embedding_contract import TEXT_EMBEDDING_DIM, build_source_text
 from author_name_disambiguation.hf_transport import (
+    DEFAULT_HF_CHUNK_SIZE,
     DEFAULT_HF_CONCURRENCY,
     DEFAULT_HF_TOKEN_ENV_VAR,
     embed_texts_via_hf_httpx,
@@ -521,7 +522,10 @@ def generate_specter_embeddings(
                 max_length=max_length,
                 concurrency=hf_concurrency,
                 use_http2=hf_use_http2,
-                chunk_size=max(1, int(hf_chunk_size if hf_chunk_size is not None else (batch_size or 64))),
+                chunk_size=max(
+                    1,
+                    int(hf_chunk_size if hf_chunk_size is not None else DEFAULT_HF_CHUNK_SIZE),
+                ),
                 max_retries=int(hf_max_retries),
                 base_backoff_seconds=float(hf_base_backoff_seconds),
                 max_backoff_seconds=float(hf_max_backoff_seconds),
