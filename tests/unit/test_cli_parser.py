@@ -1,3 +1,6 @@
+import contextlib
+import io
+
 import pytest
 
 from author_name_disambiguation import cli
@@ -338,6 +341,16 @@ def test_run_specter_hf_lab_benchmark_parser_defaults():
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_specter_hf_lab_benchmark
+
+
+def test_run_infer_sources_help_marks_legacy_low_level_controls():
+    parser = cli.build_parser()
+    with contextlib.redirect_stdout(io.StringIO()) as stdout:
+        with pytest.raises(SystemExit):
+            parser.parse_args(["run-infer-sources", "--help"])
+    help_text = stdout.getvalue()
+    assert "Legacy/debug override for low-level device selection" in help_text
+    assert "Legacy/debug override for the local CPU text backend" in help_text
 
 
 def test_run_cluster_test_report_parser_defaults():

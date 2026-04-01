@@ -400,6 +400,13 @@ def _export_source_file_parquet(
     mirror_started_at = perf_counter()
     assignments_agg = _aggregate_assignments_for_source(assignments, source_type)
     out = frame.reset_index(drop=True).copy()
+    existing_export_columns = [
+        column
+        for column in ["AuthorUID", "AuthorDisplayName", "mapped_count", "authors_fallback"]
+        if column in out.columns
+    ]
+    if existing_export_columns:
+        out = out.drop(columns=existing_export_columns)
     out["source_row_idx"] = np.arange(len(out), dtype=np.int64)
     author_col = "Author" if "Author" in out.columns else "author" if "author" in out.columns else None
     if author_col is None:

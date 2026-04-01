@@ -267,6 +267,35 @@ def test_export_source_mirrored_outputs_reuses_in_memory_parquet_frames(tmp_path
     assert runtime["source_reread_seconds"] == 0.0
 
 
+def test_export_source_mirrored_outputs_overwrites_existing_disambiguation_columns(tmp_path: Path):
+    pubs_path = tmp_path / "publications_existing_uid.parquet"
+    pubs_out = tmp_path / "publications_disambiguated.parquet"
+
+    pd.DataFrame(
+        [
+            {
+                "Bibcode": "bib1",
+                "Author": ["Doe J", "Roe A"],
+                "Title_en": "T1",
+                "AuthorUID": ["old::0", "old::1"],
+                "AuthorDisplayName": ["Old Doe", "Old Roe"],
+            }
+        ]
+    ).to_parquet(pubs_path, index=False)
+
+    export_source_mirrored_outputs(
+        assignments=_assignments().query("source_type == 'publication' and source_row_idx == 0"),
+        publications_path=pubs_path,
+        references_path=None,
+        publications_output_path=pubs_out,
+        references_output_path=None,
+    )
+
+    pubs_out_df = pd.read_parquet(pubs_out)
+    assert list(pubs_out_df.loc[0, "AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
+    assert list(pubs_out_df.loc[0, "AuthorDisplayName"]) == ["Doe J", "Roe A"]
+
+
 def test_export_source_mirrored_outputs_keeps_authorless_rows_with_empty_lists(tmp_path: Path):
     pubs_path = tmp_path / "publications.parquet"
     pubs_out = tmp_path / "publications_disambiguated.parquet"

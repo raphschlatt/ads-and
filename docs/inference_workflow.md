@@ -109,7 +109,7 @@ The public runtime interface is:
 
 `hf` uses the package's built-in HTTPX HF transport for remote SPECTER embeddings and then continues with the normal local AND tail in the same run.
 
-The legacy low-level switch `--specter-runtime-backend transformers|onnx_fp32` is still accepted for debugging and tests, but normal usage should prefer `--runtime-mode gpu|cpu|hf`.
+The low-level switches `--device` and `--specter-runtime-backend transformers|onnx_fp32` are still accepted for debugging, tests, and backward compatibility, but normal usage should prefer `--runtime-mode gpu|cpu|hf`.
 
 ## API vs CPU vs GPU Benchmark
 
@@ -148,7 +148,7 @@ It also reports:
 
 - whether the raw HF path breaks on long ADS-style texts
 - whether the cap-aligned truncated HF path stays viable against local CPU/GPU references
-- throughput and cosine parity across GPU, exact CPU, optional ONNX CPU, and HF
+- public-mode throughput across GPU, CPU, and HF, with the forced CPU backends kept as an appendix/debug view
 - a source-based full-run interpolation
 - a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
 
@@ -179,8 +179,8 @@ That runner is intentionally separate from the realistic package benchmark:
 - `--infer-stage smoke|mini|mid|full`
 - `--cluster-config <yaml>`
 - `--gates-config <yaml>`
-- `--device auto|cpu|cuda`
-- `--specter-runtime-backend transformers|onnx_fp32`
+- `--device auto|cpu|cuda` (legacy/debug)
+- `--specter-runtime-backend transformers|onnx_fp32` (legacy/debug)
 - `--precision-mode fp32|amp_bf16`
 - `--cluster-backend auto|sklearn_cpu|cuml_gpu`
 - `--uid-scope dataset|local|registry`

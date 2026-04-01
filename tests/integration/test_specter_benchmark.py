@@ -230,6 +230,7 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     assert report_json["sampling_policy"]["throughput_sample_effective_floor"] == 2048
     assert report_json["tracks"]["track_a"]["cold_start"]["sample_size"] == 2
     assert report_json["tracks"]["track_a"]["warmed_throughput"]["sample_size"] == 2
+    assert report_json["public_runtime_summary"]["track_b"]["cpu"]["mode_name"] == "local_cpu_onnx_fp32"
     assert report_json["tracks"]["track_a"]["cosine_parity"]["comparisons"]["hf_api_truncated_vs_local_gpu"][
         "compared_count"
     ] == 2
@@ -240,6 +241,7 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     assert report_json["tracks"]["track_b"]["downstream_track_b"]["local_cpu_onnx_fp32"]["smoke"]["passed"] is True
     assert report_json["extrapolation"]["track_b"]["cpu_infer_tail"]["chosen_method"] == "pair_scaled"
     assert "SPECTER Benchmark Report" in report_md
+    assert "Public Runtime Summary" in report_md
     assert "Raw HF Probe" in report_md
     assert "Track B Downstream" in report_md
 

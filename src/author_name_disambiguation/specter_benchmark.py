@@ -1139,6 +1139,8 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
     track_b = payload["tracks"]["track_b"]
     throughput_a = track_a["warmed_throughput"]["modes"]
     throughput_b = track_b["warmed_throughput"]["modes"]
+    public_a = payload.get("public_runtime_summary", {}).get("track_a", {})
+    public_b = payload.get("public_runtime_summary", {}).get("track_b", {})
     decision = payload["decision"]
     raw_probe = payload["raw_hf_probe"]["mode"]
     lines = [
@@ -1149,6 +1151,16 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Recommendation: `{decision['recommendation']}`",
         f"- Raw HF API feasible on long ADS texts: `{decision['hf_api_raw_long_text_feasible']}`",
         f"- HF API with client-side truncation viable for Track B: `{decision['hf_api_truncated_track_b_viable']}`",
+        "",
+        "## Public Runtime Summary",
+        "",
+        f"- Track A gpu texts/sec: `{public_a.get('gpu', {}).get('texts_per_second')}`",
+        f"- Track A cpu texts/sec: `{public_a.get('cpu', {}).get('texts_per_second')}`",
+        f"- Track A hf texts/sec: `{public_a.get('hf', {}).get('texts_per_second')}`",
+        f"- Track B gpu texts/sec: `{public_b.get('gpu', {}).get('texts_per_second')}`",
+        f"- Track B cpu texts/sec: `{public_b.get('cpu', {}).get('texts_per_second')}`",
+        f"- Track B hf texts/sec: `{public_b.get('hf', {}).get('texts_per_second')}`",
+        f"- Track B cpu backing mode: `{public_b.get('cpu', {}).get('mode_name')}`",
         "",
         "## Why The Notebook MWE Works",
         "",
@@ -1169,6 +1181,9 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Cold-start warmup sample size: `{track_a['cold_start']['sample_size']}`",
         f"- Warmed throughput sample size: `{track_a['warmed_throughput']['sample_size']}`",
         f"- local_gpu texts/sec: `{throughput_a['local_gpu']['texts_per_second']}`",
+        "",
+        "### Track A CPU Appendix",
+        "",
         f"- local_cpu_transformers texts/sec: `{throughput_a['local_cpu_transformers']['texts_per_second']}`",
         (
             f"- local_cpu_onnx_fp32 texts/sec: `{throughput_a['local_cpu_onnx_fp32']['texts_per_second']}`"
@@ -1184,6 +1199,9 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         f"- Cold-start warmup sample size: `{track_b['cold_start']['sample_size']}`",
         f"- Warmed throughput sample size: `{track_b['warmed_throughput']['sample_size']}`",
         f"- local_gpu texts/sec: `{throughput_b['local_gpu']['texts_per_second']}`",
+        "",
+        "### Track B CPU Appendix",
+        "",
         f"- local_cpu_transformers texts/sec: `{throughput_b['local_cpu_transformers']['texts_per_second']}`",
         (
             f"- local_cpu_onnx_fp32 texts/sec: `{throughput_b['local_cpu_onnx_fp32']['texts_per_second']}`"
@@ -1762,6 +1780,54 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                     "downstream_track_b": {
                         "hf_api_truncated": downstream_hf,
                         "local_cpu_onnx_fp32": downstream_onnx,
+                    },
+                },
+            },
+            "public_runtime_summary": {
+                "track_a": {
+                    "gpu": {
+                        "mode_name": "local_gpu",
+                        **dict(track_a.warmed_throughput["modes"]["local_gpu"]),
+                    },
+                    "cpu": {
+                        "mode_name": (
+                            "local_cpu_onnx_fp32"
+                            if "local_cpu_onnx_fp32" in track_a.warmed_throughput["modes"]
+                            else "local_cpu_transformers"
+                        ),
+                        **dict(
+                            track_a.warmed_throughput["modes"].get(
+                                "local_cpu_onnx_fp32",
+                                track_a.warmed_throughput["modes"]["local_cpu_transformers"],
+                            )
+                        ),
+                    },
+                    "hf": {
+                        "mode_name": "hf_api_truncated",
+                        **dict(track_a.warmed_throughput["modes"]["hf_api_truncated"]),
+                    },
+                },
+                "track_b": {
+                    "gpu": {
+                        "mode_name": "local_gpu",
+                        **dict(track_b.warmed_throughput["modes"]["local_gpu"]),
+                    },
+                    "cpu": {
+                        "mode_name": (
+                            "local_cpu_onnx_fp32"
+                            if "local_cpu_onnx_fp32" in track_b.warmed_throughput["modes"]
+                            else "local_cpu_transformers"
+                        ),
+                        **dict(
+                            track_b.warmed_throughput["modes"].get(
+                                "local_cpu_onnx_fp32",
+                                track_b.warmed_throughput["modes"]["local_cpu_transformers"],
+                            )
+                        ),
+                    },
+                    "hf": {
+                        "mode_name": "hf_api_truncated",
+                        **dict(track_b.warmed_throughput["modes"]["hf_api_truncated"]),
                     },
                 },
             },

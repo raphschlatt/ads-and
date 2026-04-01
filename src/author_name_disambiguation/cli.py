@@ -2544,10 +2544,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full"], default="full")
     sp.add_argument("--cluster-config", default=None)
     sp.add_argument("--gates-config", default=None)
-    sp.add_argument("--runtime-mode", choices=["gpu", "cpu", "hf"], default=None)
-    sp.add_argument("--device", default="auto")
+    sp.add_argument(
+        "--runtime-mode",
+        choices=["gpu", "cpu", "hf"],
+        default=None,
+        help="Preferred public runtime interface. Use this instead of low-level backend/device overrides.",
+    )
+    sp.add_argument(
+        "--device",
+        default="auto",
+        help="Legacy/debug override for low-level device selection. Prefer --runtime-mode for normal usage.",
+    )
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
-    sp.add_argument("--specter-runtime-backend", choices=["transformers", "onnx_fp32"], default=None)
+    sp.add_argument(
+        "--specter-runtime-backend",
+        choices=["transformers", "onnx_fp32"],
+        default=None,
+        help="Legacy/debug override for the local CPU text backend. Prefer --runtime-mode for normal usage.",
+    )
     sp.add_argument("--cluster-backend", choices=["auto", "sklearn_cpu", "cuml_gpu"], default=None)
     sp.add_argument("--uid-scope", choices=["dataset", "local", "registry"], default="dataset")
     sp.add_argument("--uid-namespace", default=None)

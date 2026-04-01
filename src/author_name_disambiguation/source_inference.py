@@ -130,6 +130,20 @@ def _infer_runtime_mode(*, runtime_mode: str | None, specter_runtime_backend: st
     return "gpu"
 
 
+def _legacy_runtime_override_payload(*, request_device: str, specter_runtime_backend: str | None) -> dict[str, Any]:
+    device_requested = str(request_device or "auto").strip() or "auto"
+    runtime_backend_requested = (
+        None if specter_runtime_backend is None else str(specter_runtime_backend).strip().lower() or None
+    )
+    return {
+        "active": bool(device_requested != "auto" or runtime_backend_requested is not None),
+        "device_override_active": bool(device_requested != "auto"),
+        "device_override_value": device_requested,
+        "specter_runtime_backend_override_active": bool(runtime_backend_requested is not None),
+        "specter_runtime_backend_override_value": runtime_backend_requested,
+    }
+
+
 def _validate_request(request: InferSourcesRequest) -> None:
     if str(request.dataset_id).strip() == "":
         raise ValueError("dataset_id must be non-empty.")
@@ -655,6 +669,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         else str(request.cluster_backend)
     )
     max_ram_fraction = 0.80
+    legacy_runtime_overrides = _legacy_runtime_override_payload(
+        request_device=str(request.device),
+        specter_runtime_backend=getattr(request, "specter_runtime_backend", None),
+    )
 
     context_path = output_root / "00_context.json"
     input_summary_path = output_root / "01_input_summary.json"
@@ -690,6 +708,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "precision_mode": str(request.precision_mode),
         "specter_runtime_backend": specter_runtime_backend,
         "specter_runtime_backend_legacy_requested": legacy_specter_runtime_backend,
+        "legacy_runtime_overrides": legacy_runtime_overrides,
         "cluster_backend": str(cluster_backend),
         "cpu_runtime_policy": {
             "cpu_workers": _format_worker_request(cpu_workers),
@@ -909,6 +928,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     text_runtime_meta["runtime_backend"] = str(
         text_runtime_meta.get("runtime_backend") or resolved_specter_runtime_backend
     )
+    text_runtime_meta["legacy_runtime_overrides"] = dict(legacy_runtime_overrides)
     context_payload["specter_runtime_backend"] = text_runtime_meta["runtime_backend"]
     context_payload["runtime_mode_effective"] = runtime_mode
     context_payload["device"] = str(effective_request_device)

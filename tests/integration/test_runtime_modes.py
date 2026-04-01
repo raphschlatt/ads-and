@@ -280,6 +280,7 @@ def test_runtime_mode_cpu_falls_back_from_onnx_to_transformers(monkeypatch, tmp_
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "cpu"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
     assert stage_metrics["runtime"]["specter"]["fallback_reason"] == "cpu_auto_onnx_fallback"
+    assert stage_metrics["runtime"]["specter"]["legacy_runtime_overrides"]["active"] is False
 
 
 def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
@@ -328,6 +329,53 @@ def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
     assert calls == ["hf_httpx"]
     assert context["runtime_mode_effective"] == "hf"
     assert context["specter_runtime_backend"] == "hf_httpx"
+    assert context["legacy_runtime_overrides"]["active"] is False
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "hf"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "hf_httpx"
     assert stage_metrics["runtime"]["specter"]["resolved_device"] == "remote:hf-inference"
+
+
+def test_legacy_runtime_overrides_are_reported(monkeypatch, tmp_path: Path):
+    publications_path, references_path = _write_dataset(tmp_path)
+    bundle_dir = _write_bundle(tmp_path)
+
+    def _text(mentions, output_path, **kwargs):
+        arr = np.ones((len(mentions), 768), dtype=np.float32)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        np.save(output_path, arr)
+        meta = {
+            "cache_hit": False,
+            "generation_mode": "model_only",
+            "runtime_backend": str(kwargs["runtime_backend"]),
+            "requested_device": str(kwargs.get("device", "cpu")),
+            "resolved_device": "cpu",
+            "fallback_reason": None,
+            "effective_precision_mode": "fp32",
+            "column_present": False,
+            "precomputed_embedding_count": 0,
+            "recomputed_embedding_count": int(len(mentions)),
+            "used_precomputed_embeddings": False,
+        }
+        return arr, meta
+
+    _apply_pipeline_mocks(monkeypatch, text_mock=_text)
+    result = run_infer_sources(
+        InferSourcesRequest(
+            publications_path=publications_path,
+            references_path=references_path,
+            output_root=tmp_path / "out_legacy",
+            dataset_id="ads_runtime_legacy",
+            model_bundle=bundle_dir,
+            device="cpu",
+            specter_runtime_backend="transformers",
+            progress=False,
+        )
+    )
+
+    context = json.loads((result.output_root / "00_context.json").read_text(encoding="utf-8"))
+    stage_metrics = json.loads(result.stage_metrics_path.read_text(encoding="utf-8"))
+
+    assert context["legacy_runtime_overrides"]["active"] is True
+    assert context["legacy_runtime_overrides"]["device_override_active"] is True
+    assert context["legacy_runtime_overrides"]["specter_runtime_backend_override_active"] is True
+    assert stage_metrics["runtime"]["specter"]["legacy_runtime_overrides"]["active"] is True

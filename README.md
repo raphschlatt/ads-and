@@ -319,9 +319,10 @@ The main comparison is cap-aligned with the real inference path:
 - HF remote SPECTER also uses the same client-side tokenizer truncation
 - a small raw-HF probe stays in the report only as a long-text diagnostic
 
-Legacy low-level controls are still accepted for debugging and tests:
+Legacy low-level controls are still accepted for debugging, tests, and backward compatibility only:
 
 - `--specter-runtime-backend transformers|onnx_fp32`
+- `--device auto|cpu|cuda`
 
 For normal package use, prefer `--runtime-mode gpu|cpu|hf`.
 Install the optional ONNX extra if you want to use or benchmark it:
