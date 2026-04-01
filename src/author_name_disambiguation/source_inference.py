@@ -873,15 +873,19 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _ui_start("Name embeddings")
     chars_path = dirs["embeddings"] / "chars2vec.npy"
     chars_cache_requested = chars_path.exists() and not bool(request.force)
+    chars_execution_mode = "predict"
+    chars_batch_size = None
     _ui_info(
-        f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | backend=chars2vec/tensorflow"
+        f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | "
+        f"backend=chars2vec/tensorflow | mode={chars_execution_mode} | "
+        f"batch_size={'auto' if chars_batch_size is None else _format_count(chars_batch_size)}"
     )
     chars_result = get_or_create_chars2vec_embeddings(
         mentions=mentions,
         output_path=chars_path,
         force_recompute=bool(request.force),
-        batch_size=32,
-        execution_mode="predict",
+        batch_size=chars_batch_size,
+        execution_mode=chars_execution_mode,
         use_stub_if_missing=False,
         quiet_libraries=True,
         show_progress=bool(request.progress),
