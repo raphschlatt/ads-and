@@ -295,14 +295,14 @@ def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
         np.save(output_path, arr)
         meta = {
             "cache_hit": False,
-            "generation_mode": "remote_httpx_only",
+            "generation_mode": "remote_endpoint_only",
             "runtime_backend": runtime_backend,
             "requested_device": "hf",
-            "resolved_device": "remote:hf-inference",
+            "resolved_device": "remote:hf-endpoint",
             "fallback_reason": None,
             "effective_precision_mode": None,
-            "api_concurrency": 16,
-            "http2_enabled": True,
+            "api_concurrency": 8,
+            "request_batch_size": 64,
             "column_present": False,
             "precomputed_embedding_count": 0,
             "recomputed_embedding_count": int(len(mentions)),
@@ -325,14 +325,14 @@ def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
 
     context = json.loads((result.output_root / "00_context.json").read_text(encoding="utf-8"))
     stage_metrics = json.loads(result.stage_metrics_path.read_text(encoding="utf-8"))
-    assert calls == ["hf_httpx"]
+    assert calls == ["hf_endpoint"]
     assert context["runtime_mode"] == "hf"
-    assert context["runtime_backend"] == "hf_httpx"
-    assert context["resolved_device"] == "remote:hf-inference"
-    assert context["generation_mode"] == "remote_httpx_only"
+    assert context["runtime_backend"] == "hf_endpoint"
+    assert context["resolved_device"] == "remote:hf-endpoint"
+    assert context["generation_mode"] == "remote_endpoint_only"
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "hf"
-    assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "hf_httpx"
-    assert stage_metrics["runtime"]["specter"]["resolved_device"] == "remote:hf-inference"
+    assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "hf_endpoint"
+    assert stage_metrics["runtime"]["specter"]["resolved_device"] == "remote:hf-endpoint"
 
 
 def test_internal_backend_override_keeps_public_runtime_metadata_compact(monkeypatch, tmp_path: Path):

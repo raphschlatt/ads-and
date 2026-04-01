@@ -1788,8 +1788,7 @@ def cmd_precompute_source_embeddings(args):
 
         ui.start("Precompute remote source embeddings")
         ui.info(
-            f"provider={args.provider} | model={args.model_name} | batch_size={int(args.batch_size)} | "
-            f"output_root={Path(args.output_root).expanduser().resolve()}"
+            f"mode=hf_endpoint_t4 | output_root={Path(args.output_root).expanduser().resolve()}"
         )
         result = precompute_source_embeddings(
             PrecomputeSourceEmbeddingsRequest(
@@ -1797,13 +1796,7 @@ def cmd_precompute_source_embeddings(args):
                 references_path=args.references_path,
                 output_root=args.output_root,
                 dataset_id=args.dataset_id,
-                provider=args.provider,
-                model_name=args.model_name,
                 hf_token_env_var=args.hf_token_env_var,
-                batch_size=int(args.batch_size),
-                max_retries=int(args.max_retries),
-                base_backoff_seconds=float(args.base_backoff_seconds),
-                max_backoff_seconds=float(args.max_backoff_seconds),
                 force=bool(args.force),
                 progress=bool(args.progress),
             )
@@ -1851,156 +1844,6 @@ def cmd_compare_infer_baseline(args):
         payload = load_json(report_path)
         payload["output_path"] = str(report_path)
         ui.done(f"Wrote {report_path.name}")
-        print(json.dumps(payload, indent=2))
-        return payload
-    except Exception as exc:
-        ui.fail(str(exc))
-        raise
-    finally:
-        ui.close()
-
-
-def cmd_run_hf_compatibility_report(args):
-    ui = CliUI(total_steps=1, progress=args.progress)
-    try:
-        from author_name_disambiguation.hf_compatibility_report import (
-            HfCompatibilityReportRequest,
-            run_hf_compatibility_report,
-        )
-
-        ui.start("Run HF compatibility report")
-        ui.info(
-            f"dataset={args.dataset_id} | bundle={Path(args.model_bundle).expanduser().resolve()} | "
-            f"sample_size={int(args.sample_size)} | provider={args.provider} | model={args.model_name}"
-        )
-        result = run_hf_compatibility_report(
-            HfCompatibilityReportRequest(
-                publications_path=args.publications_path,
-                references_path=args.references_path,
-                output_root=args.output_root,
-                dataset_id=args.dataset_id,
-                model_bundle=args.model_bundle,
-                sample_size=int(args.sample_size),
-                provider=args.provider,
-                model_name=args.model_name,
-                hf_token_env_var=args.hf_token_env_var,
-                batch_size=int(args.batch_size),
-                device=args.device,
-                force=bool(args.force),
-                progress=bool(args.progress),
-            )
-        )
-        payload = {
-            "run_id": result.run_id,
-            "output_root": str(result.output_root),
-            "report_json_path": str(result.report_json_path),
-            "report_markdown_path": str(result.report_markdown_path),
-            "compatible": bool(result.compatible),
-        }
-        ui.done(f"Compatibility={result.compatible}")
-        print(json.dumps(payload, indent=2))
-        return payload
-    except Exception as exc:
-        ui.fail(str(exc))
-        raise
-    finally:
-        ui.close()
-
-
-def cmd_run_specter_benchmark(args):
-    ui = CliUI(total_steps=1, progress=args.progress)
-    try:
-        from author_name_disambiguation.specter_benchmark import (
-            SpecterBenchmarkRequest,
-            run_specter_benchmark,
-        )
-
-        ui.start("Run SPECTER benchmark")
-        ui.info(
-            f"dataset={args.dataset_id} | bundle={Path(args.model_bundle).expanduser().resolve()} | "
-            f"parity_sample={int(args.parity_sample_size)} | throughput_sample={int(args.throughput_sample_size)} | "
-            f"provider={args.provider} | model={args.model_name}"
-        )
-        result = run_specter_benchmark(
-            SpecterBenchmarkRequest(
-                publications_path=args.publications_path,
-                references_path=args.references_path,
-                output_root=args.output_root,
-                dataset_id=args.dataset_id,
-                model_bundle=args.model_bundle,
-                provider=args.provider,
-                model_name=args.model_name,
-                hf_token_env_var=args.hf_token_env_var,
-                parity_sample_size=int(args.parity_sample_size),
-                throughput_sample_size=int(args.throughput_sample_size),
-                local_batch_size=args.local_batch_size,
-                cpu_device=args.cpu_device,
-                gpu_device=args.gpu_device,
-                api_concurrency=int(args.api_concurrency),
-                force=bool(args.force),
-                progress=bool(args.progress),
-            )
-        )
-        payload = {
-            "run_id": result.run_id,
-            "output_root": str(result.output_root),
-            "report_json_path": str(result.report_json_path),
-            "report_markdown_path": str(result.report_markdown_path),
-            "recommendation": str(result.recommendation),
-        }
-        ui.done(str(result.recommendation))
-        print(json.dumps(payload, indent=2))
-        return payload
-    except Exception as exc:
-        ui.fail(str(exc))
-        raise
-    finally:
-        ui.close()
-
-
-def cmd_run_specter_hf_lab_benchmark(args):
-    ui = CliUI(total_steps=1, progress=args.progress)
-    try:
-        from author_name_disambiguation.specter_hf_lab_benchmark import (
-            SpecterHFLabBenchmarkRequest,
-            run_specter_hf_lab_benchmark,
-        )
-
-        profiles = tuple(part.strip() for part in str(args.profiles).split(",") if part.strip())
-        concurrency_values = tuple(
-            int(part.strip()) for part in str(args.concurrency_values).split(",") if part.strip()
-        )
-        ui.start("Run SPECTER HF lab benchmark")
-        ui.info(
-            f"dataset={args.dataset_id} | bundle={Path(args.model_bundle).expanduser().resolve()} | "
-            f"profiles={','.join(profiles or ('all',))} | concurrency={','.join(str(v) for v in concurrency_values or (4, 16, 64))}"
-        )
-        result = run_specter_hf_lab_benchmark(
-            SpecterHFLabBenchmarkRequest(
-                publications_path=args.publications_path,
-                references_path=args.references_path,
-                output_root=args.output_root,
-                dataset_id=args.dataset_id,
-                model_bundle=args.model_bundle,
-                provider=args.provider,
-                model_name=args.model_name,
-                hf_token_env_var=args.hf_token_env_var,
-                profiles=profiles or ("all",),
-                concurrency_values=concurrency_values or (4, 16, 64),
-                realistic_sample_size=int(args.realistic_sample_size),
-                micro_repeat_count=int(args.micro_repeat_count),
-                force=bool(args.force),
-                progress=bool(args.progress),
-            )
-        )
-        payload = {
-            "run_id": result.run_id,
-            "output_root": str(result.output_root),
-            "report_json_path": str(result.report_json_path),
-            "report_markdown_path": str(result.report_markdown_path),
-            "summary": str(result.summary),
-        }
-        ui.done(str(result.summary))
         print(json.dumps(payload, indent=2))
         return payload
     except Exception as exc:
@@ -2563,13 +2406,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--references-path", default=None)
     sp.add_argument("--output-root", required=True)
     sp.add_argument("--dataset-id", default=None)
-    sp.add_argument("--provider", default="hf-inference")
-    sp.add_argument("--model-name", default="allenai/specter")
     sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
-    sp.add_argument("--batch-size", type=int, default=32)
-    sp.add_argument("--max-retries", type=int, default=5)
-    sp.add_argument("--base-backoff-seconds", type=float, default=1.0)
-    sp.add_argument("--max-backoff-seconds", type=float, default=30.0)
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_precompute_source_embeddings)
@@ -2581,58 +2418,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output-path", default=None)
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_compare_infer_baseline)
-
-    sp = sub.add_parser("run-hf-compatibility-report")
-    sp.add_argument("--publications-path", required=True)
-    sp.add_argument("--references-path", default=None)
-    sp.add_argument("--output-root", required=True)
-    sp.add_argument("--dataset-id", required=True)
-    sp.add_argument("--model-bundle", required=True)
-    sp.add_argument("--sample-size", type=int, default=128)
-    sp.add_argument("--provider", default="hf-inference")
-    sp.add_argument("--model-name", default="allenai/specter")
-    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
-    sp.add_argument("--batch-size", type=int, default=32)
-    sp.add_argument("--device", default="auto")
-    sp.add_argument("--force", action="store_true")
-    _add_progress_and_logging_args(sp)
-    sp.set_defaults(func=cmd_run_hf_compatibility_report)
-
-    sp = sub.add_parser("run-specter-benchmark")
-    sp.add_argument("--publications-path", required=True)
-    sp.add_argument("--references-path", default=None)
-    sp.add_argument("--output-root", required=True)
-    sp.add_argument("--dataset-id", required=True)
-    sp.add_argument("--model-bundle", required=True)
-    sp.add_argument("--provider", default="hf-inference")
-    sp.add_argument("--model-name", default="allenai/specter")
-    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
-    sp.add_argument("--parity-sample-size", type=int, default=128)
-    sp.add_argument("--throughput-sample-size", type=int, default=2048)
-    sp.add_argument("--local-batch-size", type=int, default=None)
-    sp.add_argument("--cpu-device", default="cpu")
-    sp.add_argument("--gpu-device", default="cuda")
-    sp.add_argument("--api-concurrency", type=int, default=4)
-    sp.add_argument("--force", action="store_true")
-    _add_progress_and_logging_args(sp)
-    sp.set_defaults(func=cmd_run_specter_benchmark)
-
-    sp = sub.add_parser("run-specter-hf-lab-benchmark")
-    sp.add_argument("--publications-path", required=True)
-    sp.add_argument("--references-path", default=None)
-    sp.add_argument("--output-root", required=True)
-    sp.add_argument("--dataset-id", required=True)
-    sp.add_argument("--model-bundle", required=True)
-    sp.add_argument("--provider", default="hf-inference")
-    sp.add_argument("--model-name", default="allenai/specter")
-    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
-    sp.add_argument("--profiles", default="all")
-    sp.add_argument("--concurrency-values", default="4,16,64")
-    sp.add_argument("--realistic-sample-size", type=int, default=128)
-    sp.add_argument("--micro-repeat-count", type=int, default=1000)
-    sp.add_argument("--force", action="store_true")
-    _add_progress_and_logging_args(sp)
-    sp.set_defaults(func=cmd_run_specter_hf_lab_benchmark)
 
     sp = sub.add_parser("run-cluster-test-report")
     sp.add_argument("--model-run-id", required=True)

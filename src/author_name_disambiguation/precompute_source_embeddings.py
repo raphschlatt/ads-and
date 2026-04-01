@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.common.io_schema import save_parquet
 from author_name_disambiguation.common.pipeline_reports import default_run_id, write_json
 from author_name_disambiguation.data.prepare_ads import load_ads_records
@@ -22,21 +20,11 @@ from author_name_disambiguation.embedding_contract import (
 )
 from author_name_disambiguation.features.embed_specter import _coerce_precomputed_embedding
 from author_name_disambiguation.hf_transport import (
-    DEFAULT_HF_CONCURRENCY,
-    DEFAULT_HF_PROVIDER,
     DEFAULT_HF_TOKEN_ENV_VAR,
-    embed_texts_via_hf_httpx,
-    is_retryable_hf_error,
-    normalize_hf_batch_response,
+    embed_texts_via_hf_endpoint,
     normalize_model_name,
-    normalize_provider,
     resolve_hf_token,
 )
-
-_DEFAULT_BATCH_SIZE = 32
-_DEFAULT_MAX_RETRIES = 5
-_DEFAULT_BASE_BACKOFF_SECONDS = 1.0
-_DEFAULT_MAX_BACKOFF_SECONDS = 30.0
 
 
 @dataclass(slots=True)
@@ -45,13 +33,7 @@ class PrecomputeSourceEmbeddingsRequest:
     output_root: str | Path
     references_path: str | Path | None = None
     dataset_id: str | None = None
-    provider: str = "hf-inference"
-    model_name: str = DEFAULT_TEXT_MODEL_NAME
     hf_token_env_var: str = DEFAULT_HF_TOKEN_ENV_VAR
-    batch_size: int = _DEFAULT_BATCH_SIZE
-    max_retries: int = _DEFAULT_MAX_RETRIES
-    base_backoff_seconds: float = _DEFAULT_BASE_BACKOFF_SECONDS
-    max_backoff_seconds: float = _DEFAULT_MAX_BACKOFF_SECONDS
     force: bool = False
     progress: bool = True
 
@@ -79,81 +61,12 @@ def _resolved_path(value: str | Path) -> Path:
     return Path(value).expanduser().resolve()
 
 
-def _normalize_provider(provider: str) -> str:
-    return normalize_provider(provider)
-
-
 def _normalize_model_name(model_name: str) -> str:
     return normalize_model_name(model_name)
 
 
 def _resolve_hf_token(env_var_name: str) -> str:
     return resolve_hf_token(env_var_name)
-
-
-def _build_hf_client(*, provider: str, api_key: str):
-    del provider, api_key
-    raise RuntimeError("Sync HF clients are no longer supported; use the shared HTTPX transport.")
-
-
-def _is_retryable_hf_error(exc: BaseException) -> bool:
-    return is_retryable_hf_error(exc)
-
-
-def _batched(items: Sequence[str], batch_size: int) -> Iterable[list[str]]:
-    size = max(1, int(batch_size))
-    for start in range(0, len(items), size):
-        yield list(items[start : start + size])
-
-
-def _normalize_single_embedding(item: Any, *, dim: int = TEXT_EMBEDDING_DIM) -> np.ndarray:
-    try:
-        arr = np.asarray(item, dtype=np.float32)
-    except Exception as exc:  # pragma: no cover - defensive branch
-        raise ValueError(f"HF response item could not be converted to float32: {type(item).__name__}") from exc
-
-    if arr.ndim == 1 and arr.shape[0] == dim:
-        return arr.astype(np.float32, copy=False)
-    if arr.ndim == 2 and arr.shape[1] == dim and arr.shape[0] >= 1:
-        return arr[0].astype(np.float32, copy=False)
-    if arr.ndim == 3 and arr.shape[0] == 1 and arr.shape[2] == dim and arr.shape[1] >= 1:
-        return arr[0, 0].astype(np.float32, copy=False)
-    raise ValueError(f"Incompatible HF response item shape {tuple(arr.shape)}; expected 768-d doc or token features.")
-
-
-def _normalize_hf_batch_response(
-    payload: Any,
-    *,
-    expected_items: int,
-    dim: int = TEXT_EMBEDDING_DIM,
-) -> np.ndarray:
-    return normalize_hf_batch_response(payload, expected_items=expected_items, dim=dim)
-
-
-def _request_hf_batch(
-    *,
-    texts: list[str],
-    model_name: str,
-    max_retries: int,
-    base_backoff_seconds: float,
-    max_backoff_seconds: float,
-    client: Any | None = None,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    del client
-    return embed_texts_via_hf_httpx(
-        texts=texts,
-        provider=DEFAULT_HF_PROVIDER,
-        model_name=model_name,
-        hf_token_env_var=DEFAULT_HF_TOKEN_ENV_VAR,
-        max_length=256,
-        chunk_size=max(1, len(texts) or 1),
-        concurrency=DEFAULT_HF_CONCURRENCY,
-        max_retries=max_retries,
-        base_backoff_seconds=base_backoff_seconds,
-        max_backoff_seconds=max_backoff_seconds,
-        progress=False,
-        progress_label="HF batch wrapper",
-    )
 
 
 def _load_source(
@@ -267,33 +180,25 @@ def _compute_vectors_for_source_records(
         missing_texts.extend(unique_missing_texts)
 
     unique_missing_texts_all = list(dict.fromkeys(missing_texts))
-    batch_size = max(1, int(request.batch_size))
-    batches_total = int(math.ceil(len(unique_missing_texts_all) / batch_size)) if unique_missing_texts_all else 0
-    batch_reports: list[dict[str, Any]] = []
-
-    for batch_idx, batch_texts in enumerate(_batched(unique_missing_texts_all, batch_size), start=1):
-        vectors, batch_meta = embed_texts_via_hf_httpx(
-            texts=batch_texts,
-            provider=request.provider,
-            model_name=request.model_name,
+    remote_meta: dict[str, Any] = {
+        "transport": "hf_endpoint",
+        "runtime_backend": "hf_endpoint",
+        "generation_mode": "remote_endpoint_only",
+        "texts_total": 0,
+        "texts_successful": 0,
+        "texts_failed": 0,
+    }
+    if unique_missing_texts_all:
+        vectors, remote_meta = embed_texts_via_hf_endpoint(
+            texts=unique_missing_texts_all,
+            model_name=DEFAULT_TEXT_MODEL_NAME,
             hf_token_env_var=request.hf_token_env_var,
             max_length=256,
-            chunk_size=batch_size,
-            max_retries=int(request.max_retries),
-            base_backoff_seconds=float(request.base_backoff_seconds),
-            max_backoff_seconds=float(request.max_backoff_seconds),
             progress=bool(request.progress),
-            progress_label=f"HF remote text embeddings batch {batch_idx}/{max(1, batches_total)}",
+            progress_label="HF endpoint source embeddings",
         )
-        for text, vector in zip(batch_texts, vectors, strict=True):
+        for text, vector in zip(unique_missing_texts_all, vectors, strict=True):
             text_to_vector[text] = vector.astype(np.float32, copy=False).tolist()
-        batch_reports.append(
-            {
-                "batch_index": int(batch_idx),
-                "batch_size": int(len(batch_texts)),
-                **batch_meta,
-            }
-        )
 
     resolved_vectors: dict[str, list[list[float]]] = {}
     for source in sources:
@@ -311,12 +216,9 @@ def _compute_vectors_for_source_records(
         resolved_vectors[source.label] = resolved_rows
 
     hf_runtime = {
-        "provider": _normalize_provider(request.provider),
-        "model_name": str(request.model_name),
-        "batch_size": int(request.batch_size),
-        "batches_total": int(batches_total),
+        "model_name": DEFAULT_TEXT_MODEL_NAME,
         "texts_remote_computed": int(len(unique_missing_texts_all)),
-        "batch_reports": batch_reports,
+        **remote_meta,
     }
     return resolved_vectors, {"datasets": dataset_stats, "hf_runtime": hf_runtime}
 
@@ -347,7 +249,7 @@ def precompute_source_embeddings(request: PrecomputeSourceEmbeddingsRequest) -> 
     if request.references_path is not None:
         sources.append(_load_source(label="references", path=request.references_path, output_root=output_root))
 
-    model_name = _normalize_model_name(request.model_name)
+    model_name = _normalize_model_name(DEFAULT_TEXT_MODEL_NAME)
 
     vectors_by_source, compute_meta = _compute_vectors_for_source_records(
         sources=sources,
@@ -356,13 +258,7 @@ def precompute_source_embeddings(request: PrecomputeSourceEmbeddingsRequest) -> 
             references_path=request.references_path,
             output_root=request.output_root,
             dataset_id=request.dataset_id,
-            provider=request.provider,
-            model_name=model_name,
             hf_token_env_var=request.hf_token_env_var,
-            batch_size=request.batch_size,
-            max_retries=request.max_retries,
-            base_backoff_seconds=request.base_backoff_seconds,
-            max_backoff_seconds=request.max_backoff_seconds,
             force=request.force,
             progress=request.progress,
         ),
@@ -380,7 +276,6 @@ def precompute_source_embeddings(request: PrecomputeSourceEmbeddingsRequest) -> 
         "generated_utc": pd.Timestamp.utcnow().isoformat(),
         "pipeline_scope": "precompute_source_embeddings",
         "dataset_id": None if request.dataset_id is None else str(request.dataset_id),
-        "provider": _normalize_provider(request.provider),
         "model_name": model_name,
         "hf_token_env_var": str(request.hf_token_env_var),
         "embedding_contract": build_bundle_embedding_contract(

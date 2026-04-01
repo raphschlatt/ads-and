@@ -284,16 +284,16 @@ def test_cli_precompute_source_embeddings_and_cpu_infer_use_precomputed(monkeypa
         ]
     ).to_parquet(publications_path, index=False)
 
-    def _fake_embed_texts_via_hf_httpx(**kwargs):
+    def _fake_embed_texts_via_hf_endpoint(**kwargs):
         assert kwargs["model_name"] == "allenai/specter"
         batch = kwargs["texts"]
         out = []
         for idx, _text in enumerate(batch):
             out.append([float(idx + 1)] * 768)
-        return np.asarray(out, dtype=np.float32), {"transport": "httpx_async_pool", "texts_total": int(len(batch))}
+        return np.asarray(out, dtype=np.float32), {"transport": "hf_endpoint", "texts_total": int(len(batch))}
 
     monkeypatch.setenv("HF_TOKEN", "secret-token")
-    monkeypatch.setattr(precompute_module, "embed_texts_via_hf_httpx", _fake_embed_texts_via_hf_httpx)
+    monkeypatch.setattr(precompute_module, "embed_texts_via_hf_endpoint", _fake_embed_texts_via_hf_endpoint)
 
     output_root = tmp_path / "precomputed"
     parser = cli.build_parser()

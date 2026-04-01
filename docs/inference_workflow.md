@@ -1,7 +1,6 @@
 # Inference Workflow
 
 Public inference is source-based and bundle-based.
-Welle 1 now also supports a separate remote precompute step for CPU-first users.
 
 ## Required Inputs
 
@@ -33,15 +32,16 @@ author-name-disambiguation run-infer-sources \
   --output-root artifacts/exports/ads_prod_current_cpu \
   --dataset-id ads_prod_current \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --device cpu \
+  --runtime-mode cpu \
   --cluster-backend sklearn_cpu
 ```
 
-The Welle-1 remote path is intentionally fixed to:
+The remote HF path is intentionally fixed to:
 
-- provider: `hf-inference`
 - model: `allenai/specter`
-- env var: `HF_TOKEN`
+- endpoint: dedicated Hugging Face Inference Endpoint
+- hardware: `AWS / eu-west-1 / Nvidia T4 / x1`
+- env var: `HF_TOKEN` with `inference.endpoints.write`
 
 ## Embedding Contract
 
@@ -68,33 +68,6 @@ author-name-disambiguation run-infer-sources \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
 ```
 
-## HF Compatibility Gate
-
-Use the dedicated compatibility report before promoting remote HF SPECTER as an official path for a bundle:
-
-```bash
-export HF_TOKEN=...
-author-name-disambiguation run-hf-compatibility-report \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/compat/ads_prod_current \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
-```
-
-This writes:
-
-- `hf_compatibility_report.json`
-- `hf_compatibility_report.md`
-
-The report includes:
-
-- a 128-record raw-vector probe against local SPECTER
-- a strict downstream smoke comparison with zero changed mention assignments required
-- an extra mini CPU run if the smoke gate passes
-
-If the gate fails, the HF path stays experimental even if the remote vectors are shape-compatible.
-
 ## Runtime Modes
 
 The public runtime interface is:
@@ -107,46 +80,11 @@ The public runtime interface is:
 
 `cpu` prefers local `onnx_fp32` when available and falls back to the exact local `transformers` CPU path if ONNX is unavailable or fails to initialize.
 
-`hf` uses the package's built-in HTTPX HF transport for remote SPECTER embeddings and then continues with the normal local AND tail in the same run.
+`hf` creates one dedicated Hugging Face endpoint, uses it for remote SPECTER embeddings, and then continues with the normal local AND tail in the same run.
 
-The current HF mode is contract-compatible and subset-validated, but the local `gpu` and `cpu` modes remain the more operationally proven paths for larger active-snapshot runs.
+This mode is paid, requires endpoint-write permission on the token, and is intentionally fixed to one standard spec so the package stays small.
 
-## API vs CPU vs GPU Benchmark
-
-Use the dedicated benchmark when you want a like-for-like comparison of:
-
-- local GPU SPECTER
-- local CPU SPECTER through the public `cpu` mode
-- HF remote SPECTER with the same client-side tokenizer truncation used by the live inference path
-
-Example:
-
-```bash
-export HF_TOKEN=...
-author-name-disambiguation run-specter-benchmark \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/benchmarks/ads_prod_current_specter \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
-```
-
-The benchmark writes:
-
-- `specter_benchmark_report.json`
-- `specter_benchmark_report.md`
-
-The report is split into two tracks:
-
-- Track A: notebook/SPECTER parity with `max_length=512`
-- Track B: bundle parity with the current bundle token cap, currently `256`
-
-It also reports:
-
-- whether the cap-aligned truncated HF path stays viable against local CPU/GPU references
-- public-mode throughput across GPU, CPU, and HF
-- a source-based full-run interpolation
-- a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
+Rejected HF alternatives are recorded once in [hf_endpoint_t4_decision_20260401.md](/home/ubuntu/Author_Name_Disambiguation/docs/experiments/hf_endpoint_t4_decision_20260401.md).
 
 ## Optional Controls
 

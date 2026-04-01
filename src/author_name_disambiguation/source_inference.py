@@ -134,7 +134,7 @@ def _infer_runtime_mode(*, runtime_mode: str | None, specter_runtime_backend: st
         return runtime_mode
     backend = str(specter_runtime_backend or "transformers").strip().lower() or "transformers"
     device = str(requested_device or "auto").strip().lower() or "auto"
-    if backend == "hf_httpx":
+    if backend == "hf_endpoint":
         return "hf"
     if backend == "onnx_fp32" or device.startswith("cpu"):
         return "cpu"
@@ -640,7 +640,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     elif runtime_mode == "hf":
         if getattr(request, "specter_runtime_backend", None) is not None:
             raise ValueError("runtime_mode='hf' does not accept specter_runtime_backend overrides.")
-        specter_runtime_backend = "hf_httpx"
+        specter_runtime_backend = "hf_endpoint"
     elif runtime_mode == "cpu":
         specter_runtime_backend = (
             legacy_specter_runtime_backend if getattr(request, "specter_runtime_backend", None) is not None else "cpu_auto"

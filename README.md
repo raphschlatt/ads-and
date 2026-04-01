@@ -18,8 +18,6 @@ The installed surface is intentionally small:
 - `export-model-bundle`
 - `precompute-source-embeddings`
 - `run-infer-sources`
-- `run-hf-compatibility-report`
-- `run-specter-benchmark`
 
 The public Python API for inference surfaces is intentionally small:
 
@@ -61,16 +59,6 @@ source /home/ubuntu/.venv/bin/activate
 uv pip install \
   --python /home/ubuntu/.venv/bin/python \
   --editable ".[dev,research]" \
-  --torch-backend cu126
-```
-
-For the benchmark-only extras used by the HF transport lab runner:
-
-```bash
-source /home/ubuntu/.venv/bin/activate
-uv pip install \
-  --python /home/ubuntu/.venv/bin/python \
-  --editable ".[bench,dev]" \
   --torch-backend cu126
 ```
 
@@ -176,6 +164,8 @@ author-name-disambiguation run-infer-sources \
   --cluster-backend sklearn_cpu
 ```
 
+`hf` creates a dedicated paid Hugging Face endpoint on demand, uses it for remote SPECTER embeddings, and deletes it at the end of the run. It requires a token with `inference.endpoints.write`.
+
 Precompute remote SPECTER embeddings when you want reusable enriched source files:
 
 ```bash
@@ -185,35 +175,6 @@ author-name-disambiguation precompute-source-embeddings \
   --references-path data/raw/ads/ads_prod_current/references.parquet \
   --output-root artifacts/precomputed/ads_prod_current
 ```
-
-Run the strict HF compatibility gate for the current bundle:
-
-```bash
-export HF_TOKEN=...
-author-name-disambiguation run-hf-compatibility-report \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/compat/ads_prod_current \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
-```
-
-Benchmark API vs CPU vs GPU SPECTER on ADS-like inputs:
-
-```bash
-export HF_TOKEN=...
-author-name-disambiguation run-specter-benchmark \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/benchmarks/ads_prod_current_specter \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
-```
-
-This writes:
-
-- `specter_benchmark_report.json`
-- `specter_benchmark_report.md`
 
 ## Programmatic Inference
 
@@ -284,28 +245,18 @@ The public runtime story is intentionally simple:
 
 `cpu` prefers local `onnx_fp32` when the optional ONNX extra is installed and the backend initializes cleanly; otherwise it falls back to the exact local `transformers` CPU path.
 
-`hf` runs remote SPECTER embedding transport through the package itself, then continues with the normal local AND tail in the same run.
+`hf` spins up one dedicated Hugging Face Inference Endpoint, runs remote SPECTER embeddings there, and then continues with the normal local AND tail in the same run.
 
 The HF path is intentionally narrow:
 
-- provider: `hf-inference`
+- endpoint: dedicated Hugging Face Inference Endpoint
 - model: `allenai/specter`
+- hardware: `AWS / eu-west-1 / Nvidia T4 / x1`
 - token source: `HF_TOKEN`
 
-Promotion of the HF path is gated by `run-hf-compatibility-report`. The current HF path is contract-compatible and subset-validated, but it is still less operationally proven on larger active-snapshot runs than the local `gpu` and `cpu` modes.
+The kept HF mode is the leanest standard path we found that still worked on real ADS slices. Rejected HF approaches are summarized in [hf_endpoint_t4_decision_20260401.md](/home/ubuntu/Author_Name_Disambiguation/docs/experiments/hf_endpoint_t4_decision_20260401.md).
 
-For a broader operational comparison of `hf_api` vs local CPU vs local GPU, use `run-specter-benchmark`.
-That benchmark intentionally separates:
-
-- Track A: notebook/SPECTER parity with `max_length=512`
-- Track B: current bundle parity with the bundle token cap, currently `256`
-
-The main comparison is cap-aligned with the real inference path:
-
-- local GPU and local CPU both truncate at the track cap
-- the public CPU mode auto-selects `onnx_fp32` when available, otherwise exact `transformers`
-- HF remote SPECTER also uses the same client-side tokenizer truncation
-Install the optional ONNX extra if you want to use or benchmark it:
+Install the optional ONNX extra if you want the faster CPU auto-path:
 
 ```bash
 source /home/ubuntu/.venv/bin/activate
@@ -313,9 +264,6 @@ uv pip install \
   --python /home/ubuntu/.venv/bin/python \
   --editable ".[cpu_onnx,dev]"
 ```
-- `ads_realistic_truncated` for ADS-like capped texts
-
-The lab report separates the kept `prod-safe` HTTPX profile from the more aggressive `turbo_http2` study so transport tuning does not get mixed into the package-realistic benchmark numbers.
 
 Inference outputs under `output_root`:
 
