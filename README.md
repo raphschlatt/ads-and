@@ -137,10 +137,38 @@ author-name-disambiguation run-infer-sources \
   --references-path data/raw/ads/ads_prod_current/references.parquet \
   --output-root artifacts/exports/ads_prod_current \
   --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
+  --runtime-mode gpu
 ```
 
-Precompute remote SPECTER embeddings for CPU-first inference:
+Run CPU-first inference with the public auto mode:
+
+```bash
+author-name-disambiguation run-infer-sources \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/exports/ads_prod_current_cpu \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
+  --runtime-mode cpu \
+  --cluster-backend sklearn_cpu
+```
+
+Run direct HF-backed inference in one package call:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-infer-sources \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/exports/ads_prod_current_hf \
+  --dataset-id ads_prod_current \
+  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
+  --runtime-mode hf \
+  --cluster-backend sklearn_cpu
+```
+
+Precompute remote SPECTER embeddings when you want reusable enriched source files:
 
 ```bash
 export HF_TOKEN=...
@@ -219,11 +247,12 @@ precompute_source_embeddings(
 
 result = run_infer_sources(
     InferSourcesRequest(
-        publications_path="artifacts/precomputed/ads_prod_current/publications_precomputed.parquet",
-        references_path="artifacts/precomputed/ads_prod_current/references_precomputed.parquet",
+        publications_path="data/raw/ads/ads_prod_current/publications.parquet",
+        references_path="data/raw/ads/ads_prod_current/references.parquet",
         output_root="artifacts/exports/ads_prod_current",
         dataset_id="ads_prod_current",
         model_bundle="artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1",
+        runtime_mode="cpu",
         progress=False,
     )
 )
@@ -254,15 +283,21 @@ For the current promoted NAND bundle, text embeddings are not “any 768-dim vec
 
 Equal dimensionality alone is not a quality-compatibility guarantee.
 
-## CPU + HF Path
+## Runtime Modes
 
-The supported CPU-first MVP is:
+The public runtime story is intentionally simple:
 
-1. precompute `precomputed_embedding` with `hf-inference + allenai/specter`
-2. run `run-infer-sources` locally on CPU, ideally with `--device cpu --cluster-backend sklearn_cpu`
+- `--runtime-mode gpu`
+- `--runtime-mode cpu`
+- `--runtime-mode hf`
 
-This keeps the expensive text-embedding step remote while the disambiguation run stays local.
-The HF path is intentionally narrow in Welle 1:
+`gpu` uses local transformers/SPECTER on CUDA.
+
+`cpu` prefers local `onnx_fp32` when the optional ONNX extra is installed and the backend initializes cleanly; otherwise it falls back to the exact local `transformers` CPU path.
+
+`hf` runs remote SPECTER embedding transport through the package itself, then continues with the normal local AND tail in the same run.
+
+The HF path is intentionally narrow:
 
 - provider: `hf-inference`
 - model: `allenai/specter`
@@ -279,16 +314,16 @@ That benchmark intentionally separates:
 The main comparison is cap-aligned with the real inference path:
 
 - local GPU and local CPU both truncate at the track cap
-- the default local CPU backend is the exact `transformers` path
+- the public CPU mode auto-selects `onnx_fp32` when available, otherwise exact `transformers`
 - optional `onnx_fp32` is benchmarked separately when the `cpu_onnx` extra is installed
 - HF remote SPECTER also uses the same client-side tokenizer truncation
 - a small raw-HF probe stays in the report only as a long-text diagnostic
 
-For local CPU inference there is one explicit runtime switch:
+Legacy low-level controls are still accepted for debugging and tests:
 
 - `--specter-runtime-backend transformers|onnx_fp32`
 
-Effective default is `transformers`. `onnx_fp32` is opt-in, CPU-only, and initially experimental.
+For normal package use, prefer `--runtime-mode gpu|cpu|hf`.
 Install the optional ONNX extra if you want to use or benchmark it:
 
 ```bash
@@ -299,12 +334,12 @@ uv pip install \
 ```
 
 Use `run-specter-hf-lab-benchmark` when you want the separate HF-only transport study.
-That lab runner intentionally measures aggressive async/pooling profiles on:
+That lab runner intentionally measures the remaining HTTPX variants on:
 
 - `micro_short_repeat` for HF-style short-text max-speed behavior
 - `ads_realistic_truncated` for ADS-like capped texts
 
-The lab report separates `prod-safe` from explicitly `lab_only` / `non_production` profiles so transport tuning does not get mixed into the package-realistic benchmark numbers.
+The lab report separates the kept `prod-safe` HTTPX profile from the more aggressive `turbo_http2` study so transport tuning does not get mixed into the package-realistic benchmark numbers.
 
 Inference outputs under `output_root`:
 

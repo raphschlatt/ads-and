@@ -1746,6 +1746,7 @@ def cmd_run_infer_sources(args):
                 infer_stage=args.infer_stage,
                 cluster_config=args.cluster_config,
                 gates_config=args.gates_config,
+                runtime_mode=args.runtime_mode,
                 device=args.device,
                 precision_mode=args.precision_mode,
                 specter_runtime_backend=args.specter_runtime_backend,
@@ -2543,6 +2544,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full"], default="full")
     sp.add_argument("--cluster-config", default=None)
     sp.add_argument("--gates-config", default=None)
+    sp.add_argument("--runtime-mode", choices=["gpu", "cpu", "hf"], default=None)
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
     sp.add_argument("--specter-runtime-backend", choices=["transformers", "onnx_fp32"], default=None)

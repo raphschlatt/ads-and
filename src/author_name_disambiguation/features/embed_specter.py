@@ -14,6 +14,11 @@ import pandas as pd
 
 from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.embedding_contract import TEXT_EMBEDDING_DIM, build_source_text
+from author_name_disambiguation.hf_transport import (
+    DEFAULT_HF_CONCURRENCY,
+    DEFAULT_HF_TOKEN_ENV_VAR,
+    embed_texts_via_hf_httpx,
+)
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 from author_name_disambiguation.features.specter_runtime import (
@@ -420,6 +425,14 @@ def generate_specter_embeddings(
     quiet_libraries: bool = False,
     reuse_model: bool = True,
     onnx_cache_path: str | Path | None = None,
+    hf_provider: str = "hf-inference",
+    hf_token_env_var: str = DEFAULT_HF_TOKEN_ENV_VAR,
+    hf_concurrency: int | None = DEFAULT_HF_CONCURRENCY,
+    hf_use_http2: bool | None = None,
+    hf_chunk_size: int | None = None,
+    hf_max_retries: int = 5,
+    hf_base_backoff_seconds: float = 1.0,
+    hf_max_backoff_seconds: float = 30.0,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     titles = mentions["title"].fillna("").astype(str).tolist()
@@ -483,6 +496,87 @@ def generate_specter_embeddings(
         }
         return (emb, meta) if return_meta else emb
 
+    requested_device = str(device)
+    runtime_backend_clean = str(runtime_backend or "transformers").strip().lower() or "transformers"
+    if runtime_backend_clean == "hf_httpx":
+        tokenizer = load_tokenizer_prefer_fast(model_name)
+        vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
+        if vectors_for_indices:
+            ordered = compute_token_length_order(
+                [texts[idx] for idx in vectors_for_indices],
+                tokenizer=tokenizer,
+                max_length=max_length,
+            )
+            vectors_for_indices = [vectors_for_indices[int(pos)] for pos in ordered.tolist()]
+        out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
+        for idx, item in enumerate(precomputed_vectors):
+            if item is not None:
+                out[idx] = item
+        if vectors_for_indices:
+            remote_vectors, remote_meta = embed_texts_via_hf_httpx(
+                texts=[texts[idx] for idx in vectors_for_indices],
+                provider=hf_provider,
+                model_name=model_name,
+                hf_token_env_var=hf_token_env_var,
+                max_length=max_length,
+                concurrency=hf_concurrency,
+                use_http2=hf_use_http2,
+                chunk_size=max(1, int(hf_chunk_size if hf_chunk_size is not None else (batch_size or 64))),
+                max_retries=int(hf_max_retries),
+                base_backoff_seconds=float(hf_base_backoff_seconds),
+                max_backoff_seconds=float(hf_max_backoff_seconds),
+                progress=show_progress,
+                progress_label="SPECTER HF remote texts",
+            )
+            out[np.asarray(vectors_for_indices, dtype=np.int64)] = remote_vectors
+        else:
+            remote_meta = {
+                "transport": "httpx_async_pool",
+                "provider": str(hf_provider),
+                "model_name": str(model_name),
+                "api_concurrency": None if hf_concurrency is None else int(hf_concurrency),
+                "http2_requested": None if hf_use_http2 is None else bool(hf_use_http2),
+                "http2_enabled": None,
+                "verify": True,
+                "texts_total": 0,
+                "texts_successful": 0,
+                "texts_failed": 0,
+                "attempts_total": 0,
+                "backoff_seconds_total": 0.0,
+                "processing_wall_seconds": 0.0,
+                "wall_seconds": 0.0,
+                "degrade_reports": [],
+                "resolved_device": f"remote:{hf_provider}",
+                "requested_device": "hf",
+                "runtime_backend": "hf_httpx",
+                "generation_mode": "remote_httpx_only",
+            }
+        meta = {
+            **_base_runtime_meta(
+                requested_device="hf",
+                resolved_device=str(remote_meta.get("resolved_device") or f"remote:{hf_provider}"),
+                effective_precision_mode=None,
+                requested_batch_size=None if batch_size is None else int(batch_size),
+                effective_batch_size=None if hf_concurrency is None else int(hf_concurrency),
+                fallback_reason=None,
+                torch_version=None,
+                torch_cuda_version=None,
+                torch_cuda_available=None,
+                cuda_probe_error=None,
+                model_to_cuda_error=None,
+            ),
+            **remote_meta,
+            **precomputed_summary,
+        }
+        meta["generation_mode"] = (
+            "precomputed_plus_remote_httpx"
+            if precomputed_summary["precomputed_embedding_count"]
+            else "remote_httpx_only"
+        )
+        meta["runtime_backend"] = "hf_httpx"
+        meta["column_present"] = bool(precomputed_summary.get("column_present"))
+        return (out.astype(np.float32), meta) if return_meta else out.astype(np.float32)
+
     try:
         import torch
     except Exception as exc:
@@ -519,9 +613,7 @@ def generate_specter_embeddings(
 
     _configure_hf_noise(quiet_libraries)
 
-    requested_device = str(device)
     device, runtime_meta = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
-    runtime_backend_clean = str(runtime_backend or "transformers").strip().lower() or "transformers"
     if runtime_backend_clean == "onnx_fp32":
         if requested_device.strip().lower() not in {"auto", "cpu"}:
             raise ValueError("specter_runtime_backend='onnx_fp32' requires device='cpu' or device='auto'.")
@@ -817,6 +909,14 @@ def get_or_create_specter_embeddings(
     show_progress: bool = False,
     quiet_libraries: bool = False,
     reuse_model: bool = True,
+    hf_provider: str = "hf-inference",
+    hf_token_env_var: str = DEFAULT_HF_TOKEN_ENV_VAR,
+    hf_concurrency: int | None = DEFAULT_HF_CONCURRENCY,
+    hf_use_http2: bool | None = None,
+    hf_chunk_size: int | None = None,
+    hf_max_retries: int = 5,
+    hf_base_backoff_seconds: float = 1.0,
+    hf_max_backoff_seconds: float = 30.0,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     output = Path(output_path)
@@ -870,6 +970,14 @@ def get_or_create_specter_embeddings(
         quiet_libraries=quiet_libraries,
         reuse_model=reuse_model,
         onnx_cache_path=build_onnx_cache_path(output_path=output_path, model_name=model_name, max_length=max_length),
+        hf_provider=hf_provider,
+        hf_token_env_var=hf_token_env_var,
+        hf_concurrency=hf_concurrency,
+        hf_use_http2=hf_use_http2,
+        hf_chunk_size=hf_chunk_size,
+        hf_max_retries=hf_max_retries,
+        hf_base_backoff_seconds=hf_base_backoff_seconds,
+        hf_max_backoff_seconds=hf_max_backoff_seconds,
         return_meta=True,
     )
     emb, meta = emb_result

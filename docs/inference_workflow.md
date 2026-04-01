@@ -95,6 +95,22 @@ The report includes:
 
 If the gate fails, the HF path stays experimental even if the remote vectors are shape-compatible.
 
+## Runtime Modes
+
+The public runtime interface is:
+
+- `--runtime-mode gpu`
+- `--runtime-mode cpu`
+- `--runtime-mode hf`
+
+`gpu` uses local transformers/SPECTER on CUDA.
+
+`cpu` prefers local `onnx_fp32` when available and falls back to the exact local `transformers` CPU path if ONNX is unavailable or fails to initialize.
+
+`hf` uses the package's built-in HTTPX HF transport for remote SPECTER embeddings and then continues with the normal local AND tail in the same run.
+
+The legacy low-level switch `--specter-runtime-backend transformers|onnx_fp32` is still accepted for debugging and tests, but normal usage should prefer `--runtime-mode gpu|cpu|hf`.
+
 ## API vs CPU vs GPU Benchmark
 
 Use the dedicated benchmark when you want a like-for-like comparison of:
@@ -136,15 +152,10 @@ It also reports:
 - a source-based full-run interpolation
 - a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
 
-For the separate HF transport study, install the optional benchmark extras and run the lab benchmark:
+For the separate HF transport study, the package dependencies are enough; just install the project and run the lab benchmark:
 
 ```bash
 source /home/ubuntu/.venv/bin/activate
-uv pip install \
-  --python /home/ubuntu/.venv/bin/python \
-  --editable ".[bench,dev]" \
-  --torch-backend cu126
-
 export HF_TOKEN=...
 author-name-disambiguation run-specter-hf-lab-benchmark \
   --publications-path data/raw/ads/ads_prod_current/publications.parquet \
@@ -160,7 +171,7 @@ That runner is intentionally separate from the realistic package benchmark:
 
 - it measures HF transport only, not the whole package path
 - it reports `micro_short_repeat` and `ads_realistic_truncated` separately
-- it labels aggressive async profiles as `lab_only` and, where applicable, `non_production`
+- it labels the kept `prod-safe` HTTPX profile separately from the more aggressive `turbo_http2` study
 - it exists to answer the "10x to 50x faster than sync" question without mixing those numbers into the warmed package benchmark
 
 ## Optional Controls

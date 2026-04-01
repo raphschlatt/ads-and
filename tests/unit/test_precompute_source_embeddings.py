@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import importlib
+import pytest
 
 from author_name_disambiguation.embedding_contract import build_source_text
 from author_name_disambiguation.precompute_source_embeddings import (
@@ -52,31 +52,17 @@ def test_resolve_hf_token_raises_when_missing(monkeypatch: pytest.MonkeyPatch):
         _resolve_hf_token("HF_TOKEN")
 
 
-def test_request_hf_batch_retries_retryable_errors(monkeypatch: pytest.MonkeyPatch):
+def test_request_hf_batch_uses_shared_httpx_transport(monkeypatch: pytest.MonkeyPatch):
     precompute_module = importlib.import_module("author_name_disambiguation.precompute_source_embeddings")
+    seen: dict[str, object] = {}
 
-    class _RetryableError(RuntimeError):
-        def __init__(self, status_code: int):
-            super().__init__(f"status={status_code}")
-            self.status_code = status_code
+    def _fake_embed_texts_via_hf_httpx(**kwargs):
+        seen.update(kwargs)
+        return np.full((1, 768), 0.5, dtype=np.float32), {"transport": "httpx_async_pool", "attempts_total": 2}
 
-    class _Client:
-        def __init__(self):
-            self.calls = 0
-
-        def feature_extraction(self, texts, model):
-            del texts, model
-            self.calls += 1
-            if self.calls == 1:
-                raise _RetryableError(503)
-            return [[0.5] * 768]
-
-    client = _Client()
-    delays: list[float] = []
-    monkeypatch.setattr(precompute_module, "sleep", lambda seconds: delays.append(seconds))
+    monkeypatch.setattr(precompute_module, "embed_texts_via_hf_httpx", _fake_embed_texts_via_hf_httpx)
 
     vectors, meta = _request_hf_batch(
-        client=client,
         texts=["hello"],
         model_name="allenai/specter",
         max_retries=2,
@@ -85,6 +71,9 @@ def test_request_hf_batch_retries_retryable_errors(monkeypatch: pytest.MonkeyPat
     )
 
     assert vectors.shape == (1, 768)
-    assert client.calls == 2
-    assert delays == [0.25]
-    assert meta["attempts"] == 2
+    assert seen["texts"] == ["hello"]
+    assert seen["model_name"] == "allenai/specter"
+    assert seen["max_retries"] == 2
+    assert seen["base_backoff_seconds"] == 0.25
+    assert seen["max_backoff_seconds"] == 1.0
+    assert meta["transport"] == "httpx_async_pool"

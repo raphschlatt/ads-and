@@ -52,17 +52,20 @@ def test_cli_run_specter_hf_lab_benchmark_writes_reports_and_marks_unavailable_m
         lab_module,
         "_select_mode_specs",
         lambda _profiles: [
-            lab_module._LabModeSpec("hf_sync_hub_client_baseline", transport="sync_hub", lab_only=False, non_production=False),
-            lab_module._LabModeSpec("hf_httpx_async_pool_prod_safe", transport="httpx", lab_only=True, non_production=False),
-            lab_module._LabModeSpec("hf_aiohttp_pool_prod_safe", transport="aiohttp", lab_only=True, non_production=False),
+            lab_module._LabModeSpec("hf_httpx_async_pool_prod_safe", lab_only=True, non_production=False),
+            lab_module._LabModeSpec(
+                "hf_httpx_async_pool_turbo_http2",
+                lab_only=True,
+                non_production=True,
+                use_http2=True,
+            ),
         ],
     )
 
     def _fake_run_mode_variant(*, dataset, mode_spec, concurrency=None, **_kwargs):
-        if mode_spec.transport == "aiohttp":
-            raise RuntimeError("missing aiohttp")
         texts_total = len(dataset.texts)
-        vectors = np.full((texts_total, 768), 1.0 if mode_spec.transport == "sync_hub" else 2.0, dtype=np.float32)
+        fill = 1.0 if "prod_safe" in mode_spec.name else 2.0
+        vectors = np.full((texts_total, 768), fill, dtype=np.float32)
         return lab_module._LabRun(
             available=True,
             vectors=vectors,
@@ -70,9 +73,9 @@ def test_cli_run_specter_hf_lab_benchmark_writes_reports_and_marks_unavailable_m
             errors=[None] * texts_total,
             raw_shapes=["[32, 768]"] * texts_total,
             warmup_seconds=0.1,
-            processing_wall_seconds=2.0 if mode_spec.transport == "sync_hub" else 1.0,
+            processing_wall_seconds=2.0 if "prod_safe" in mode_spec.name else 1.0,
             meta={
-                "transport": mode_spec.transport,
+                "transport": "httpx_async_pool",
                 "concurrency": concurrency,
                 "lab_only": bool(mode_spec.lab_only),
                 "non_production": bool(mode_spec.non_production),
@@ -110,12 +113,9 @@ def test_cli_run_specter_hf_lab_benchmark_writes_reports_and_marks_unavailable_m
     report_md = (tmp_path / "hf_lab" / "specter_hf_lab_report.md").read_text(encoding="utf-8")
 
     assert payload["summary"] == report_json["decision"]["summary"]
-    assert report_json["datasets"]["micro_short_repeat"]["best_speedup_vs_sync"] == 2.0
-    assert report_json["datasets"]["ads_realistic_truncated"]["modes"]["hf_aiohttp_pool_prod_safe"]["available"] is False
-    assert (
-        report_json["datasets"]["ads_realistic_truncated"]["modes"]["hf_aiohttp_pool_prod_safe"]["error"]
-        == "missing aiohttp"
-    )
+    assert report_json["datasets"]["micro_short_repeat"]["best_speedup_vs_prod_safe"] == 2.0
+    assert report_json["datasets"]["ads_realistic_truncated"]["reference_mode_name"] == "hf_httpx_async_pool_prod_safe"
+    assert report_json["datasets"]["ads_realistic_truncated"]["modes"]["hf_httpx_async_pool_turbo_http2"]["available"] is True
     assert "SPECTER HF Lab Benchmark Report" in report_md
 
 

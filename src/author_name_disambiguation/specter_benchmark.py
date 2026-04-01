@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import nullcontext
 from dataclasses import dataclass
 import ast
-import importlib.util
 import json
 import os
 import platform
@@ -39,14 +37,13 @@ from author_name_disambiguation.features.specter_runtime import (
     temporary_torch_cpu_thread_policy,
 )
 from author_name_disambiguation.hf_compatibility_report import _compare_infer_outputs, _standardize_sample_frame
-from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
-from author_name_disambiguation.precompute_source_embeddings import (
-    _is_retryable_hf_error,
-    _normalize_hf_batch_response,
-    _normalize_model_name,
-    _normalize_provider,
-    _resolve_hf_token,
+from author_name_disambiguation.hf_transport import (
+    embed_texts_via_hf_httpx,
+    hf_http2_enabled,
+    normalize_model_name,
+    normalize_provider,
 )
+from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
 from author_name_disambiguation.source_inference import _estimate_pair_upper_bound, _resolve_infer_run_cfg, _resolve_model_bundle
 
 _TRACK_A_CAP = 512
@@ -55,11 +52,6 @@ _DEFAULT_PARITY_SAMPLE_SIZE = 128
 _DEFAULT_THROUGHPUT_SAMPLE_SIZE = 2048
 _DEFAULT_API_CONCURRENCY = 4
 _DEFAULT_WARMUP_SAMPLE_SIZE = 8
-_DEFAULT_MAX_RETRIES = 5
-_DEFAULT_BASE_BACKOFF_SECONDS = 1.0
-_DEFAULT_MAX_BACKOFF_SECONDS = 30.0
-
-
 @dataclass(slots=True)
 class SpecterBenchmarkRequest:
     publications_path: str | Path
@@ -130,25 +122,6 @@ def _resolved_path(value: str | Path) -> Path:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
-
-
-def _missing_bench_dependency_message(*, packages: str, command_name: str) -> str:
-    return (
-        f"Missing optional benchmark dependency/dependencies: {packages}. "
-        f"Install the benchmark extras before running {command_name!r}, for example "
-        "`uv pip install --python /home/ubuntu/.venv/bin/python --editable '.[bench,dev]'`."
-    )
-
-
-def _import_httpx_for_bench():
-    try:
-        import httpx
-
-        return httpx
-    except Exception as exc:  # pragma: no cover - import guard
-        raise RuntimeError(
-            _missing_bench_dependency_message(packages="httpx", command_name="run-specter-benchmark")
-        ) from exc
 
 
 def _load_normalized_source(path: str | Path, *, source_type: str) -> pd.DataFrame:
@@ -561,67 +534,6 @@ def _summarize_mode_run(
     return summary
 
 
-def _hf_http2_enabled() -> bool:
-    return importlib.util.find_spec("h2") is not None
-
-
-def _build_hf_feature_extraction_url(*, provider: str, model_name: str) -> str:
-    from huggingface_hub import constants
-
-    base_url = constants.INFERENCE_PROXY_TEMPLATE.format(provider=provider)
-    return f"{base_url}/models/{model_name}/pipeline/feature-extraction"
-
-
-async def _request_hf_single_async(
-    *,
-    client: Any,
-    url: str,
-    text: str,
-    max_retries: int = _DEFAULT_MAX_RETRIES,
-    base_backoff_seconds: float = _DEFAULT_BASE_BACKOFF_SECONDS,
-    max_backoff_seconds: float = _DEFAULT_MAX_BACKOFF_SECONDS,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    httpx = _import_httpx_for_bench()
-    started_at = perf_counter()
-    attempts = 0
-    backoff_seconds_total = 0.0
-    request_payload = {
-        "inputs": text,
-        "parameters": {
-            "truncate": True,
-            "truncation_direction": "Right",
-        },
-    }
-    while True:
-        attempts += 1
-        try:
-            response = await client.post(url, json=request_payload)
-            response.raise_for_status()
-            payload = response.json()
-            arr = np.asarray(payload, dtype=np.float32)
-            vector = _normalize_hf_batch_response(arr, expected_items=1)[0]
-            return vector.astype(np.float32, copy=False), {
-                "attempts": int(attempts),
-                "backoff_seconds_total": float(backoff_seconds_total),
-                "wall_seconds": float(perf_counter() - started_at),
-                "raw_shape": [int(v) for v in arr.shape],
-            }
-        except Exception as exc:
-            should_retry = attempts <= int(max_retries) and _is_retryable_hf_error(exc)
-            if not should_retry:
-                detail = str(exc)
-                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
-                    body = exc.response.text.strip()
-                    if body:
-                        detail = f"HTTP {exc.response.status_code}: {body[:240]}"
-                raise RuntimeError(
-                    f"HF feature_extraction failed after {attempts} attempt(s): {type(exc).__name__}: {detail}"
-                ) from exc
-            delay = min(float(max_backoff_seconds), float(base_backoff_seconds) * (2 ** (attempts - 1)))
-            await asyncio.sleep(delay)
-            backoff_seconds_total += float(delay)
-
-
 def _run_hf_mode(
     *,
     sample: _BenchmarkSample,
@@ -634,104 +546,86 @@ def _run_hf_mode(
     progress: bool,
     api_concurrency: int = _DEFAULT_API_CONCURRENCY,
 ) -> _ModeRun:
-    httpx = _import_httpx_for_bench()
     texts_total = len(sample.texts)
-    vectors = np.full((texts_total, 768), np.nan, dtype=np.float32)
-    attempted_mask = np.zeros((texts_total,), dtype=bool)
-    success_mask = np.zeros((texts_total,), dtype=bool)
-    per_item_wall_seconds = np.full((texts_total,), np.nan, dtype=np.float64)
+    provider = normalize_provider(provider)
+    model_name = normalize_model_name(model_name)
     sent_token_counts = np.full((texts_total,), np.nan, dtype=np.float64)
-    raw_shapes: list[str | None] = [None] * texts_total
-    errors: list[str | None] = [None] * texts_total
-
-    provider = _normalize_provider(provider)
-    model_name = _normalize_model_name(model_name)
-    api_key = _resolve_hf_token(hf_token_env_var)
-    effective_concurrency = max(1, int(api_concurrency))
-    http2_enabled = _hf_http2_enabled()
-    request_url = _build_hf_feature_extraction_url(provider=provider, model_name=model_name)
-
-    def _prepare_text(idx: int) -> tuple[str, int]:
+    prepared_texts: list[str] = []
+    for idx in range(texts_total):
         raw_tokens = int(sample.raw_token_counts[idx])
         if cap is None:
-            return sample.texts[idx], raw_tokens
+            prepared_texts.append(sample.texts[idx])
+            sent_token_counts[idx] = float(raw_tokens)
+            continue
         sent_text, _truncated_input_ids, retokenized_tokens = _truncate_text_to_cap(
             sample.texts[idx],
             tokenizer=tokenizer,
             cap=int(cap),
         )
-        return sent_text, int(retokenized_tokens)
-
-    async def _run_all(tracker: Any) -> None:
-        timeout = httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0)
-        limits = httpx.Limits(
-            max_connections=int(effective_concurrency),
-            max_keepalive_connections=int(effective_concurrency),
-        )
-        headers = {"Authorization": f"Bearer {api_key}"}
-        semaphore = asyncio.Semaphore(int(effective_concurrency))
-
-        async with httpx.AsyncClient(
-            headers=headers,
-            timeout=timeout,
-            limits=limits,
-            http2=bool(http2_enabled),
-        ) as client:
-
-            async def _run_one(idx: int) -> None:
-                attempted_mask[idx] = True
-                sent_text, sent_token_count = _prepare_text(idx)
-                try:
-                    async with semaphore:
-                        vector, meta = await _request_hf_single_async(
-                            client=client,
-                            url=request_url,
-                            text=str(sent_text),
-                        )
-                    vectors[idx] = vector
-                    success_mask[idx] = True
-                    per_item_wall_seconds[idx] = float(meta.get("wall_seconds") or 0.0)
-                    sent_token_counts[idx] = float(sent_token_count)
-                    raw_shapes[idx] = None if meta.get("raw_shape") is None else str(meta["raw_shape"])
-                except Exception as exc:
-                    errors[idx] = str(exc)
-                finally:
-                    tracker.update(1)
-
-            await asyncio.gather(*(_run_one(idx) for idx in range(texts_total)))
+        prepared_texts.append(sent_text)
+        sent_token_counts[idx] = float(retokenized_tokens)
 
     started_at = perf_counter()
-    with loop_progress(
-        total=texts_total,
-        label=f"{mode_name} {sample.name}",
-        enabled=bool(progress),
-        unit="text",
-    ) as tracker:
-        asyncio.run(_run_all(tracker))
-
-    total_wall_seconds = perf_counter() - started_at
-    return _ModeRun(
-        mode=str(mode_name),
-        available=True,
-        vectors=vectors,
-        attempted_mask=attempted_mask,
-        success_mask=success_mask,
-        per_item_wall_seconds=per_item_wall_seconds,
-        raw_shapes=raw_shapes,
-        sent_token_counts=sent_token_counts,
-        errors=errors,
-        load_seconds=0.0,
-        processing_wall_seconds=float(total_wall_seconds),
-        total_wall_seconds=float(total_wall_seconds),
-        meta={
-            "provider": provider,
-            "model_name": model_name,
-            "transport": "httpx_async_pool",
-            "api_concurrency": int(effective_concurrency),
-            "http2_enabled": bool(http2_enabled),
-            "client_truncation_cap": None if cap is None else int(cap),
-        },
-    )
+    try:
+        vectors, meta = embed_texts_via_hf_httpx(
+            texts=prepared_texts,
+            provider=provider,
+            model_name=model_name,
+            hf_token_env_var=hf_token_env_var,
+            max_length=int(cap) if cap is not None else 256,
+            concurrency=max(1, int(api_concurrency)),
+            chunk_size=max(64, int(api_concurrency)),
+            progress=bool(progress),
+            progress_label=f"{mode_name} {sample.name}",
+        )
+        total_wall_seconds = perf_counter() - started_at
+        return _ModeRun(
+            mode=str(mode_name),
+            available=True,
+            vectors=vectors.astype(np.float32, copy=False),
+            attempted_mask=np.ones((texts_total,), dtype=bool),
+            success_mask=np.ones((texts_total,), dtype=bool),
+            per_item_wall_seconds=np.full((texts_total,), np.nan, dtype=np.float64),
+            raw_shapes=[None] * texts_total,
+            sent_token_counts=sent_token_counts,
+            errors=[None] * texts_total,
+            load_seconds=0.0,
+            processing_wall_seconds=float(meta.get("processing_wall_seconds") or total_wall_seconds),
+            total_wall_seconds=float(total_wall_seconds),
+            meta={
+                "provider": provider,
+                "model_name": model_name,
+                "transport": str(meta.get("transport") or "httpx_async_pool"),
+                "api_concurrency": int(meta.get("api_concurrency") or api_concurrency),
+                "http2_enabled": meta.get("http2_enabled"),
+                "client_truncation_cap": None if cap is None else int(cap),
+            },
+        )
+    except Exception as exc:
+        total_wall_seconds = perf_counter() - started_at
+        return _ModeRun(
+            mode=str(mode_name),
+            available=False,
+            vectors=np.full((texts_total, 768), np.nan, dtype=np.float32),
+            attempted_mask=np.ones((texts_total,), dtype=bool),
+            success_mask=np.zeros((texts_total,), dtype=bool),
+            per_item_wall_seconds=np.full((texts_total,), np.nan, dtype=np.float64),
+            raw_shapes=[None] * texts_total,
+            sent_token_counts=sent_token_counts,
+            errors=[str(exc)] * texts_total,
+            load_seconds=0.0,
+            processing_wall_seconds=float(total_wall_seconds),
+            total_wall_seconds=float(total_wall_seconds),
+            meta={
+                "provider": provider,
+                "model_name": model_name,
+                "transport": "httpx_async_pool",
+                "api_concurrency": int(api_concurrency),
+                "http2_enabled": hf_http2_enabled(),
+                "client_truncation_cap": None if cap is None else int(cap),
+                "error": str(exc),
+            },
+        )
 
 
 class _LocalSpecterSession:
@@ -1397,7 +1291,7 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             model_info["manifest"].get("embedding_contract") or build_bundle_embedding_contract(model_info["model_cfg"])
         )
         bundle_text_contract = dict(bundle_contract.get("text", {}) or {})
-        model_name = _normalize_model_name(request.model_name)
+        model_name = normalize_model_name(request.model_name)
         if bundle_text_contract.get("model_name") and str(bundle_text_contract["model_name"]) != model_name:
             raise ValueError(
                 "SPECTER benchmark must use the bundle text embedding contract. "

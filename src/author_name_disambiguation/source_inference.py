@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 UID_SCOPE_VALUES = {"dataset", "local", "registry"}
 INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full"}
+RUNTIME_MODE_VALUES = {"gpu", "cpu", "hf"}
 
 
 def _ensure_dir(path: str | Path) -> Path:
@@ -97,6 +98,38 @@ def _normalize_runtime_meta(
     return out
 
 
+def _normalize_runtime_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized == "":
+        return None
+    if normalized not in RUNTIME_MODE_VALUES:
+        raise ValueError(f"Unsupported runtime_mode={value!r}. Expected one of {sorted(RUNTIME_MODE_VALUES)!r}.")
+    return normalized
+
+
+def _requested_device_for_runtime_mode(*, runtime_mode: str | None, requested_device: str) -> str:
+    device = str(requested_device or "auto").strip().lower() or "auto"
+    if runtime_mode == "gpu":
+        return "cuda" if device == "auto" else device
+    if runtime_mode in {"cpu", "hf"}:
+        return "cpu" if device == "auto" else device
+    return device
+
+
+def _infer_runtime_mode(*, runtime_mode: str | None, specter_runtime_backend: str | None, requested_device: str) -> str:
+    if runtime_mode is not None:
+        return runtime_mode
+    backend = str(specter_runtime_backend or "transformers").strip().lower() or "transformers"
+    device = str(requested_device or "auto").strip().lower() or "auto"
+    if backend == "hf_httpx":
+        return "hf"
+    if backend == "onnx_fp32" or device.startswith("cpu"):
+        return "cpu"
+    return "gpu"
+
+
 def _validate_request(request: InferSourcesRequest) -> None:
     if str(request.dataset_id).strip() == "":
         raise ValueError("dataset_id must be non-empty.")
@@ -104,6 +137,7 @@ def _validate_request(request: InferSourcesRequest) -> None:
         raise ValueError(f"Unsupported infer_stage={request.infer_stage!r}.")
     if str(request.uid_scope).strip().lower() not in UID_SCOPE_VALUES:
         raise ValueError(f"Unsupported uid_scope={request.uid_scope!r}.")
+    _normalize_runtime_mode(getattr(request, "runtime_mode", None))
 
     pubs = Path(request.publications_path).expanduser()
     if not pubs.exists():
@@ -494,14 +528,19 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         uid_namespace=request.uid_namespace,
         dataset_id=str(request.dataset_id),
     )
+    runtime_mode_requested = _normalize_runtime_mode(getattr(request, "runtime_mode", None))
+    bootstrap_device = _requested_device_for_runtime_mode(
+        runtime_mode=runtime_mode_requested,
+        requested_device=str(request.device),
+    )
 
     output_root = Path(request.output_root).expanduser().resolve()
     dirs = _build_output_dirs(output_root)
     run_id = default_run_id("infer_sources")
     references_present = request.references_path is not None
-    bootstrap_runtime = _probe_bootstrap_runtime(str(request.device))
+    bootstrap_runtime = _probe_bootstrap_runtime(str(bootstrap_device))
     _ui_info(
-        f"device={str(request.device)} -> {bootstrap_runtime.get('resolved_device') or 'n/a'} | "
+        f"device={str(bootstrap_device)} -> {bootstrap_runtime.get('resolved_device') or 'n/a'} | "
         f"gpu={bootstrap_runtime.get('gpu_name') or 'n/a'} | "
         f"precision={str(request.precision_mode)} | "
         f"torch={bootstrap_runtime.get('torch_version') or 'n/a'}"
@@ -573,11 +612,35 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     specter_batch_size_override = infer_overrides.get("specter_batch_size")
     specter_batch_size = None if specter_batch_size_override is None else int(specter_batch_size_override)
     specter_precision_mode = str(infer_overrides.get("specter_precision_mode", "auto")).strip().lower()
-    specter_runtime_backend = (
+    legacy_specter_runtime_backend = (
         str(request.specter_runtime_backend).strip().lower()
         if getattr(request, "specter_runtime_backend", None) is not None
         else str(infer_overrides.get("specter_runtime_backend", "transformers")).strip().lower()
     )
+    runtime_mode = runtime_mode_requested
+    effective_request_device = _requested_device_for_runtime_mode(
+        runtime_mode=runtime_mode,
+        requested_device=str(request.device),
+    )
+    if runtime_mode == "gpu":
+        if getattr(request, "specter_runtime_backend", None) == "onnx_fp32":
+            raise ValueError("runtime_mode='gpu' is incompatible with specter_runtime_backend='onnx_fp32'.")
+        specter_runtime_backend = "transformers"
+    elif runtime_mode == "hf":
+        if getattr(request, "specter_runtime_backend", None) is not None:
+            raise ValueError("runtime_mode='hf' does not accept specter_runtime_backend overrides.")
+        specter_runtime_backend = "hf_httpx"
+    elif runtime_mode == "cpu":
+        specter_runtime_backend = (
+            legacy_specter_runtime_backend if getattr(request, "specter_runtime_backend", None) is not None else "cpu_auto"
+        )
+    else:
+        specter_runtime_backend = legacy_specter_runtime_backend
+        runtime_mode = _infer_runtime_mode(
+            runtime_mode=runtime_mode,
+            specter_runtime_backend=specter_runtime_backend,
+            requested_device=effective_request_device,
+        )
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
     score_chunked_threshold = int(infer_overrides.get("score_chunked_threshold", 500_000))
     pair_chunk_rows = int(infer_overrides.get("pair_chunk_rows", 200_000))
@@ -620,9 +683,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "selected_eps": float(model_info["selected_eps"]),
         "best_threshold": float(model_info["best_threshold"]),
         "embedding_contract": dict(model_info.get("embedding_contract", {}) or {}),
-        "device": str(request.device),
+        "runtime_mode_requested": runtime_mode_requested,
+        "runtime_mode_effective": runtime_mode,
+        "device_requested": str(request.device),
+        "device": str(effective_request_device),
         "precision_mode": str(request.precision_mode),
         "specter_runtime_backend": specter_runtime_backend,
+        "specter_runtime_backend_legacy_requested": legacy_specter_runtime_backend,
         "cluster_backend": str(cluster_backend),
         "cpu_runtime_policy": {
             "cpu_workers": _format_worker_request(cpu_workers),
@@ -741,8 +808,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     name_embeddings_started_at = perf_counter()
     _ui_start("Name embeddings")
     chars_path = dirs["embeddings"] / "chars2vec.npy"
-    text_cache_name = "specter.npy" if specter_runtime_backend == "transformers" else f"specter_{specter_runtime_backend}.npy"
-    text_path = dirs["embeddings"] / text_cache_name
     chars_cache_requested = chars_path.exists() and not bool(request.force)
     _ui_info(
         f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | backend=chars2vec/tensorflow"
@@ -774,35 +839,62 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     text_embeddings_started_at = perf_counter()
     _ui_start("Text embeddings")
-    text_cache_requested = text_path.exists() and not bool(request.force)
     specter_batch_size_label = "auto" if specter_batch_size is None else _format_count(specter_batch_size)
+    preferred_text_backend = "onnx_fp32" if specter_runtime_backend == "cpu_auto" else specter_runtime_backend
+    text_cache_name = "specter.npy" if preferred_text_backend == "transformers" else f"specter_{preferred_text_backend}.npy"
+    text_path = dirs["embeddings"] / text_cache_name
+    text_cache_requested = text_path.exists() and not bool(request.force)
     _ui_info(
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
         f"precomputed={_format_count(precomputed_embeddings['mentions']['precomputed_embedding_count'])} | "
-        f"batch_size={specter_batch_size_label} | device={str(request.device)} | "
+        f"batch_size={specter_batch_size_label} | device={str(effective_request_device)} | "
         f"backend={specter_runtime_backend} | "
         f"precision={specter_precision_mode}"
     )
-    text_result = get_or_create_specter_embeddings(
-        mentions=mentions,
-        output_path=text_path,
-        force_recompute=bool(request.force),
-        model_name=model_info["model_cfg"].get("representation", {}).get("text_model_name", "allenai/specter"),
-        text_backend=model_info["model_cfg"].get("representation", {}).get("text_backend", "transformers"),
-        text_adapter_name=model_info["model_cfg"].get("representation", {}).get("text_adapter_name"),
-        text_adapter_alias=model_info["model_cfg"].get("representation", {}).get("text_adapter_alias", "specter2"),
-        runtime_backend=specter_runtime_backend,
-        max_length=int(model_info["model_cfg"].get("representation", {}).get("max_length", 256)),
-        batch_size=specter_batch_size,
-        device=str(request.device),
-        precision_mode=specter_precision_mode,
-        prefer_precomputed=True,
-        use_stub_if_missing=False,
-        show_progress=bool(request.progress),
-        quiet_libraries=True,
-        reuse_model=False,
-        return_meta=True,
-    )
+    def _run_text_embeddings(selected_backend: str, selected_output_path: Path):
+        return get_or_create_specter_embeddings(
+            mentions=mentions,
+            output_path=selected_output_path,
+            force_recompute=bool(request.force),
+            model_name=model_info["model_cfg"].get("representation", {}).get("text_model_name", "allenai/specter"),
+            text_backend=model_info["model_cfg"].get("representation", {}).get("text_backend", "transformers"),
+            text_adapter_name=model_info["model_cfg"].get("representation", {}).get("text_adapter_name"),
+            text_adapter_alias=model_info["model_cfg"].get("representation", {}).get("text_adapter_alias", "specter2"),
+            runtime_backend=selected_backend,
+            max_length=int(model_info["model_cfg"].get("representation", {}).get("max_length", 256)),
+            batch_size=specter_batch_size,
+            device=str(effective_request_device),
+            precision_mode=specter_precision_mode,
+            prefer_precomputed=True,
+            use_stub_if_missing=False,
+            show_progress=bool(request.progress),
+            quiet_libraries=True,
+            reuse_model=False,
+            return_meta=True,
+        )
+
+    resolved_specter_runtime_backend = specter_runtime_backend
+    if specter_runtime_backend == "cpu_auto":
+        onnx_text_path = dirs["embeddings"] / "specter_onnx_fp32.npy"
+        transformers_text_path = dirs["embeddings"] / "specter.npy"
+        try:
+            text_result = _run_text_embeddings("onnx_fp32", onnx_text_path)
+            text_path = onnx_text_path
+            resolved_specter_runtime_backend = "onnx_fp32"
+        except Exception as exc:
+            _ui_warn(
+                "ONNX CPU SPECTER unavailable; falling back to transformers "
+                f"({type(exc).__name__}: {exc})"
+            )
+            text_result = _run_text_embeddings("transformers", transformers_text_path)
+            text_path = transformers_text_path
+            resolved_specter_runtime_backend = "transformers"
+            if isinstance(text_result, tuple) and len(text_result) == 2 and isinstance(text_result[1], dict):
+                text_result[1]["fallback_reason"] = text_result[1].get("fallback_reason") or "cpu_auto_onnx_fallback"
+                text_result[1]["cpu_auto_fallback_error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        text_result = _run_text_embeddings(specter_runtime_backend, text_path)
+        resolved_specter_runtime_backend = specter_runtime_backend
     if isinstance(text_result, tuple) and len(text_result) == 2:
         text, text_runtime_meta_raw = text_result
     else:
@@ -810,8 +902,17 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         text_runtime_meta_raw = None
     text_runtime_meta = _normalize_runtime_meta(
         text_runtime_meta_raw,
-        requested_device=str(request.device),
+        requested_device=str(effective_request_device),
     )
+    text_runtime_meta["runtime_mode"] = runtime_mode
+    text_runtime_meta["runtime_backend_requested"] = specter_runtime_backend
+    text_runtime_meta["runtime_backend"] = str(
+        text_runtime_meta.get("runtime_backend") or resolved_specter_runtime_backend
+    )
+    context_payload["specter_runtime_backend"] = text_runtime_meta["runtime_backend"]
+    context_payload["runtime_mode_effective"] = runtime_mode
+    context_payload["device"] = str(effective_request_device)
+    write_json(context_payload, context_path)
     if not isinstance(text, np.ndarray):
         text = np.load(text_path, mmap_mode="r")
     text_elapsed = perf_counter() - text_embeddings_started_at
@@ -892,7 +993,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         save_parquet(pair_scores, pair_scores_path, index=False)
         pair_score_runtime_meta = _normalize_runtime_meta(
             None,
-            requested_device=str(request.device),
+            requested_device=str(effective_request_device),
             effective_precision_mode=str(request.precision_mode),
             skipped=True,
         )
@@ -910,7 +1011,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             checkpoint_path=model_info["checkpoint_path"],
             output_path=pair_scores_path,
             batch_size=score_batch_size,
-            device=str(request.device),
+            device=str(effective_request_device),
             precision_mode=str(request.precision_mode),
             show_progress=bool(request.progress),
             chunk_rows=score_chunk_rows,
@@ -924,7 +1025,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             pair_score_runtime_meta_raw = None
         pair_score_runtime_meta = _normalize_runtime_meta(
             pair_score_runtime_meta_raw,
-            requested_device=str(request.device),
+            requested_device=str(effective_request_device),
             effective_precision_mode=str(request.precision_mode),
         )
         if use_file_backed_pair_scores:

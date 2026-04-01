@@ -12,15 +12,8 @@ from author_name_disambiguation.common.pipeline_reports import default_run_id, w
 from author_name_disambiguation.data.prepare_ads import load_ads_records
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_specter import generate_specter_embeddings
+from author_name_disambiguation.hf_transport import embed_texts_via_hf_httpx, normalize_model_name, normalize_provider
 from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
-from author_name_disambiguation.precompute_source_embeddings import (
-    _batched,
-    _build_hf_client,
-    _normalize_model_name,
-    _normalize_provider,
-    _request_hf_batch,
-    _resolve_hf_token,
-)
 from author_name_disambiguation.source_inference import _resolve_model_bundle
 
 
@@ -164,39 +157,20 @@ def _embed_texts_via_hf(
     batch_size: int,
     progress: bool,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    client = _build_hf_client(
-        provider=_normalize_provider(provider),
-        api_key=_resolve_hf_token(hf_token_env_var),
+    model_name = normalize_model_name(model_name)
+    vectors, meta = embed_texts_via_hf_httpx(
+        texts=texts,
+        provider=normalize_provider(provider),
+        model_name=model_name,
+        hf_token_env_var=hf_token_env_var,
+        max_length=256,
+        chunk_size=max(1, int(batch_size)),
+        progress=bool(progress),
+        progress_label="HF compatibility probe",
     )
-    model_name = _normalize_model_name(model_name)
-    out_batches: list[np.ndarray] = []
-    batch_reports: list[dict[str, Any]] = []
-    batches_total = int(np.ceil(len(texts) / max(1, int(batch_size)))) if texts else 0
-    from author_name_disambiguation.common.cli_ui import loop_progress
-
-    with loop_progress(
-        total=batches_total,
-        label="HF compatibility probe",
-        enabled=bool(progress),
-        unit="batch",
-    ) as tracker:
-        for batch_idx, batch_texts in enumerate(_batched(texts, batch_size), start=1):
-            vectors, meta = _request_hf_batch(
-                client=client,
-                texts=batch_texts,
-                model_name=model_name,
-                max_retries=5,
-                base_backoff_seconds=1.0,
-                max_backoff_seconds=30.0,
-            )
-            tracker.update(1)
-            out_batches.append(vectors)
-            batch_reports.append({"batch_index": int(batch_idx), "batch_size": int(len(batch_texts)), **meta})
-    if not out_batches:
-        return np.zeros((0, 768), dtype=np.float32), {"batches_total": 0, "batch_reports": []}
-    return np.vstack(out_batches).astype(np.float32, copy=False), {
-        "batches_total": int(batches_total),
-        "batch_reports": batch_reports,
+    return vectors.astype(np.float32, copy=False), {
+        "batches_total": int(np.ceil(len(texts) / max(1, int(batch_size)))) if texts else 0,
+        "batch_reports": [dict(meta)],
     }
 
 
@@ -353,7 +327,7 @@ def run_hf_compatibility_report(request: HfCompatibilityReportRequest) -> HfComp
     model_info = _resolve_model_bundle(request.model_bundle)
     bundle_contract = dict(model_info["manifest"].get("embedding_contract") or build_bundle_embedding_contract(model_info["model_cfg"]))
     text_contract = dict(bundle_contract.get("text", {}) or {})
-    model_name = _normalize_model_name(request.model_name)
+    model_name = normalize_model_name(request.model_name)
     if text_contract.get("model_name") and str(text_contract["model_name"]) != model_name:
         raise ValueError(
             "HF compatibility report must use the bundle text embedding contract. "

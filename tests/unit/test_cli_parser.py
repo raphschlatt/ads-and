@@ -128,6 +128,7 @@ def test_run_infer_sources_parser_defaults():
     assert args.cluster_config is None
     assert args.gates_config is None
     assert args.infer_stage == "full"
+    assert args.runtime_mode is None
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
     assert args.specter_runtime_backend is None
@@ -162,6 +163,8 @@ def test_run_infer_sources_parser_accepts_overrides():
             "cfg/gates.yaml",
             "--no-progress",
             "--verbose-libs",
+            "--runtime-mode",
+            "hf",
             "--precision-mode",
             "amp_bf16",
             "--specter-runtime-backend",
@@ -181,6 +184,7 @@ def test_run_infer_sources_parser_accepts_overrides():
     assert args.gates_config == "cfg/gates.yaml"
     assert args.progress is False
     assert args.quiet_libs is False
+    assert args.runtime_mode == "hf"
     assert args.precision_mode == "amp_bf16"
     assert args.specter_runtime_backend == "onnx_fp32"
     assert args.cluster_backend == "sklearn_cpu"

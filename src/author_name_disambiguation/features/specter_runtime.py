@@ -10,7 +10,7 @@ import numpy as np
 
 from author_name_disambiguation.common.cpu_runtime import detect_cpu_limit
 
-SPECTER_RUNTIME_BACKENDS = {"transformers", "onnx_fp32"}
+SPECTER_RUNTIME_BACKENDS = {"transformers", "onnx_fp32", "hf_httpx"}
 _DEFAULT_INTEROP_THREADS = 1
 
 

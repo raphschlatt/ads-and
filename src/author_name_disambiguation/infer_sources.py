@@ -12,6 +12,7 @@ InferStage = Literal["smoke", "mini", "mid", "full"]
 PrecisionMode = Literal["fp32", "amp_bf16"]
 ClusterBackend = Literal["auto", "sklearn_cpu", "cuml_gpu"]
 SpecterRuntimeBackend = Literal["transformers", "onnx_fp32"]
+RuntimeMode = Literal["gpu", "cpu", "hf"]
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class InferSourcesRequest:
     infer_stage: InferStage = "full"
     cluster_config: str | Path | Mapping[str, Any] | None = None
     gates_config: str | Path | Mapping[str, Any] | None = None
+    runtime_mode: RuntimeMode | None = None
     device: str = "auto"
     precision_mode: PrecisionMode = "fp32"
     specter_runtime_backend: SpecterRuntimeBackend | None = None
