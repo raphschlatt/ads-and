@@ -236,14 +236,14 @@ def test_cli_run_specter_benchmark_writes_json_and_markdown(monkeypatch, tmp_pat
     ] == 2
     assert report_json["tracks"]["track_a"]["warmed_throughput"]["modes"]["local_cpu_transformers"]["texts_total"] == 2
     assert report_json["tracks"]["track_a"]["warmed_throughput"]["modes"]["local_cpu_onnx_fp32"]["texts_total"] == 2
-    assert report_json["raw_hf_probe"]["mode"]["texts_successful"] == report_json["raw_hf_probe"]["mode"]["texts_total"]
     assert report_json["tracks"]["track_b"]["downstream_track_b"]["hf_api_truncated"]["smoke"]["passed"] is True
-    assert report_json["tracks"]["track_b"]["downstream_track_b"]["local_cpu_onnx_fp32"]["smoke"]["passed"] is True
     assert report_json["extrapolation"]["track_b"]["cpu_infer_tail"]["chosen_method"] == "pair_scaled"
+    assert report_json["extrapolation"]["track_b"]["end_to_end"]["public_cpu_mode_name"] == "local_cpu_onnx_fp32"
+    assert report_json["decision"]["hf_api_truncated_track_b_viable"] is True
     assert "SPECTER Benchmark Report" in report_md
     assert "Public Runtime Summary" in report_md
-    assert "Raw HF Probe" in report_md
     assert "Track B Downstream" in report_md
+    assert "Track B Downstream (ONNX)" not in report_md
 
 
 def test_run_specter_benchmark_cleans_empty_output_root_on_failure(monkeypatch, tmp_path: Path):

@@ -1137,19 +1137,15 @@ def _cleanup_output_root_if_empty(output_root: Path) -> None:
 def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
     track_a = payload["tracks"]["track_a"]
     track_b = payload["tracks"]["track_b"]
-    throughput_a = track_a["warmed_throughput"]["modes"]
-    throughput_b = track_b["warmed_throughput"]["modes"]
     public_a = payload.get("public_runtime_summary", {}).get("track_a", {})
     public_b = payload.get("public_runtime_summary", {}).get("track_b", {})
     decision = payload["decision"]
-    raw_probe = payload["raw_hf_probe"]["mode"]
     lines = [
         "# SPECTER Benchmark Report",
         "",
         f"- Dataset: `{payload['dataset_id']}`",
         f"- Bundle: `{payload['model_bundle']}`",
         f"- Recommendation: `{decision['recommendation']}`",
-        f"- Raw HF API feasible on long ADS texts: `{decision['hf_api_raw_long_text_feasible']}`",
         f"- HF API with client-side truncation viable for Track B: `{decision['hf_api_truncated_track_b_viable']}`",
         "",
         "## Public Runtime Summary",
@@ -1180,45 +1176,22 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         "",
         f"- Cold-start warmup sample size: `{track_a['cold_start']['sample_size']}`",
         f"- Warmed throughput sample size: `{track_a['warmed_throughput']['sample_size']}`",
-        f"- local_gpu texts/sec: `{throughput_a['local_gpu']['texts_per_second']}`",
-        "",
-        "### Track A CPU Appendix",
-        "",
-        f"- local_cpu_transformers texts/sec: `{throughput_a['local_cpu_transformers']['texts_per_second']}`",
-        (
-            f"- local_cpu_onnx_fp32 texts/sec: `{throughput_a['local_cpu_onnx_fp32']['texts_per_second']}`"
-            if 'local_cpu_onnx_fp32' in throughput_a
-            else "- local_cpu_onnx_fp32 texts/sec: `unavailable`"
-        ),
-        f"- hf_api_truncated texts/sec: `{throughput_a['hf_api_truncated']['texts_per_second']}`",
-        f"- hf_api_truncated api_concurrency: `{throughput_a['hf_api_truncated']['meta']['api_concurrency']}`",
-        f"- hf_api_truncated mean cosine vs local_gpu: `{track_a['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
+        f"- Public gpu texts/sec: `{public_a.get('gpu', {}).get('texts_per_second')}`",
+        f"- Public cpu texts/sec: `{public_a.get('cpu', {}).get('texts_per_second')}`",
+        f"- Public hf texts/sec: `{public_a.get('hf', {}).get('texts_per_second')}`",
         "",
         "## Track B Throughput",
         "",
         f"- Cold-start warmup sample size: `{track_b['cold_start']['sample_size']}`",
         f"- Warmed throughput sample size: `{track_b['warmed_throughput']['sample_size']}`",
-        f"- local_gpu texts/sec: `{throughput_b['local_gpu']['texts_per_second']}`",
-        "",
-        "### Track B CPU Appendix",
-        "",
-        f"- local_cpu_transformers texts/sec: `{throughput_b['local_cpu_transformers']['texts_per_second']}`",
-        (
-            f"- local_cpu_onnx_fp32 texts/sec: `{throughput_b['local_cpu_onnx_fp32']['texts_per_second']}`"
-            if 'local_cpu_onnx_fp32' in throughput_b
-            else "- local_cpu_onnx_fp32 texts/sec: `unavailable`"
-        ),
-        f"- hf_api_truncated texts/sec: `{throughput_b['hf_api_truncated']['texts_per_second']}`",
-        f"- hf_api_truncated cosine mean vs local_gpu: `{track_b['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
-        "",
-        "## Raw HF Probe",
-        "",
-        f"- Success/full on parity sample: `{raw_probe['texts_successful']}` / `{raw_probe['texts_total']}`",
-        f"- Failed texts on parity sample: `{raw_probe['texts_failed']}`",
+        f"- Public gpu texts/sec: `{public_b.get('gpu', {}).get('texts_per_second')}`",
+        f"- Public cpu texts/sec: `{public_b.get('cpu', {}).get('texts_per_second')}`",
+        f"- Public hf texts/sec: `{public_b.get('hf', {}).get('texts_per_second')}`",
+        f"- Public cpu backing mode: `{public_b.get('cpu', {}).get('mode_name')}`",
+        f"- HF cosine mean vs local_gpu: `{track_b['cosine_parity']['comparisons']['hf_api_truncated_vs_local_gpu'].get('mean_cosine_similarity')}`",
     ]
     downstream_block = track_b.get("downstream_track_b") or {}
     downstream = downstream_block.get("hf_api_truncated")
-    downstream_onnx = downstream_block.get("local_cpu_onnx_fp32")
     if downstream:
         lines.extend(
             [
@@ -1239,31 +1212,15 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
                     f"- Mini clusters: `{mini['cluster_count']}`",
                 ]
             )
-    if downstream_onnx:
-        lines.extend(
-            [
-                "",
-                "## Track B Downstream (ONNX)",
-                "",
-                f"- Smoke passed: `{downstream_onnx['smoke']['passed']}`",
-                f"- Changed assignments: `{downstream_onnx['smoke']['changed_assignments']}`",
-                f"- Mini run available: `{bool(downstream_onnx.get('mini'))}`",
-            ]
-        )
     extrap = payload["extrapolation"]
     lines.extend(
         [
             "",
             "## Full-Run Estimates",
             "",
-            f"- Track A local_gpu embed-only full seconds: `{extrap['track_a']['embedding_only']['local_gpu']['full_embed_seconds']}`",
-            f"- Track B local_cpu_transformers embed-only full seconds: `{extrap['track_b']['embedding_only']['local_cpu_transformers']['full_embed_seconds']}`",
-            (
-                f"- Track B local_cpu_onnx_fp32 embed-only full seconds: `{extrap['track_b']['embedding_only']['local_cpu_onnx_fp32']['full_embed_seconds']}`"
-                if 'local_cpu_onnx_fp32' in extrap['track_b']['embedding_only']
-                else "- Track B local_cpu_onnx_fp32 embed-only full seconds: `unavailable`"
-            ),
-            f"- Track B hf_api_truncated embed-only full seconds: `{extrap['track_b']['embedding_only']['hf_api_truncated']['full_embed_seconds']}`",
+            f"- Track A gpu embed-only full seconds: `{extrap['track_a']['embedding_only']['local_gpu']['full_embed_seconds']}`",
+            f"- Track B cpu embed-only full seconds: `{extrap['track_b']['embedding_only'][public_b.get('cpu', {}).get('mode_name', 'local_cpu_transformers')]['full_embed_seconds']}`",
+            f"- Track B hf embed-only full seconds: `{extrap['track_b']['embedding_only']['hf_api_truncated']['full_embed_seconds']}`",
         ]
     )
     tail = extrap["track_b"].get("cpu_infer_tail")
@@ -1271,9 +1228,8 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
         lines.extend(
             [
                 f"- Track B chosen CPU tail seconds: `{tail['chosen_tail_seconds']}`",
-                f"- Track B hf_api_truncated end-to-end full seconds: `{extrap['track_b']['end_to_end']['hf_api_truncated_full_seconds']}`",
-                f"- Track B local_cpu_transformers end-to-end full seconds: `{extrap['track_b']['end_to_end']['local_cpu_transformers_full_seconds']}`",
-                f"- Track B local_cpu_onnx_fp32 end-to-end full seconds: `{extrap['track_b']['end_to_end']['local_cpu_onnx_fp32_full_seconds']}`",
+                f"- Track B hf end-to-end full seconds: `{extrap['track_b']['end_to_end']['hf_api_truncated_full_seconds']}`",
+                f"- Track B cpu end-to-end full seconds: `{extrap['track_b']['end_to_end']['public_cpu_full_seconds']}`",
             ]
         )
     lines.extend(
@@ -1283,8 +1239,7 @@ def _write_markdown_report(payload: dict[str, Any], path: Path) -> Path:
             "",
             "- The notebook MWE succeeds because it is a short paper text and stays below the problematic raw long-text regime.",
             "- The headline throughput numbers come from warmed runs; cold-start and session-load effects are reported separately.",
-            "- The main comparison is cap-aligned with the live inference path: local GPU, local CPU, and HF API all use the same tokenizer truncation per track.",
-            "- The raw HF endpoint is kept only as a small diagnostic probe so long-text provider failures stay visible without dominating the benchmark.",
+            "- The main comparison is cap-aligned with the live inference path: public GPU, CPU, and HF all use the same tokenizer truncation per track.",
             "- Track A is the notebook/SPECTER view; Track B is the actual bundle view.",
         ]
     )
@@ -1409,21 +1364,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             )
         if local_cpu_session is None:
             raise RuntimeError(f"Benchmark requires a working CPU session: {local_cpu_meta.get('error')}")
-
-        hf_raw_probe = _run_hf_mode(
-            sample=parity_sample,
-            mode_name="hf_api_raw_probe",
-            model_name=model_name,
-            provider=request.provider,
-            hf_token_env_var=request.hf_token_env_var,
-            tokenizer=tokenizer,
-            progress=bool(request.progress),
-        )
-        raw_long_text_failure = any(
-            (not bool(hf_raw_probe.success_mask[idx])) and int(parity_sample.raw_token_counts[idx]) > 512
-            for idx in range(len(parity_sample.texts))
-            if bool(hf_raw_probe.attempted_mask[idx])
-        )
 
         def _run_track(cap: int) -> _TrackArtifacts:
             warmup_modes = {
@@ -1567,15 +1507,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             if local_cpu_onnx_session is None
             else local_cpu_onnx_session.run(sample=mwe_sample, cap=_TRACK_A_CAP, batch_size=1, progress=False)
         )
-        mwe_hf_raw = _run_hf_mode(
-            sample=mwe_sample,
-            mode_name="hf_api_raw_probe",
-            model_name=model_name,
-            provider=request.provider,
-            hf_token_env_var=request.hf_token_env_var,
-            tokenizer=tokenizer,
-            progress=False,
-        )
         mwe_hf_truncated = _run_hf_mode(
             sample=mwe_sample,
             mode_name="hf_api_truncated",
@@ -1603,23 +1534,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                 local_gpu_vectors=track_b.mode_runs[track_b.reference_mode_name].vectors,
                 candidate_vectors=track_b.mode_runs["hf_api_truncated"].vectors,
                 candidate_label="hf_api_truncated",
-                model_bundle=request.model_bundle,
-                dataset_id=request.dataset_id,
-            )
-
-        downstream_onnx = None
-        track_b_onnx_summary = track_b.warmed_throughput["modes"].get("local_cpu_onnx_fp32")
-        if (
-            isinstance(track_b_onnx_summary, dict)
-            and isinstance(track_b_onnx_summary.get("cosine_vs_local_gpu"), dict)
-            and bool(track_b_onnx_summary["texts_successful"] == track_b_onnx_summary["texts_total"])
-        ):
-            downstream_onnx = _run_track_b_downstream(
-                output_root=output_root,
-                sample=throughput_sample,
-                local_gpu_vectors=track_b.mode_runs[track_b.reference_mode_name].vectors,
-                candidate_vectors=track_b.mode_runs["local_cpu_onnx_fp32"].vectors,
-                candidate_label="local_cpu_onnx_fp32",
                 model_bundle=request.model_bundle,
                 dataset_id=request.dataset_id,
             )
@@ -1668,10 +1582,15 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
             full_mentions=int(full_ads_scaling["mentions_total"]),
             full_pairs=int(full_ads_scaling["pair_upper_bound"]),
         )
+        public_cpu_mode_name = (
+            "local_cpu_onnx_fp32" if "local_cpu_onnx_fp32" in track_b.warmed_throughput["modes"] else "local_cpu_transformers"
+        )
         end_to_end = {
             "hf_api_truncated_full_seconds": None,
             "local_cpu_transformers_full_seconds": None,
             "local_cpu_onnx_fp32_full_seconds": None,
+            "public_cpu_mode_name": public_cpu_mode_name,
+            "public_cpu_full_seconds": None,
         }
         if cpu_tail is not None:
             hf_embed = track_b_embedding_only["hf_api_truncated"].get("full_embed_seconds")
@@ -1687,6 +1606,9 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                 end_to_end["local_cpu_transformers_full_seconds"] = float(cpu_embed + cpu_tail["chosen_tail_seconds"])
             if isinstance(onnx_embed, (int, float)):
                 end_to_end["local_cpu_onnx_fp32_full_seconds"] = float(onnx_embed + cpu_tail["chosen_tail_seconds"])
+            public_cpu_seconds = end_to_end.get(f"{public_cpu_mode_name}_full_seconds")
+            if isinstance(public_cpu_seconds, (int, float)):
+                end_to_end["public_cpu_full_seconds"] = float(public_cpu_seconds)
 
         recommendation = (
             "Track B warmed benchmark passes with the cap-aligned HF API path."
@@ -1733,13 +1655,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                             )
                         }
                     ),
-                    "hf_api_raw": _summarize_mode_run(
-                        mwe_hf_raw,
-                        mwe_sample,
-                        cap=_TRACK_A_CAP,
-                        reference_vectors=mwe_local_gpu.vectors,
-                        reference_success_mask=mwe_local_gpu.success_mask,
-                    ),
                     "hf_api_truncated": _summarize_mode_run(
                         mwe_hf_truncated,
                         mwe_sample,
@@ -1748,13 +1663,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                         reference_success_mask=mwe_local_gpu.success_mask,
                     ),
                 },
-            },
-            "raw_hf_probe": {
-                "sample_name": parity_sample.name,
-                "sample_size": int(len(parity_sample.texts)),
-                "bucket_counts_track_a": _bucket_counts(parity_sample.raw_token_counts, _TRACK_A_CAP),
-                "bucket_counts_track_b": _bucket_counts(parity_sample.raw_token_counts, track_b_cap),
-                "mode": _summarize_mode_run(hf_raw_probe, parity_sample, cap=track_b_cap),
             },
             "full_dataset": {
                 "publications_rows": int(len(publications)),
@@ -1779,7 +1687,6 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                     "cosine_parity": track_b.cosine_parity,
                     "downstream_track_b": {
                         "hf_api_truncated": downstream_hf,
-                        "local_cpu_onnx_fp32": downstream_onnx,
                     },
                 },
             },
@@ -1842,12 +1749,8 @@ def run_specter_benchmark(request: SpecterBenchmarkRequest) -> SpecterBenchmarkR
                 },
             },
             "decision": {
-                "hf_api_raw_long_text_feasible": not bool(raw_long_text_failure),
                 "hf_api_truncated_track_b_viable": bool(
                     downstream_hf and downstream_hf.get("smoke", {}).get("passed")
-                ),
-                "local_cpu_onnx_track_b_viable": bool(
-                    downstream_onnx and downstream_onnx.get("smoke", {}).get("passed")
                 ),
                 "recommendation": recommendation,
             },

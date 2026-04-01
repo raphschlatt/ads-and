@@ -280,7 +280,6 @@ def test_runtime_mode_cpu_falls_back_from_onnx_to_transformers(monkeypatch, tmp_
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "cpu"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
     assert stage_metrics["runtime"]["specter"]["fallback_reason"] == "cpu_auto_onnx_fallback"
-    assert stage_metrics["runtime"]["specter"]["legacy_runtime_overrides"]["active"] is False
 
 
 def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
@@ -327,15 +326,16 @@ def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
     context = json.loads((result.output_root / "00_context.json").read_text(encoding="utf-8"))
     stage_metrics = json.loads(result.stage_metrics_path.read_text(encoding="utf-8"))
     assert calls == ["hf_httpx"]
-    assert context["runtime_mode_effective"] == "hf"
-    assert context["specter_runtime_backend"] == "hf_httpx"
-    assert context["legacy_runtime_overrides"]["active"] is False
+    assert context["runtime_mode"] == "hf"
+    assert context["runtime_backend"] == "hf_httpx"
+    assert context["resolved_device"] == "remote:hf-inference"
+    assert context["generation_mode"] == "remote_httpx_only"
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "hf"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "hf_httpx"
     assert stage_metrics["runtime"]["specter"]["resolved_device"] == "remote:hf-inference"
 
 
-def test_legacy_runtime_overrides_are_reported(monkeypatch, tmp_path: Path):
+def test_internal_backend_override_keeps_public_runtime_metadata_compact(monkeypatch, tmp_path: Path):
     publications_path, references_path = _write_dataset(tmp_path)
     bundle_dir = _write_bundle(tmp_path)
 
@@ -375,7 +375,9 @@ def test_legacy_runtime_overrides_are_reported(monkeypatch, tmp_path: Path):
     context = json.loads((result.output_root / "00_context.json").read_text(encoding="utf-8"))
     stage_metrics = json.loads(result.stage_metrics_path.read_text(encoding="utf-8"))
 
-    assert context["legacy_runtime_overrides"]["active"] is True
-    assert context["legacy_runtime_overrides"]["device_override_active"] is True
-    assert context["legacy_runtime_overrides"]["specter_runtime_backend_override_active"] is True
-    assert stage_metrics["runtime"]["specter"]["legacy_runtime_overrides"]["active"] is True
+    assert context["runtime_mode"] == "cpu"
+    assert context["runtime_backend"] == "transformers"
+    assert context["resolved_device"] == "cpu"
+    assert context["generation_mode"] == "model_only"
+    assert "legacy_runtime_overrides" not in context
+    assert "legacy_runtime_overrides" not in stage_metrics["runtime"]["specter"]

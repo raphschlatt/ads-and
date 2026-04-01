@@ -427,9 +427,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_frame_reuse"
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert stage_metrics["runtime"]["load_inputs"]["deduplicate_seconds"] >= 0.0
-    assert stage_metrics["runtime"]["specter"]["requested_device"] == "auto"
-    assert "requested_batch_size" in stage_metrics["runtime"]["specter"]
-    assert "effective_batch_size" in stage_metrics["runtime"]["specter"]
+    assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "gpu"
+    assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
+    assert stage_metrics["runtime"]["specter"]["resolved_device"] == "cpu"
     assert "device_to_host_flushes" in stage_metrics["runtime"]["specter"]
     assert "token_count_total" in stage_metrics["runtime"]["specter"]
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"

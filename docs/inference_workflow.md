@@ -109,18 +109,15 @@ The public runtime interface is:
 
 `hf` uses the package's built-in HTTPX HF transport for remote SPECTER embeddings and then continues with the normal local AND tail in the same run.
 
-The low-level switches `--device` and `--specter-runtime-backend transformers|onnx_fp32` are still accepted for debugging, tests, and backward compatibility, but normal usage should prefer `--runtime-mode gpu|cpu|hf`.
+The current HF mode is contract-compatible and subset-validated, but the local `gpu` and `cpu` modes remain the more operationally proven paths for larger active-snapshot runs.
 
 ## API vs CPU vs GPU Benchmark
 
 Use the dedicated benchmark when you want a like-for-like comparison of:
 
 - local GPU SPECTER
-- local CPU SPECTER via the exact `transformers` backend
-- optional local CPU SPECTER via `onnx_fp32` when the ONNX extra is installed
+- local CPU SPECTER through the public `cpu` mode
 - HF remote SPECTER with the same client-side tokenizer truncation used by the live inference path
-
-The raw HF path is still probed, but only as a small diagnostic for long-text failures rather than as a first-class throughput mode.
 
 Example:
 
@@ -146,41 +143,16 @@ The report is split into two tracks:
 
 It also reports:
 
-- whether the raw HF path breaks on long ADS-style texts
 - whether the cap-aligned truncated HF path stays viable against local CPU/GPU references
-- public-mode throughput across GPU, CPU, and HF, with the forced CPU backends kept as an appendix/debug view
+- public-mode throughput across GPU, CPU, and HF
 - a source-based full-run interpolation
 - a Track-B downstream smoke/mini CPU check when the HF candidate is strong enough
-
-For the separate HF transport study, the package dependencies are enough; just install the project and run the lab benchmark:
-
-```bash
-source /home/ubuntu/.venv/bin/activate
-export HF_TOKEN=...
-author-name-disambiguation run-specter-hf-lab-benchmark \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/benchmarks/ads_prod_current_specter_hf_lab \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --profiles all \
-  --concurrency-values 4,16,64
-```
-
-That runner is intentionally separate from the realistic package benchmark:
-
-- it measures HF transport only, not the whole package path
-- it reports `micro_short_repeat` and `ads_realistic_truncated` separately
-- it labels the kept `prod-safe` HTTPX profile separately from the more aggressive `turbo_http2` study
-- it exists to answer the "10x to 50x faster than sync" question without mixing those numbers into the warmed package benchmark
 
 ## Optional Controls
 
 - `--infer-stage smoke|mini|mid|full`
 - `--cluster-config <yaml>`
 - `--gates-config <yaml>`
-- `--device auto|cpu|cuda` (legacy/debug)
-- `--specter-runtime-backend transformers|onnx_fp32` (legacy/debug)
 - `--precision-mode fp32|amp_bf16`
 - `--cluster-backend auto|sklearn_cpu|cuml_gpu`
 - `--uid-scope dataset|local|registry`

@@ -11,7 +11,6 @@ The installed surface is intentionally small:
 - `run-infer-sources`
 - `run-hf-compatibility-report`
 - `run-specter-benchmark`
-- `run-specter-hf-lab-benchmark`
 
 The public Python API for inference surfaces is intentionally small:
 
@@ -207,25 +206,6 @@ This writes:
 - `specter_benchmark_report.json`
 - `specter_benchmark_report.md`
 
-Run the separate HF transport lab benchmark:
-
-```bash
-export HF_TOKEN=...
-author-name-disambiguation run-specter-hf-lab-benchmark \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/benchmarks/ads_prod_current_specter_hf_lab \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --profiles all \
-  --concurrency-values 4,16,64
-```
-
-This writes:
-
-- `specter_hf_lab_report.json`
-- `specter_hf_lab_report.md`
-
 ## Programmatic Inference
 
 ```python
@@ -303,7 +283,7 @@ The HF path is intentionally narrow:
 - model: `allenai/specter`
 - token source: `HF_TOKEN`
 
-Promotion of the HF path is gated by `run-hf-compatibility-report`. Until that report passes for a given bundle, treat remote HF SPECTER as experimental rather than automatically bundle-compatible.
+Promotion of the HF path is gated by `run-hf-compatibility-report`. The current HF path is contract-compatible and subset-validated, but it is still less operationally proven on larger active-snapshot runs than the local `gpu` and `cpu` modes.
 
 For a broader operational comparison of `hf_api` vs local CPU vs local GPU, use `run-specter-benchmark`.
 That benchmark intentionally separates:
@@ -315,16 +295,7 @@ The main comparison is cap-aligned with the real inference path:
 
 - local GPU and local CPU both truncate at the track cap
 - the public CPU mode auto-selects `onnx_fp32` when available, otherwise exact `transformers`
-- optional `onnx_fp32` is benchmarked separately when the `cpu_onnx` extra is installed
 - HF remote SPECTER also uses the same client-side tokenizer truncation
-- a small raw-HF probe stays in the report only as a long-text diagnostic
-
-Legacy low-level controls are still accepted for debugging, tests, and backward compatibility only:
-
-- `--specter-runtime-backend transformers|onnx_fp32`
-- `--device auto|cpu|cuda`
-
-For normal package use, prefer `--runtime-mode gpu|cpu|hf`.
 Install the optional ONNX extra if you want to use or benchmark it:
 
 ```bash
@@ -333,11 +304,6 @@ uv pip install \
   --python /home/ubuntu/.venv/bin/python \
   --editable ".[cpu_onnx,dev]"
 ```
-
-Use `run-specter-hf-lab-benchmark` when you want the separate HF-only transport study.
-That lab runner intentionally measures the remaining HTTPX variants on:
-
-- `micro_short_repeat` for HF-style short-text max-speed behavior
 - `ads_realistic_truncated` for ADS-like capped texts
 
 The lab report separates the kept `prod-safe` HTTPX profile from the more aggressive `turbo_http2` study so transport tuning does not get mixed into the package-realistic benchmark numbers.

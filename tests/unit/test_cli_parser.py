@@ -1,6 +1,3 @@
-import contextlib
-import io
-
 import pytest
 
 from author_name_disambiguation import cli
@@ -132,9 +129,7 @@ def test_run_infer_sources_parser_defaults():
     assert args.gates_config is None
     assert args.infer_stage == "full"
     assert args.runtime_mode is None
-    assert args.device == "auto"
     assert args.precision_mode == "fp32"
-    assert args.specter_runtime_backend is None
     assert args.cluster_backend is None
     assert args.uid_scope == "dataset"
     assert args.uid_namespace is None
@@ -170,8 +165,6 @@ def test_run_infer_sources_parser_accepts_overrides():
             "hf",
             "--precision-mode",
             "amp_bf16",
-            "--specter-runtime-backend",
-            "onnx_fp32",
             "--cluster-backend",
             "sklearn_cpu",
             "--uid-scope",
@@ -189,7 +182,6 @@ def test_run_infer_sources_parser_accepts_overrides():
     assert args.quiet_libs is False
     assert args.runtime_mode == "hf"
     assert args.precision_mode == "amp_bf16"
-    assert args.specter_runtime_backend == "onnx_fp32"
     assert args.cluster_backend == "sklearn_cpu"
     assert args.uid_scope == "registry"
     assert args.uid_namespace == "stable_ads"
@@ -341,17 +333,6 @@ def test_run_specter_hf_lab_benchmark_parser_defaults():
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_specter_hf_lab_benchmark
-
-
-def test_run_infer_sources_help_marks_legacy_low_level_controls():
-    parser = cli.build_parser()
-    with contextlib.redirect_stdout(io.StringIO()) as stdout:
-        with pytest.raises(SystemExit):
-            parser.parse_args(["run-infer-sources", "--help"])
-    help_text = stdout.getvalue()
-    assert "Legacy/debug override for low-level device selection" in help_text
-    assert "Legacy/debug override for the local CPU text backend" in help_text
-
 
 def test_run_cluster_test_report_parser_defaults():
     parser = cli.build_parser()
