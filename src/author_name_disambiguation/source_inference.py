@@ -69,6 +69,58 @@ def _summarize_precomputed_frame(frame: pd.DataFrame) -> dict[str, Any]:
     return summarize_precomputed_embeddings(values, total_count=int(len(frame)))
 
 
+def _select_specter_source_records(*, canonical_records: pd.DataFrame, mentions: pd.DataFrame) -> pd.DataFrame:
+    if "canonical_record_id" not in canonical_records.columns:
+        raise ValueError("canonical_records missing required column: canonical_record_id")
+    if "canonical_record_id" not in mentions.columns:
+        raise ValueError("mentions missing required column: canonical_record_id")
+
+    mention_ids = pd.to_numeric(mentions["canonical_record_id"], errors="coerce")
+    if mention_ids.isna().any():
+        raise ValueError("mentions contain null canonical_record_id values.")
+    selected_ids = pd.Index(pd.unique(mention_ids.astype("int64")))
+    out = canonical_records[canonical_records["canonical_record_id"].isin(selected_ids)].copy()
+    if len(out) != len(selected_ids):
+        missing_ids = sorted(set(selected_ids.tolist()) - set(out["canonical_record_id"].astype("int64").tolist()))
+        raise RuntimeError(f"Missing canonical records for mention fanout: {missing_ids[:5]!r}")
+    return out.reset_index(drop=True)
+
+
+def _fanout_specter_embeddings_to_mentions(
+    *,
+    specter_source_records: pd.DataFrame,
+    mentions: pd.DataFrame,
+    source_embeddings: np.ndarray,
+) -> np.ndarray:
+    if "canonical_record_id" not in specter_source_records.columns:
+        raise ValueError("specter_source_records missing required column: canonical_record_id")
+    if "canonical_record_id" not in mentions.columns:
+        raise ValueError("mentions missing required column: canonical_record_id")
+    if source_embeddings.ndim != 2:
+        raise ValueError("source_embeddings must be a 2D array.")
+    if len(source_embeddings) != len(specter_source_records):
+        raise ValueError("source_embeddings row count must match specter_source_records.")
+
+    source_ids = pd.to_numeric(specter_source_records["canonical_record_id"], errors="coerce")
+    mention_ids = pd.to_numeric(mentions["canonical_record_id"], errors="coerce")
+    if source_ids.isna().any():
+        raise ValueError("specter_source_records contain null canonical_record_id values.")
+    if mention_ids.isna().any():
+        raise ValueError("mentions contain null canonical_record_id values.")
+
+    source_ids = source_ids.astype("int64")
+    mention_ids = mention_ids.astype("int64")
+    if source_ids.duplicated().any():
+        raise ValueError("specter_source_records canonical_record_id values must be unique.")
+
+    source_positions = pd.Series(np.arange(len(source_ids), dtype=np.int64), index=source_ids.to_numpy())
+    try:
+        mention_positions = source_positions.loc[mention_ids.to_numpy()].to_numpy(dtype=np.int64, copy=False)
+    except KeyError as exc:
+        raise RuntimeError("Missing source embeddings for one or more mention canonical_record_id values.") from exc
+    return np.asarray(source_embeddings[mention_positions], dtype=np.float32)
+
+
 def _default_runtime_meta(*, requested_device: str, effective_precision_mode: str | None = None) -> dict[str, Any]:
     return {
         "requested_device": str(requested_device),
@@ -747,11 +799,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             subset_sampling=dict(infer_cfg.get("subset_sampling", {}) or {}),
         )
     save_parquet(mentions, dirs["interim"] / "mentions.parquet", index=False)
+    specter_source_records = _select_specter_source_records(canonical_records=canonical_records, mentions=mentions)
 
     precomputed_embeddings = {
         "publications": _summarize_precomputed_frame(publications),
         "references": _summarize_precomputed_frame(references),
         "canonical_records": _summarize_precomputed_frame(canonical_records),
+        "specter_sources": _summarize_precomputed_frame(specter_source_records),
         "mentions_full": _summarize_precomputed_frame(full_mentions),
         "mentions": _summarize_precomputed_frame(mentions),
     }
@@ -765,6 +819,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "publications_rows": int(len(publications)),
             "references_rows": int(len(references)),
             "canonical_records": int(len(canonical_records)),
+            "specter_sources": int(len(specter_source_records)),
             "ads_mentions_full": int(len(full_mentions)),
             "ads_mentions": int(len(mentions)),
             "infer_stage": infer_stage,
@@ -802,10 +857,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         )
     )
     _ui_info(
-        f"precomputed_embedding column present={_yes_no(precomputed_embeddings['mentions']['column_present'])}"
+        f"precomputed_embedding column present={_yes_no(precomputed_embeddings['specter_sources']['column_present'])}"
     )
     _ui_info(
-        f"specter_recompute={_format_count(precomputed_embeddings['mentions']['recomputed_embedding_count'])} | "
+        f"specter_sources={_format_count(len(specter_source_records))} | "
+        f"specter_recompute={_format_count(precomputed_embeddings['specter_sources']['recomputed_embedding_count'])} | "
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])}"
     )
     _ui_done(
@@ -849,19 +905,24 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _ui_start("Text embeddings")
     specter_batch_size_label = "auto" if specter_batch_size is None else _format_count(specter_batch_size)
     preferred_text_backend = "onnx_fp32" if specter_runtime_backend == "cpu_auto" else specter_runtime_backend
-    text_cache_name = "specter.npy" if preferred_text_backend == "transformers" else f"specter_{preferred_text_backend}.npy"
+    text_cache_name = (
+        "specter_sources.npy"
+        if preferred_text_backend == "transformers"
+        else f"specter_{preferred_text_backend}_sources.npy"
+    )
     text_path = dirs["embeddings"] / text_cache_name
     text_cache_requested = text_path.exists() and not bool(request.force)
     _ui_info(
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
-        f"precomputed={_format_count(precomputed_embeddings['mentions']['precomputed_embedding_count'])} | "
+        f"sources={_format_count(len(specter_source_records))} | "
+        f"precomputed={_format_count(precomputed_embeddings['specter_sources']['precomputed_embedding_count'])} | "
         f"batch_size={specter_batch_size_label} | device={str(effective_request_device)} | "
         f"backend={specter_runtime_backend} | "
         f"precision={specter_precision_mode}"
     )
     def _run_text_embeddings(selected_backend: str, selected_output_path: Path):
         return get_or_create_specter_embeddings(
-            mentions=mentions,
+            mentions=specter_source_records,
             output_path=selected_output_path,
             force_recompute=bool(request.force),
             model_name=model_info["model_cfg"].get("representation", {}).get("text_model_name", "allenai/specter"),
@@ -883,8 +944,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     resolved_specter_runtime_backend = specter_runtime_backend
     if specter_runtime_backend == "cpu_auto":
-        onnx_text_path = dirs["embeddings"] / "specter_onnx_fp32.npy"
-        transformers_text_path = dirs["embeddings"] / "specter.npy"
+        onnx_text_path = dirs["embeddings"] / "specter_onnx_fp32_sources.npy"
+        transformers_text_path = dirs["embeddings"] / "specter_sources.npy"
         try:
             text_result = _run_text_embeddings("onnx_fp32", onnx_text_path)
             text_path = onnx_text_path
@@ -904,9 +965,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         text_result = _run_text_embeddings(specter_runtime_backend, text_path)
         resolved_specter_runtime_backend = specter_runtime_backend
     if isinstance(text_result, tuple) and len(text_result) == 2:
-        text, text_runtime_meta_raw = text_result
+        text_source_embeddings, text_runtime_meta_raw = text_result
     else:
-        text = text_result
+        text_source_embeddings = text_result
         text_runtime_meta_raw = None
     text_runtime_meta = _normalize_runtime_meta(
         text_runtime_meta_raw,
@@ -922,15 +983,23 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     context_payload["resolved_device"] = text_runtime_meta.get("resolved_device")
     context_payload["generation_mode"] = text_runtime_meta.get("generation_mode")
     write_json(context_payload, context_path)
-    if not isinstance(text, np.ndarray):
-        text = np.load(text_path, mmap_mode="r")
+    if not isinstance(text_source_embeddings, np.ndarray):
+        text_source_embeddings = np.load(text_path, mmap_mode="r")
+    text = _fanout_specter_embeddings_to_mentions(
+        specter_source_records=specter_source_records,
+        mentions=mentions,
+        source_embeddings=np.asarray(text_source_embeddings),
+    )
+    text_runtime_meta["source_embedding_count"] = int(len(specter_source_records))
+    text_runtime_meta["mention_materialization_count"] = int(len(mentions))
+    text_runtime_meta["canonical_to_mentions_fanout"] = float(len(mentions) / max(1, len(specter_source_records)))
     text_elapsed = perf_counter() - text_embeddings_started_at
     resolved_text_device = text_runtime_meta.get("resolved_device")
     if text_runtime_meta.get("cache_hit"):
         resolved_text_device = resolved_text_device or "cache"
     _ui_done(
-        f"{_format_count(len(mentions))} texts embedded in {_format_elapsed(text_elapsed)} "
-        f"({_format_rate(len(mentions), text_elapsed)}) | "
+        f"{_format_count(len(specter_source_records))} source texts -> {_format_count(len(mentions))} mentions in "
+        f"{_format_elapsed(text_elapsed)} ({_format_rate(len(specter_source_records), text_elapsed)}) | "
         f"cache={'hit' if text_runtime_meta.get('cache_hit') else 'miss'} | "
         f"precomputed={_format_count(text_runtime_meta.get('precomputed_embedding_count') or 0)} | "
         f"device={resolved_text_device or 'n/a'}"

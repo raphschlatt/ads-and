@@ -108,6 +108,23 @@ def test_prepare_ads_source_data_can_return_runtime_and_raw_sources(tmp_path: Pa
     assert result["runtime"]["explode_mentions_seconds"] >= 0.0
 
 
+def test_prepare_ads_source_data_propagates_canonical_record_id_to_mentions(tmp_path: Path):
+    pubs_path, refs_path = _write_ads_dataset(tmp_path, ".parquet")
+
+    result = prepare_ads_source_data(pubs_path, refs_path)
+    canonical_records = result["canonical_records"]
+    mentions = result["mentions"]
+
+    assert "canonical_record_id" in canonical_records.columns
+    assert "canonical_record_id" in mentions.columns
+    assert canonical_records["canonical_record_id"].tolist() == [0, 1, 2]
+    assert mentions.groupby("bibcode")["canonical_record_id"].nunique().to_dict() == {
+        "bib1": 1,
+        "bib2": 1,
+        "bib3": 1,
+    }
+
+
 def _legacy_deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame) -> pd.DataFrame:
     def _is_present_value(value) -> bool:
         if value is None:
@@ -151,7 +168,7 @@ def _legacy_deduplicate_ads_records(publications: pd.DataFrame, references: pd.D
 
     first_rows["canonical_source_type"] = all_records.loc[first_rows.index, "source_type"].astype(str).to_list()
     first_rows["canonical_source_row_idx"] = all_records.loc[first_rows.index, "source_row_idx"].astype(int).to_list()
-    return first_rows[
+    out = first_rows[
         [
             "bibcode",
             "title",
@@ -166,6 +183,8 @@ def _legacy_deduplicate_ads_records(publications: pd.DataFrame, references: pd.D
             "canonical_source_row_idx",
         ]
     ].reset_index(drop=True)
+    out.insert(out.columns.get_loc("canonical_source_type"), "canonical_record_id", np.arange(len(out), dtype=np.int64))
+    return out
 
 
 def test_deduplicate_ads_records_matches_legacy_semantics_on_mixed_inputs():

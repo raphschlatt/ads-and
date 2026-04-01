@@ -148,6 +148,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
 
     def _text(mentions, output_path, force_recompute=False, **_kwargs):
         seen["specter_kwargs"] = dict(_kwargs)
+        seen["specter_input_rows"] = int(len(mentions))
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
@@ -430,6 +431,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "gpu"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
     assert stage_metrics["runtime"]["specter"]["resolved_device"] == "cpu"
+    assert stage_metrics["runtime"]["specter"]["source_embedding_count"] == 3
+    assert stage_metrics["runtime"]["specter"]["mention_materialization_count"] == 5
     assert "device_to_host_flushes" in stage_metrics["runtime"]["specter"]
     assert "token_count_total" in stage_metrics["runtime"]["specter"]
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
@@ -448,7 +451,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "START Name embeddings" in captured.err
     assert "DONE 5 names embedded in " in captured.err
     assert "START Text embeddings" in captured.err
-    assert "DONE 5 texts embedded in " in captured.err
+    assert "DONE 3 source texts -> 5 mentions in " in captured.err
     assert "cpu_stage=pair_building | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
     assert "pair_count=" in captured.err
     assert "pairs_est=" in captured.err
@@ -460,6 +463,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "\r" not in captured.err
     payload_stdout = json.loads(captured.out)
     assert payload_stdout["run_id"] == payload["run_id"]
+    assert seen["specter_input_rows"] == 3
     assert seen["specter_kwargs"]["reuse_model"] is False
     assert seen["pair_kwargs"]["num_workers"] is None
     assert seen["pair_kwargs"]["sharding_mode"] == "auto"

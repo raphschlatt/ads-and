@@ -152,6 +152,7 @@ def test_get_or_create_specter_embeddings_rebuilds_invalid_cache(tmp_path: Path,
         {
             "title": ["Paper 1", "Paper 2"],
             "abstract": ["Abstract 1", "Abstract 2"],
+            "canonical_record_id": [0, 1],
         }
     )
     cache_path = tmp_path / "specter.npy"
@@ -200,6 +201,7 @@ def test_generate_specter_embeddings_uses_precomputed_vectors_directly():
             "title": ["Paper 1", "Paper 2"],
             "abstract": ["Abstract 1", "Abstract 2"],
             "precomputed_embedding": [vec_a.tolist(), vec_b.tolist()],
+            "canonical_record_id": [0, 1],
         }
     )
 

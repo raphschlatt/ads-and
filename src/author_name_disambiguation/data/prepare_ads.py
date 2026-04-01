@@ -319,6 +319,7 @@ def _empty_canonical_records_frame() -> pd.DataFrame:
             "source_type",
             "source_row_idx",
             "precomputed_embedding",
+            "canonical_record_id",
             "canonical_source_type",
             "canonical_source_row_idx",
         ]
@@ -442,7 +443,13 @@ def deduplicate_ads_records(
 
     _flush()
 
-    out = pd.DataFrame.from_records(output_rows, columns=_empty_canonical_records_frame().columns)
+    output_columns = [column for column in _empty_canonical_records_frame().columns if column != "canonical_record_id"]
+    out = pd.DataFrame.from_records(output_rows, columns=output_columns)
+    out.insert(
+        out.columns.get_loc("canonical_source_type"),
+        "canonical_record_id",
+        np.arange(len(out), dtype=np.int64),
+    )
     meta = {
         "deduplicate_mode": "single_pass_sorted",
         "input_record_count": int(len(all_records)),

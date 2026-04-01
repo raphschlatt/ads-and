@@ -89,6 +89,7 @@ def explode_records_to_mentions(
         return pd.DataFrame(
             columns=[
                 "mention_id",
+                "canonical_record_id",
                 "bibcode",
                 "author_idx",
                 "author_raw",
@@ -110,6 +111,7 @@ def explode_records_to_mentions(
         return pd.DataFrame(
             columns=[
                 "mention_id",
+                "canonical_record_id",
                 "bibcode",
                 "author_idx",
                 "author_raw",
@@ -131,6 +133,7 @@ def explode_records_to_mentions(
         return pd.DataFrame(
             columns=[
                 "mention_id",
+                "canonical_record_id",
                 "bibcode",
                 "author_idx",
                 "author_raw",
@@ -156,6 +159,8 @@ def explode_records_to_mentions(
     exploded = exploded[exploded["author_raw"] != ""].copy()
     exploded["author_idx"] = exploded.groupby("__record_id", sort=False).cumcount().astype(np.int64)
     exploded["mention_id"] = exploded["bibcode"].astype(str) + "::" + exploded["author_idx"].astype(str)
+    if "canonical_record_id" not in exploded.columns:
+        exploded["canonical_record_id"] = exploded["__record_id"].astype(np.int64)
     exploded["title"] = exploded.get("title", pd.Series(index=exploded.index, dtype=object)).fillna("").astype(str)
     exploded["abstract"] = exploded.get("abstract", pd.Series(index=exploded.index, dtype=object)).fillna("").astype(str)
     exploded["year"] = exploded.get("year", pd.Series(index=exploded.index, dtype=object)).map(parse_year)
@@ -175,6 +180,7 @@ def explode_records_to_mentions(
     return exploded[
         [
             "mention_id",
+            "canonical_record_id",
             "bibcode",
             "author_idx",
             "author_raw",
