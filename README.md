@@ -2,6 +2,15 @@
 
 `author_name_disambiguation` is a standalone package for training and running NAND-style author disambiguation on curated source datasets.
 
+Package design priorities:
+
+- correctness first
+- then speed
+- then cost
+- then minimality
+
+The intent is a lightweight package with one clear public runtime story: `gpu | cpu | hf`.
+
 The installed surface is intentionally small:
 
 - `run-train-stage`

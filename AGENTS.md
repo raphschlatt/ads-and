@@ -6,6 +6,46 @@ This file defines the required vocabulary for this repo so that humans and agent
 
 Use these terms exactly.
 
+## Package Direction
+
+This repo is moving toward a minimal production package, not a permanently growing research sandbox.
+
+Priority order:
+- correctness
+- speed
+- cost
+- minimality
+
+Interpretation:
+- correctness always wins
+- once correctness is preserved, prefer the faster path
+- once correctness and speed are acceptable, prefer the lower-cost path
+- once the above are satisfied, prefer the smaller and simpler implementation
+
+Minimality is still a real goal:
+- prefer deletion over abstraction
+- prefer one clear product path over many switches
+- prefer one public mode per use case over multiple partially overlapping knobs
+- every dependency, fallback, benchmark mode, legacy path, and debug hook must justify its existence
+
+Public runtime story:
+- `gpu`
+- `cpu`
+- `hf`
+
+Default implementation bias:
+- keep exactly one promoted path per public runtime mode
+- keep internal overrides only if they are required for tests, migration, or diagnosis
+- do not add a fallback, compatibility shim, or extra benchmark mode unless it protects a real supported workflow
+- if a feature can be removed without breaking the supported package story, remove it
+- if two code paths produce the same supported outcome, keep the smaller one
+
+Repo hygiene bias:
+- the package should be as lightweight as possible without losing the main function
+- do not optimize for maximum flexibility
+- do not optimize for preserving old surfaces by default
+- avoid turning temporary experiment helpers into permanent product surface
+
 ## The Four Core Objects
 
 ### 1. Raw LSPO Source
