@@ -18,7 +18,7 @@ from author_name_disambiguation.approaches.nand.export import (
     export_source_mirrored_outputs,
 )
 from author_name_disambiguation.approaches.nand.infer_pairs import score_pairs_with_checkpoint
-from author_name_disambiguation.common.cli_ui import get_active_ui
+from author_name_disambiguation.common.cli_ui import CliProgressHandler, get_active_ui
 from author_name_disambiguation.common.cpu_runtime import compute_ram_budget_bytes, normalize_workers_request
 from author_name_disambiguation.common.io_schema import PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
 from author_name_disambiguation.common.package_resources import load_yaml_like, load_yaml_resource
@@ -37,6 +37,7 @@ from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings, summarize_precomputed_embeddings
+from author_name_disambiguation.progress import ProgressReporter, activate_progress_reporter
 
 if TYPE_CHECKING:
     from author_name_disambiguation.infer_sources import InferSourcesRequest, InferSourcesResult
@@ -47,6 +48,16 @@ UID_SCOPE_VALUES = {"dataset", "local", "registry"}
 INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full", "incremental"}
 INFER_STAGE_ALIASES = {"incremental": "full"}
 RUNTIME_MODE_VALUES = {"gpu", "cpu", "hf"}
+INFER_PROGRESS_STAGES: dict[str, tuple[int, str]] = {
+    "bootstrap": (1, "Bootstrap"),
+    "load_inputs": (2, "Load inputs"),
+    "preflight": (3, "Preflight"),
+    "name_embeddings": (4, "Name embeddings"),
+    "text_embeddings": (5, "Text embeddings"),
+    "pair_inference": (6, "Pair inference"),
+    "clustering": (7, "Clustering"),
+    "export": (8, "Export and reports"),
+}
 
 
 def _ensure_dir(path: str | Path) -> Path:
@@ -564,63 +575,72 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     from author_name_disambiguation.infer_sources import InferSourcesResult
 
     ui = get_active_ui()
+    reporter_handler = request.progress_handler
+    if reporter_handler is None and ui is not None:
+        reporter_handler = CliProgressHandler(ui)
+    reporter = ProgressReporter(handler=reporter_handler)
+    progress_enabled = bool(request.progress or reporter.has_handler())
 
-    def _ui_start(label: str) -> None:
-        if ui is not None:
-            ui.start(label)
+    def _stage_start(stage_key: str) -> None:
+        stage_index, stage_label = INFER_PROGRESS_STAGES[stage_key]
+        reporter.start_stage(
+            stage_index=stage_index,
+            stage_total=len(INFER_PROGRESS_STAGES),
+            stage_key=stage_key,
+            stage_label=stage_label,
+        )
 
-    def _ui_info(message: str) -> None:
-        if ui is not None:
-            ui.info(message)
+    def _stage_info(message: str, *, payload: dict[str, Any] | None = None) -> None:
+        reporter.info(message, payload=payload)
 
-    def _ui_warn(message: str) -> None:
-        if ui is not None:
-            ui.warn(message)
+    def _stage_warn(message: str, *, payload: dict[str, Any] | None = None) -> None:
+        reporter.warn(message, payload=payload)
 
-    def _ui_done(message: str) -> None:
-        if ui is not None:
-            ui.done(message)
+    def _stage_done(message: str, *, elapsed_seconds: float | None = None, payload: dict[str, Any] | None = None) -> None:
+        reporter.done(message, elapsed_seconds=elapsed_seconds, payload=payload)
 
-    def _ui_skip(message: str) -> None:
-        if ui is not None:
-            ui.skip(message)
+    def _stage_skip(message: str, *, payload: dict[str, Any] | None = None) -> None:
+        reporter.done(message, payload=payload, skipped=True)
 
     run_started_at = perf_counter()
-    bootstrap_started_at = run_started_at
-    _ui_start("Bootstrap")
-    _ui_info(
-        f"dataset={str(request.dataset_id)} | infer_stage={str(request.infer_stage)} | "
-        f"output_root={Path(request.output_root).expanduser().resolve()}"
-    )
-    _validate_request(request)
+    summary_payload: dict[str, Any] | None = None
 
-    infer_stage_requested, infer_stage = _normalize_infer_stage(getattr(request, "infer_stage", None))
-    uid_scope = str(request.uid_scope).strip().lower()
-    uid_namespace = _resolve_uid_namespace(
-        uid_scope=uid_scope,
-        uid_namespace=request.uid_namespace,
-        dataset_id=str(request.dataset_id),
-    )
-    runtime_mode_requested = _normalize_runtime_mode(getattr(request, "runtime_mode", None))
-    bootstrap_device = _requested_device_for_runtime_mode(
-        runtime_mode=runtime_mode_requested,
-        requested_device=str(request.device),
-    )
+    with activate_progress_reporter(reporter):
+        bootstrap_started_at = run_started_at
+        _stage_start("bootstrap")
+        _stage_info(
+            f"dataset={str(request.dataset_id)} | infer_stage={str(request.infer_stage)} | "
+            f"output_root={Path(request.output_root).expanduser().resolve()}"
+        )
+        _validate_request(request)
 
-    output_root = Path(request.output_root).expanduser().resolve()
-    dirs = _build_output_dirs(output_root)
-    run_id = default_run_id("infer_sources")
-    references_present = request.references_path is not None
-    bootstrap_runtime = _probe_bootstrap_runtime(str(bootstrap_device))
-    _ui_info(
-        f"device={str(bootstrap_device)} -> {bootstrap_runtime.get('resolved_device') or 'n/a'} | "
-        f"gpu={bootstrap_runtime.get('gpu_name') or 'n/a'} | "
-        f"precision={str(request.precision_mode)} | "
-        f"torch={bootstrap_runtime.get('torch_version') or 'n/a'}"
-    )
-    _ui_info(f"run_id={run_id} | uid_scope={uid_scope} | references_present={bool(references_present)}")
-    bootstrap_elapsed = perf_counter() - bootstrap_started_at
-    _ui_done(f"Bootstrap in {_format_elapsed(bootstrap_elapsed)}")
+        infer_stage_requested, infer_stage = _normalize_infer_stage(getattr(request, "infer_stage", None))
+        uid_scope = str(request.uid_scope).strip().lower()
+        uid_namespace = _resolve_uid_namespace(
+            uid_scope=uid_scope,
+            uid_namespace=request.uid_namespace,
+            dataset_id=str(request.dataset_id),
+        )
+        runtime_mode_requested = _normalize_runtime_mode(getattr(request, "runtime_mode", None))
+        bootstrap_device = _requested_device_for_runtime_mode(
+            runtime_mode=runtime_mode_requested,
+            requested_device=str(request.device),
+        )
+
+        output_root = Path(request.output_root).expanduser().resolve()
+        dirs = _build_output_dirs(output_root)
+        run_id = default_run_id("infer_sources")
+        references_present = request.references_path is not None
+        bootstrap_runtime = _probe_bootstrap_runtime(str(bootstrap_device))
+        _stage_info(
+            f"device={str(bootstrap_device)} -> {bootstrap_runtime.get('resolved_device') or 'n/a'} | "
+            f"gpu={bootstrap_runtime.get('gpu_name') or 'n/a'} | "
+            f"precision={str(request.precision_mode)} | "
+            f"torch={bootstrap_runtime.get('torch_version') or 'n/a'}"
+        )
+        _stage_info(f"run_id={run_id} | uid_scope={uid_scope} | references_present={bool(references_present)}")
+        bootstrap_elapsed = perf_counter() - bootstrap_started_at
+        _stage_done(f"Bootstrap in {_format_elapsed(bootstrap_elapsed)}", elapsed_seconds=bootstrap_elapsed)
 
     result_paths = {
         "publications_disambiguated": _resolve_source_output_path(
@@ -644,8 +664,31 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
         go_payload = load_json(result_paths["go_no_go"])
-        _ui_start("Load inputs")
-        _ui_skip("Reused existing infer outputs.")
+        _stage_start("load_inputs")
+        _stage_skip("Reused existing infer outputs.")
+        summary_path = output_root / "summary.json"
+        summary_payload = (
+            load_json(summary_path)
+            if summary_path.exists()
+            else {
+                "run_id": run_id,
+                "dataset_id": str(request.dataset_id),
+                "go": go_payload.get("go"),
+                "summary_path": str(summary_path),
+                "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
+                "references_disambiguated_path": (
+                    None
+                    if result_paths["references_disambiguated"] is None
+                    else str(result_paths["references_disambiguated"])
+                ),
+                "author_entities_path": str(result_paths["author_entities"]),
+                "source_author_assignments_path": str(result_paths["source_author_assignments"]),
+                "mention_clusters_path": str(result_paths["mention_clusters"]),
+                "stage_metrics_path": str(result_paths["stage_metrics"]),
+                "go_no_go_path": str(result_paths["go_no_go"]),
+            }
+        )
+        reporter.run_done(payload=summary_payload, message=f"Run complete | run_id={run_id}")
         return InferSourcesResult(
             run_id=run_id,
             go=go_payload.get("go"),
@@ -661,8 +704,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         )
 
     load_started_at = perf_counter()
-    _ui_start("Load inputs")
-    _ui_info(
+    _stage_start("load_inputs")
+    _stage_info(
         f"publications={Path(request.publications_path).expanduser().resolve()} | "
         f"references={None if request.references_path is None else Path(request.references_path).expanduser().resolve()}"
     )
@@ -791,17 +834,18 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     context_payload["runtime"] = {"load_inputs": load_inputs_runtime}
     write_json(context_payload, context_path)
     load_elapsed = perf_counter() - load_started_at
-    _ui_done(
+    _stage_done(
         "Loaded "
         f"publications={_format_count(len(publications))} "
         f"references={_format_count(len(references))} "
         f"canonical_records={_format_count(len(canonical_records))} "
-        f"in {_format_elapsed(load_elapsed)}"
+        f"in {_format_elapsed(load_elapsed)}",
+        elapsed_seconds=load_elapsed,
     )
     load_inputs_runtime["wall_seconds"] = float(load_elapsed)
 
     preflight_started_at = perf_counter()
-    _ui_start("Preflight")
+    _stage_start("preflight")
     save_parquet(full_mentions, dirs["interim"] / "mentions_full.parquet", index=False)
 
     if infer_stage == "full":
@@ -872,43 +916,45 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             extras={"pair_upper_bound": int(preflight["pair_upper_bound"])},
         )
     )
-    _ui_info(
+    _stage_info(
         f"precomputed_embedding column present={_yes_no(precomputed_embeddings['specter_sources']['column_present'])}"
     )
-    _ui_info(
+    _stage_info(
         f"specter_sources={_format_count(len(specter_source_records))} | "
         f"specter_recompute={_format_count(precomputed_embeddings['specter_sources']['recomputed_embedding_count'])} | "
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])}"
     )
     preflight_elapsed = perf_counter() - preflight_started_at
-    _ui_done(
+    _stage_done(
         f"Preflight for {_format_count(len(mentions))} mentions in "
-        f"{_format_elapsed(preflight_elapsed)}"
+        f"{_format_elapsed(preflight_elapsed)}",
+        elapsed_seconds=preflight_elapsed,
     )
     preflight["wall_seconds"] = float(preflight_elapsed)
 
     name_embeddings_started_at = perf_counter()
-    _ui_start("Name embeddings")
+    _stage_start("name_embeddings")
     chars_path = dirs["embeddings"] / "chars2vec.npy"
     chars_cache_requested = chars_path.exists() and not bool(request.force)
     chars_execution_mode = "predict"
     chars_batch_size = None
-    _ui_info(
+    _stage_info(
         f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | "
         f"backend=chars2vec/tensorflow | mode={chars_execution_mode} | "
         f"batch_size={'auto' if chars_batch_size is None else _format_count(chars_batch_size)}"
     )
-    chars_result = get_or_create_chars2vec_embeddings(
-        mentions=mentions,
-        output_path=chars_path,
-        force_recompute=bool(request.force),
-        batch_size=chars_batch_size,
-        execution_mode=chars_execution_mode,
-        use_stub_if_missing=False,
-        quiet_libraries=True,
-        show_progress=bool(request.progress),
-        return_meta=True,
-    )
+    with activate_progress_reporter(reporter):
+        chars_result = get_or_create_chars2vec_embeddings(
+            mentions=mentions,
+            output_path=chars_path,
+            force_recompute=bool(request.force),
+            batch_size=chars_batch_size,
+            execution_mode=chars_execution_mode,
+            use_stub_if_missing=False,
+            quiet_libraries=True,
+            show_progress=progress_enabled,
+            return_meta=True,
+        )
     if isinstance(chars_result, tuple) and len(chars_result) == 2:
         chars, chars_meta = chars_result
     else:
@@ -918,14 +964,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         chars = np.load(chars_path, mmap_mode="r")
     chars_elapsed = perf_counter() - name_embeddings_started_at
     chars_meta["wall_seconds"] = float(chars_elapsed)
-    _ui_done(
+    _stage_done(
         f"{_format_count(len(mentions))} names embedded in {_format_elapsed(chars_elapsed)} "
         f"({_format_rate(len(mentions), chars_elapsed)}) | "
-        f"cache={'hit' if chars_meta.get('cache_hit') else 'miss'} | backend=chars2vec/tensorflow"
+        f"cache={'hit' if chars_meta.get('cache_hit') else 'miss'} | backend=chars2vec/tensorflow",
+        elapsed_seconds=chars_elapsed,
     )
 
     text_embeddings_started_at = perf_counter()
-    _ui_start("Text embeddings")
+    _stage_start("text_embeddings")
     specter_batch_size_label = "auto" if specter_batch_size is None else _format_count(specter_batch_size)
     preferred_text_backend = "onnx_fp32" if specter_runtime_backend == "cpu_auto" else specter_runtime_backend
     text_cache_name = (
@@ -935,7 +982,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     text_path = dirs["embeddings"] / text_cache_name
     text_cache_requested = text_path.exists() and not bool(request.force)
-    _ui_info(
+    _stage_info(
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
         f"sources={_format_count(len(specter_source_records))} | "
         f"precomputed={_format_count(precomputed_embeddings['specter_sources']['precomputed_embedding_count'])} | "
@@ -944,26 +991,27 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"precision={specter_precision_mode}"
     )
     def _run_text_embeddings(selected_backend: str, selected_output_path: Path):
-        return get_or_create_specter_embeddings(
-            mentions=specter_source_records,
-            output_path=selected_output_path,
-            force_recompute=bool(request.force),
-            model_name=model_info["model_cfg"].get("representation", {}).get("text_model_name", "allenai/specter"),
-            text_backend=model_info["model_cfg"].get("representation", {}).get("text_backend", "transformers"),
-            text_adapter_name=model_info["model_cfg"].get("representation", {}).get("text_adapter_name"),
-            text_adapter_alias=model_info["model_cfg"].get("representation", {}).get("text_adapter_alias", "specter2"),
-            runtime_backend=selected_backend,
-            max_length=int(model_info["model_cfg"].get("representation", {}).get("max_length", 256)),
-            batch_size=specter_batch_size,
-            device=str(effective_request_device),
-            precision_mode=specter_precision_mode,
-            prefer_precomputed=True,
-            use_stub_if_missing=False,
-            show_progress=bool(request.progress),
-            quiet_libraries=True,
-            reuse_model=False,
-            return_meta=True,
-        )
+        with activate_progress_reporter(reporter):
+            return get_or_create_specter_embeddings(
+                mentions=specter_source_records,
+                output_path=selected_output_path,
+                force_recompute=bool(request.force),
+                model_name=model_info["model_cfg"].get("representation", {}).get("text_model_name", "allenai/specter"),
+                text_backend=model_info["model_cfg"].get("representation", {}).get("text_backend", "transformers"),
+                text_adapter_name=model_info["model_cfg"].get("representation", {}).get("text_adapter_name"),
+                text_adapter_alias=model_info["model_cfg"].get("representation", {}).get("text_adapter_alias", "specter2"),
+                runtime_backend=selected_backend,
+                max_length=int(model_info["model_cfg"].get("representation", {}).get("max_length", 256)),
+                batch_size=specter_batch_size,
+                device=str(effective_request_device),
+                precision_mode=specter_precision_mode,
+                prefer_precomputed=True,
+                use_stub_if_missing=False,
+                show_progress=progress_enabled,
+                quiet_libraries=True,
+                reuse_model=False,
+                return_meta=True,
+            )
 
     resolved_specter_runtime_backend = specter_runtime_backend
     if specter_runtime_backend == "cpu_auto":
@@ -974,7 +1022,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             text_path = onnx_text_path
             resolved_specter_runtime_backend = "onnx_fp32"
         except Exception as exc:
-            _ui_warn(
+            _stage_warn(
                 "ONNX CPU SPECTER unavailable; falling back to transformers "
                 f"({type(exc).__name__}: {exc})"
             )
@@ -1021,12 +1069,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     resolved_text_device = text_runtime_meta.get("resolved_device")
     if text_runtime_meta.get("cache_hit"):
         resolved_text_device = resolved_text_device or "cache"
-    _ui_done(
+    _stage_done(
         f"{_format_count(len(specter_source_records))} source texts -> {_format_count(len(mentions))} mentions in "
         f"{_format_elapsed(text_elapsed)} ({_format_rate(len(specter_source_records), text_elapsed)}) | "
         f"cache={'hit' if text_runtime_meta.get('cache_hit') else 'miss'} | "
         f"precomputed={_format_count(text_runtime_meta.get('precomputed_embedding_count') or 0)} | "
-        f"device={resolved_text_device or 'n/a'}"
+        f"device={resolved_text_device or 'n/a'}",
+        elapsed_seconds=text_elapsed,
     )
 
     preflight["runtime"] = {
@@ -1038,34 +1087,35 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _best_effort_release_runtime_memory()
 
     pair_inference_started_at = perf_counter()
-    _ui_start("Pair inference")
-    _ui_info(
+    _stage_start("pair_inference")
+    _stage_info(
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])} | "
         f"score_batch_size={_format_count(score_batch_size)}"
     )
-    _ui_info(
+    _stage_info(
         f"cpu_stage=pair_building | cpu_workers={_format_worker_request(cpu_workers)} | "
         f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
     )
     pairs_path = dirs["processed"] / "pairs.parquet"
-    pairs, pair_meta = build_pairs_within_blocks(
-        mentions=mentions,
-        max_pairs_per_block=max_pairs_per_block,
-        seed=int(infer_cfg.get("seed", 11)),
-        require_same_split=False,
-        labeled_only=False,
-        balance_train=False,
-        exclude_same_bibcode=bool(pair_build_cfg.get("exclude_same_bibcode", True)),
-        show_progress=bool(request.progress),
-        output_path=None,
-        chunk_rows=pair_chunk_rows,
-        return_pairs=True,
-        return_meta=True,
-        num_workers=cpu_workers,
-        sharding_mode=cpu_sharding_mode,
-        min_pairs_per_worker=cpu_min_pairs_per_worker,
-        ram_budget_bytes=cpu_ram_budget_bytes,
-    )
+    with activate_progress_reporter(reporter):
+        pairs, pair_meta = build_pairs_within_blocks(
+            mentions=mentions,
+            max_pairs_per_block=max_pairs_per_block,
+            seed=int(infer_cfg.get("seed", 11)),
+            require_same_split=False,
+            labeled_only=False,
+            balance_train=False,
+            exclude_same_bibcode=bool(pair_build_cfg.get("exclude_same_bibcode", True)),
+            show_progress=progress_enabled,
+            output_path=None,
+            chunk_rows=pair_chunk_rows,
+            return_pairs=True,
+            return_meta=True,
+            num_workers=cpu_workers,
+            sharding_mode=cpu_sharding_mode,
+            min_pairs_per_worker=cpu_min_pairs_per_worker,
+            ram_budget_bytes=cpu_ram_budget_bytes,
+        )
     if pairs is None:
         pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
     pairs = pairs.copy()
@@ -1105,21 +1155,22 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     else:
         pairs_input: pd.DataFrame | str | Path = pairs_path if len(pairs) > score_chunked_threshold else pairs
         use_file_backed_pair_scores = isinstance(pairs_input, Path)
-        pair_scores_result = score_pairs_with_checkpoint(
-            mentions=mentions,
-            pairs=pairs_input,
-            chars2vec=chars,
-            text_emb=text,
-            checkpoint_path=model_info["checkpoint_path"],
-            output_path=pair_scores_path,
-            batch_size=score_batch_size,
-            device=str(effective_request_device),
-            precision_mode=str(request.precision_mode),
-            show_progress=bool(request.progress),
-            chunk_rows=score_chunk_rows,
-            return_scores=not use_file_backed_pair_scores,
-            return_runtime_meta=True,
-        )
+        with activate_progress_reporter(reporter):
+            pair_scores_result = score_pairs_with_checkpoint(
+                mentions=mentions,
+                pairs=pairs_input,
+                chars2vec=chars,
+                text_emb=text,
+                checkpoint_path=model_info["checkpoint_path"],
+                output_path=pair_scores_path,
+                batch_size=score_batch_size,
+                device=str(effective_request_device),
+                precision_mode=str(request.precision_mode),
+                show_progress=progress_enabled,
+                chunk_rows=score_chunk_rows,
+                return_scores=not use_file_backed_pair_scores,
+                return_runtime_meta=True,
+            )
         if isinstance(pair_scores_result, tuple) and len(pair_scores_result) == 2:
             pair_scores, pair_score_runtime_meta_raw = pair_scores_result
         else:
@@ -1143,7 +1194,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     write_json(preflight, preflight_path)
     clamping_meta = dict(pair_score_runtime_meta.get("numeric_clamping", {}) or {})
     if bool(clamping_meta.get("clamped")):
-        _ui_warn(
+        _stage_warn(
             "Applied numeric clamping to pair scores: "
             f"events={int(clamping_meta.get('events', 0))} | "
             f"cosine_non_finite={int(clamping_meta.get('cosine_non_finite_count', 0))} | "
@@ -1156,7 +1207,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     pair_inference_elapsed = perf_counter() - pair_inference_started_at
     pair_meta["wall_seconds"] = float(pair_inference_elapsed)
     pair_score_runtime_meta["wall_seconds"] = float(pair_inference_elapsed)
-    _ui_done(
+    _stage_done(
         f"pair_count={_format_count(len(pairs))} | "
         f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', len(pairs))))} | "
         f"workers={_format_worker_request(pair_meta.get('cpu_workers_effective'))} | "
@@ -1164,13 +1215,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"score_count={_format_count(len(pair_scores))} | "
         f"device={pair_score_runtime_meta.get('resolved_device') or 'n/a'} | "
         f"precision={pair_score_runtime_meta.get('effective_precision_mode') or str(request.precision_mode)} "
-        f"in {_format_elapsed(pair_inference_elapsed)}"
+        f"in {_format_elapsed(pair_inference_elapsed)}",
+        elapsed_seconds=pair_inference_elapsed,
     )
     if any(
         float(pair_score_runtime_meta.get(key) or 0.0) > 0.0
         for key in ("parquet_read_seconds", "pandas_conversion_seconds", "pair_score_seconds", "parquet_write_seconds")
     ):
-        _ui_info(
+        _stage_info(
             "pair_score_timing "
             f"read={_format_elapsed(float(pair_score_runtime_meta.get('parquet_read_seconds') or 0.0))} | "
             f"to_pandas={_format_elapsed(float(pair_score_runtime_meta.get('pandas_conversion_seconds') or 0.0))} | "
@@ -1179,8 +1231,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         )
 
     clustering_started_at = perf_counter()
-    _ui_start("Clustering")
-    _ui_info(
+    _stage_start("clustering")
+    _stage_info(
         f"backend={cluster_backend} | cpu_workers={_format_worker_request(cpu_workers)} | "
         f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
     )
@@ -1189,19 +1241,20 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     cluster_cfg_used["selected_eps"] = float(model_info["selected_eps"])
     cluster_cfg_used["eps"] = float(model_info["selected_eps"])
 
-    clusters, cluster_runtime_meta = cluster_blockwise_dbscan(
-        mentions=mentions,
-        pair_scores=pair_scores,
-        cluster_config=cluster_cfg_used,
-        output_path=None,
-        show_progress=bool(request.progress),
-        num_workers=cpu_workers,
-        sharding_mode=cpu_sharding_mode,
-        min_pairs_per_worker=cpu_min_pairs_per_worker,
-        ram_budget_bytes=cpu_ram_budget_bytes,
-        backend=cluster_backend,
-        return_meta=True,
-    )
+    with activate_progress_reporter(reporter):
+        clusters, cluster_runtime_meta = cluster_blockwise_dbscan(
+            mentions=mentions,
+            pair_scores=pair_scores,
+            cluster_config=cluster_cfg_used,
+            output_path=None,
+            show_progress=progress_enabled,
+            num_workers=cpu_workers,
+            sharding_mode=cpu_sharding_mode,
+            min_pairs_per_worker=cpu_min_pairs_per_worker,
+            ram_budget_bytes=cpu_ram_budget_bytes,
+            backend=cluster_backend,
+            return_meta=True,
+        )
     uid_registry_path = None if uid_scope != "registry" else dirs["root"] / "uid_registry" / f"{uid_namespace}.json"
     clusters, uid_mode_meta = _apply_uid_mode_to_clusters(
         clusters=clusters,
@@ -1220,20 +1273,21 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     write_json(preflight, preflight_path)
     clustering_elapsed = perf_counter() - clustering_started_at
     cluster_runtime_meta["wall_seconds"] = float(clustering_elapsed)
-    _ui_done(
+    _stage_done(
         f"clusters={_format_count(int(clusters['author_uid'].nunique()))} | "
         f"mentions={_format_count(len(clusters))} | "
         f"backend={cluster_runtime_meta.get('cluster_backend_effective') or cluster_runtime_meta.get('backend_effective')} | "
         f"workers={_format_worker_request(cluster_runtime_meta.get('cpu_workers_effective'))} | "
         f"sharding={_yes_no(bool(cluster_runtime_meta.get('cpu_sharding_enabled')))} "
-        f"in {_format_elapsed(clustering_elapsed)}"
+        f"in {_format_elapsed(clustering_elapsed)}",
+        elapsed_seconds=clustering_elapsed,
     )
 
     export_started_at = perf_counter()
-    _ui_start("Export and reports")
-    _ui_info(f"writing {result_paths['publications_disambiguated'].name}")
+    _stage_start("export")
+    _stage_info(f"writing {result_paths['publications_disambiguated'].name}")
     if result_paths["references_disambiguated"] is not None:
-        _ui_info(f"writing {result_paths['references_disambiguated'].name}")
+        _stage_info(f"writing {result_paths['references_disambiguated'].name}")
     export_runtime_meta: dict[str, Any] = {}
     assignments_result = build_source_author_assignments(
         publications=publications,
@@ -1396,7 +1450,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         precomputed_embeddings=precomputed_embeddings,
     )
     stage_metrics["embedding_contract"] = dict(model_info.get("embedding_contract", {}) or {})
-    _ui_info(f"writing {result_paths['stage_metrics'].name}")
+    _stage_info(f"writing {result_paths['stage_metrics'].name}")
     write_json(stage_metrics, result_paths["stage_metrics"])
     consistency_paths.append(
         _write_consistency(
@@ -1409,45 +1463,56 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
     write_go_no_go_report(go, result_paths["go_no_go"])
     total_elapsed = perf_counter() - run_started_at
-    summary_path = write_json(
-        {
-            "run_id": run_id,
-            "dataset_id": str(request.dataset_id),
-            "output_root": str(output_root),
-            "summary_path": str(output_root / "summary.json"),
-            "go": go.get("go"),
-            "infer_stage_requested": infer_stage_requested,
-            "infer_stage_effective": infer_stage,
-            "runtime_mode": runtime_mode,
-            "runtime_backend": text_runtime_meta.get("runtime_backend"),
-            "resolved_device": text_runtime_meta.get("resolved_device") or bootstrap_runtime.get("resolved_device"),
-            "precision_mode": text_runtime_meta.get("effective_precision_mode") or str(request.precision_mode),
-            "clustering_backend": cluster_runtime_meta.get("cluster_backend_effective")
-            or cluster_runtime_meta.get("backend_effective"),
-            "counts": {
-                "publications": int(len(publications)),
-                "references": int(len(references)),
-                "canonical_records": int(len(canonical_records)),
-                "specter_sources": int(len(specter_source_records)),
-                "mentions": int(len(mentions)),
-                "clusters": int(clusters["author_uid"].nunique()),
-                "authors_total": int(source_export_qc.get("authors_total", 0)),
-                "authors_mapped": int(source_export_qc.get("authors_mapped", 0)),
-                "authors_unmapped": int(source_export_qc.get("authors_unmapped", 0)),
-            },
-            "stage_seconds": {
-                "bootstrap": float(bootstrap_elapsed),
-                "load_inputs": float(load_elapsed),
-                "preflight": float(preflight_elapsed),
-                "name_embeddings": float(chars_elapsed),
-                "text_embeddings": float(text_elapsed),
-                "pair_inference": float(pair_inference_elapsed),
-                "clustering": float(clustering_elapsed),
-                "export": float(export_elapsed),
-                "total": float(total_elapsed),
-            },
-            "warnings": list(go.get("warnings", []) or []),
-            "blockers": list(go.get("blockers", []) or []),
+    summary_payload = {
+        "run_id": run_id,
+        "dataset_id": str(request.dataset_id),
+        "output_root": str(output_root),
+        "summary_path": str(output_root / "summary.json"),
+        "go": go.get("go"),
+        "infer_stage_requested": infer_stage_requested,
+        "infer_stage_effective": infer_stage,
+        "runtime_mode": runtime_mode,
+        "runtime_backend": text_runtime_meta.get("runtime_backend"),
+        "resolved_device": text_runtime_meta.get("resolved_device") or bootstrap_runtime.get("resolved_device"),
+        "precision_mode": text_runtime_meta.get("effective_precision_mode") or str(request.precision_mode),
+        "clustering_backend": cluster_runtime_meta.get("cluster_backend_effective")
+        or cluster_runtime_meta.get("backend_effective"),
+        "counts": {
+            "publications": int(len(publications)),
+            "references": int(len(references)),
+            "canonical_records": int(len(canonical_records)),
+            "specter_sources": int(len(specter_source_records)),
+            "mentions": int(len(mentions)),
+            "clusters": int(clusters["author_uid"].nunique()),
+            "authors_total": int(source_export_qc.get("authors_total", 0)),
+            "authors_mapped": int(source_export_qc.get("authors_mapped", 0)),
+            "authors_unmapped": int(source_export_qc.get("authors_unmapped", 0)),
+        },
+        "stage_seconds": {
+            "bootstrap": float(bootstrap_elapsed),
+            "load_inputs": float(load_elapsed),
+            "preflight": float(preflight_elapsed),
+            "name_embeddings": float(chars_elapsed),
+            "text_embeddings": float(text_elapsed),
+            "pair_inference": float(pair_inference_elapsed),
+            "clustering": float(clustering_elapsed),
+            "export": float(export_elapsed),
+            "total": float(total_elapsed),
+        },
+        "warnings": list(go.get("warnings", []) or []),
+        "blockers": list(go.get("blockers", []) or []),
+        "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
+        "references_disambiguated_path": (
+            None
+            if result_paths["references_disambiguated"] is None
+            else str(result_paths["references_disambiguated"])
+        ),
+        "author_entities_path": str(result_paths["author_entities"]),
+        "source_author_assignments_path": str(result_paths["source_author_assignments"]),
+        "mention_clusters_path": str(result_paths["mention_clusters"]),
+        "stage_metrics_path": str(result_paths["stage_metrics"]),
+        "go_no_go_path": str(result_paths["go_no_go"]),
+        "outputs": {
             "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
             "references_disambiguated_path": (
                 None
@@ -1459,27 +1524,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "mention_clusters_path": str(result_paths["mention_clusters"]),
             "stage_metrics_path": str(result_paths["stage_metrics"]),
             "go_no_go_path": str(result_paths["go_no_go"]),
-            "outputs": {
-                "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
-                "references_disambiguated_path": (
-                    None
-                    if result_paths["references_disambiguated"] is None
-                    else str(result_paths["references_disambiguated"])
-                ),
-                "author_entities_path": str(result_paths["author_entities"]),
-                "source_author_assignments_path": str(result_paths["source_author_assignments"]),
-                "mention_clusters_path": str(result_paths["mention_clusters"]),
-                "stage_metrics_path": str(result_paths["stage_metrics"]),
-                "go_no_go_path": str(result_paths["go_no_go"]),
-            },
         },
-        output_root / "summary.json",
-    )
-    _ui_done(
+    }
+    summary_path = write_json(summary_payload, output_root / "summary.json")
+    _stage_done(
         f"GO={go.get('go')} | blockers={len(go.get('blockers', []))} "
-        f"in {_format_elapsed(export_elapsed)}"
+        f"in {_format_elapsed(export_elapsed)}",
+        elapsed_seconds=export_elapsed,
     )
-    _ui_info(f"Run complete | run_id={run_id}")
+    reporter.run_done(payload=summary_payload, message=f"Run complete | run_id={run_id}")
 
     return InferSourcesResult(
         run_id=run_id,

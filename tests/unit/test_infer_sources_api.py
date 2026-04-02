@@ -9,6 +9,7 @@ from author_name_disambiguation.infer_sources import InferSourcesRequest, InferS
 
 def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
     captured = {}
+    handler = lambda _event: None
 
     def _fake_run(request):
         captured["request"] = request
@@ -37,6 +38,7 @@ def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
         runtime_mode="cpu",
         specter_runtime_backend="onnx_fp32",
         progress=False,
+        progress_handler=handler,
     )
     result = run_infer_sources(request)
 
@@ -51,10 +53,12 @@ def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
     assert captured_request.runtime_mode == "cpu"
     assert captured_request.specter_runtime_backend == "onnx_fp32"
     assert captured_request.progress is False
+    assert captured_request.progress_handler is handler
 
 
 def test_run_infer_sources_accepts_keyword_arguments(monkeypatch, tmp_path: Path):
     captured = {}
+    handler = lambda _event: None
 
     def _fake_run(request):
         captured["request"] = request
@@ -84,6 +88,7 @@ def test_run_infer_sources_accepts_keyword_arguments(monkeypatch, tmp_path: Path
         dataset_id="ads_prod_current",
         infer_stage="incremental",
         progress=False,
+        progress_handler=handler,
     )
 
     assert result.summary_path == tmp_path / "summary.json"
@@ -91,6 +96,7 @@ def test_run_infer_sources_accepts_keyword_arguments(monkeypatch, tmp_path: Path
     assert captured_request.model_bundle == tmp_path / "packaged_bundle"
     assert captured_request.infer_stage == "incremental"
     assert captured_request.progress is False
+    assert captured_request.progress_handler is handler
     assert captured_request.runtime_mode in {"cpu", "gpu"}
 
 
@@ -244,3 +250,48 @@ def test_disambiguate_sources_reuses_active_ui_without_creating_new_one(monkeypa
     )
 
     assert created["called"] is False
+
+
+def test_disambiguate_sources_with_progress_handler_disables_internal_ui(monkeypatch, tmp_path: Path):
+    captured = {}
+    created = {"called": False}
+    events = []
+    handler = events.append
+
+    def _fake_run(request=None, **kwargs):
+        captured["kwargs"] = kwargs
+        return InferSourcesResult(
+            run_id="infer_sources_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=tmp_path / "summary.json",
+        )
+
+    class _FakeUi:
+        def __init__(self, *args, **kwargs):
+            created["called"] = True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("author_name_disambiguation.api.run_infer_sources", _fake_run)
+    monkeypatch.setattr("author_name_disambiguation.api.resolve_fixed_model_bundle_path", lambda: tmp_path / "bundle")
+    monkeypatch.setattr("author_name_disambiguation.api.CliUI", _FakeUi)
+    monkeypatch.setattr("author_name_disambiguation.api.get_active_ui", lambda: None)
+
+    disambiguate_sources(
+        publications_path=tmp_path / "publications.parquet",
+        output_dir=tmp_path / "out",
+        progress=True,
+        progress_handler=handler,
+    )
+
+    assert created["called"] is False
+    assert captured["kwargs"]["progress_handler"] is handler

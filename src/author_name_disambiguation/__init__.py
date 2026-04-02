@@ -12,6 +12,7 @@ from author_name_disambiguation.precompute_source_embeddings import (
     PrecomputeSourceEmbeddingsResult,
     precompute_source_embeddings,
 )
+from author_name_disambiguation.progress import ProgressEvent
 
 __all__ = [
     "FIXED_MODEL_BASELINE_RUN_ID",
@@ -21,6 +22,7 @@ __all__ = [
     "LspoTrainingResult",
     "PrecomputeSourceEmbeddingsRequest",
     "PrecomputeSourceEmbeddingsResult",
+    "ProgressEvent",
     "disambiguate_sources",
     "evaluate_lspo_quality",
     "precompute_source_embeddings",

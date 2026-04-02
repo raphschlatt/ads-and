@@ -14,6 +14,7 @@ from author_name_disambiguation.defaults import (
     resolve_fixed_model_bundle_path,
 )
 from author_name_disambiguation.infer_sources import InferSourcesResult, run_infer_sources
+from author_name_disambiguation.progress import ProgressHandler
 from author_name_disambiguation.workflow_helpers import (
     default_train_run_id,
     resolve_report_paths,
@@ -107,6 +108,7 @@ def disambiguate_sources(
     infer_stage: UserInferStage = "full",
     progress: bool = True,
     progress_style: ProgressStyle = "compact",
+    progress_handler: ProgressHandler | None = None,
 ) -> InferSourcesResult:
     resolved_runtime = _resolve_user_runtime(runtime)
     resolved_dataset_id = _derive_dataset_id(
@@ -116,7 +118,7 @@ def disambiguate_sources(
     )
     resolved_bundle = resolve_fixed_model_bundle_path() if model_bundle is None else Path(model_bundle).expanduser()
     created_ui = None
-    if get_active_ui() is None:
+    if progress_handler is None and get_active_ui() is None:
         created_ui = CliUI(total_steps=8, progress=bool(progress), progress_style=str(progress_style))
     try:
         return run_infer_sources(
@@ -129,6 +131,7 @@ def disambiguate_sources(
             runtime_mode=resolved_runtime,
             force=bool(force),
             progress=bool(progress),
+            progress_handler=progress_handler,
         )
     finally:
         if created_ui is not None:

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Iterable, Iterator, TypeVar
 
+from author_name_disambiguation.progress import ProgressEvent, emit_stage_progress, get_active_progress_reporter
+
 try:
     from tqdm.auto import tqdm as _tqdm
 except Exception:  # pragma: no cover
@@ -162,6 +164,43 @@ def nested_progress_enabled() -> bool:
     return bool(_NESTED_PROGRESS_ENABLED.get())
 
 
+class CliProgressHandler:
+    def __init__(self, ui: CliUI) -> None:
+        self._ui = ui
+
+    def __call__(self, event: ProgressEvent) -> None:
+        kind = str(event.kind)
+        if kind == "stage_start":
+            self._ui.start(event.stage_label or "")
+            return
+        if kind == "stage_info":
+            if event.message:
+                self._ui.info(str(event.message))
+            return
+        if kind == "stage_warning":
+            if event.message:
+                self._ui.warn(str(event.message))
+            return
+        if kind == "stage_done":
+            message = str(event.message or "Done.")
+            status = str((event.payload or {}).get("status", "")).strip().lower()
+            if status == "skipped":
+                self._ui.skip(message)
+            else:
+                self._ui.done(message)
+            return
+        if kind == "run_failed":
+            if event.message:
+                self._ui.fail(str(event.message))
+            return
+        if kind == "run_done":
+            if event.message:
+                self._ui.info(str(event.message))
+            return
+        if kind == "stage_progress":
+            return
+
+
 def _format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "n/a"
@@ -208,14 +247,20 @@ class _LoopProgress:
     unit: str
     compact_label: str | None = None
     compact_visible: bool = True
+    emit_events: bool = True
     min_plain_interval: float = 30.0
 
     def __post_init__(self) -> None:
         self.total = int(max(0, self.total))
         self.enabled = bool(self.enabled) and nested_progress_enabled()
         self._ui = get_active_ui()
+        reporter = get_active_progress_reporter()
+        self._external_only = bool(
+            reporter is not None and reporter.has_handler() and not isinstance(reporter.handler, CliProgressHandler)
+        )
         self._compact_mode = bool(self._ui is not None and self._ui.progress_style == "compact")
-        self._suppress_output = bool(self.enabled and self._compact_mode and not bool(self.compact_visible))
+        self._compact_hidden = bool(self.enabled and self._compact_mode and not bool(self.compact_visible))
+        self._suppress_output = bool(self._external_only or self._compact_hidden)
         self._started_at = perf_counter()
         self._done = 0
         self._last_plain_emit = 0.0
@@ -245,7 +290,7 @@ class _LoopProgress:
             )
 
     def __enter__(self) -> _LoopProgress:
-        if self.enabled and not self._bar.disable:
+        if self.enabled and not self._suppress_output and not self._bar.disable:
             self._active_bar_token = _ACTIVE_PROGRESS_BAR.set(self._bar)
         elif self.enabled and not self._suppress_output and self._bar.disable:
             self._emit_plain_start()
@@ -288,10 +333,19 @@ class _LoopProgress:
         self._completion_emitted = self._done >= self.total
 
     def update(self, n: int = 1) -> None:
-        if not self.enabled or self._suppress_output:
+        if not self.enabled or self._compact_hidden:
             return
         step = int(max(0, n))
         self._done += step
+        if bool(self.emit_events):
+            emit_stage_progress(
+                current=self._done,
+                total=self.total,
+                unit=self.unit,
+                payload={"progress_label": str(self.label)},
+            )
+        if self._external_only:
+            return
         if not self._bar.disable:
             self._bar.update(step)
             return
@@ -312,6 +366,7 @@ def iter_progress(
     unit: str = "it",
     compact_label: str | None = None,
     compact_visible: bool = True,
+    emit_events: bool = True,
     min_plain_interval: float = 30.0,
 ) -> Iterator[T]:
     if not enabled:
@@ -325,6 +380,7 @@ def iter_progress(
         unit=unit,
         compact_label=compact_label,
         compact_visible=compact_visible,
+        emit_events=emit_events,
         min_plain_interval=min_plain_interval,
     )
     with tracker:
@@ -342,6 +398,7 @@ def loop_progress(
     unit: str = "it",
     compact_label: str | None = None,
     compact_visible: bool = True,
+    emit_events: bool = True,
     min_plain_interval: float = 30.0,
 ) -> Iterator[_LoopProgress]:
     tracker = _LoopProgress(
@@ -351,6 +408,7 @@ def loop_progress(
         unit=unit,
         compact_label=compact_label,
         compact_visible=compact_visible,
+        emit_events=emit_events,
         min_plain_interval=min_plain_interval,
     )
     with tracker:

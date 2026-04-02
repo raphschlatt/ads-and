@@ -468,6 +468,103 @@ def test_cluster_blockwise_dbscan_cpu_sharding_matches_sequential():
     pd.testing.assert_frame_equal(seq_m, par_m)
 
 
+def test_cluster_blockwise_dbscan_cpu_sharding_updates_progress(monkeypatch):
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "a3", "block_key": "blk.a", "author_raw": "A, A", "year": 2002},
+            {"mention_id": "b1", "block_key": "blk.b", "author_raw": "B, B", "year": 2000},
+            {"mention_id": "b2", "block_key": "blk.b", "author_raw": "B, B", "year": 2001},
+            {"mention_id": "b3", "block_key": "blk.b", "author_raw": "B, B", "year": 2002},
+        ]
+    )
+    pair_scores = pd.DataFrame(
+        [
+            {"pair_id": "a1__a2", "mention_id_1": "a1", "mention_id_2": "a2", "block_key": "blk.a", "distance": 0.05},
+            {"pair_id": "a1__a3", "mention_id_1": "a1", "mention_id_2": "a3", "block_key": "blk.a", "distance": 0.05},
+            {"pair_id": "a2__a3", "mention_id_1": "a2", "mention_id_2": "a3", "block_key": "blk.a", "distance": 0.05},
+            {"pair_id": "b1__b2", "mention_id_1": "b1", "mention_id_2": "b2", "block_key": "blk.b", "distance": 0.05},
+            {"pair_id": "b1__b3", "mention_id_1": "b1", "mention_id_2": "b3", "block_key": "blk.b", "distance": 0.05},
+            {"pair_id": "b2__b3", "mention_id_1": "b2", "mention_id_2": "b3", "block_key": "blk.b", "distance": 0.05},
+        ]
+    )
+    cfg = {"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}}
+    seen = {"updates": 0, "params": None}
+
+    class _FakeTracker:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def update(self, n=1):
+            seen["updates"] += int(n)
+
+    class _FakeFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+        def __hash__(self):
+            return id(self)
+
+    class _FakeExecutor:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def submit(self, fn, payload):
+            return _FakeFuture(fn(payload))
+
+    def _fake_loop_progress(*, total, label, enabled, unit, compact_label=None, **kwargs):
+        seen["params"] = {
+            "total": int(total),
+            "label": str(label),
+            "enabled": bool(enabled),
+            "unit": str(unit),
+            "compact_label": compact_label,
+        }
+        return _FakeTracker()
+
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster.loop_progress", _fake_loop_progress)
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster.ProcessPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(
+        "author_name_disambiguation.approaches.nand.cluster.wait",
+        lambda futures, return_when=None: (set(futures), set()),
+    )
+    monkeypatch.setattr("author_name_disambiguation.approaches.nand.cluster.mp.get_context", lambda _mode: None)
+
+    clusters = cluster_blockwise_dbscan(
+        mentions=mentions,
+        pair_scores=pair_scores,
+        cluster_config=cfg,
+        show_progress=True,
+        num_workers=4,
+        sharding_mode="on",
+        min_pairs_per_worker=1,
+        backend="sklearn_cpu",
+    )
+
+    assert len(clusters) == len(mentions)
+    assert seen["params"] == {
+        "total": 2,
+        "label": "Cluster blocks",
+        "enabled": True,
+        "unit": "block",
+        "compact_label": "Clustering",
+    }
+    assert seen["updates"] == 2
+
+
 def test_cluster_blockwise_dbscan_two_point_fast_path_matches_dbscan():
     mentions = pd.DataFrame(
         [

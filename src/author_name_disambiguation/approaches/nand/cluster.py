@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from sklearn.cluster import DBSCAN
 
-from author_name_disambiguation.common.cli_ui import iter_progress
+from author_name_disambiguation.common.cli_ui import iter_progress, loop_progress
 from author_name_disambiguation.common.cpu_runtime import (
     cap_workers_by_ram,
     detect_cpu_limit,
@@ -956,77 +956,89 @@ def cluster_blockwise_dbscan(
             sanitize_rows: list[dict[str, int]] = []
             timing_rows = []
 
-            if oversize_entries:
-                seq_rows, seq_sanitize, seq_timing_rows = _cluster_entries_sequential(
-                    entries=oversize_entries,
-                    eps=eps,
-                    min_samples=min_samples,
-                    metric=metric,
-                    constraints=constraints,
-                    backend="sklearn_cpu",
-                    show_progress=False,
-                )
-                rows.extend(seq_rows)
-                sanitize_rows.append(seq_sanitize)
-                timing_rows.extend(seq_timing_rows)
+            with loop_progress(
+                total=len(entries),
+                label="Cluster blocks",
+                enabled=show_progress,
+                unit="block",
+                compact_label="Clustering",
+            ) as cluster_progress:
+                if oversize_entries:
+                    seq_rows, seq_sanitize, seq_timing_rows = _cluster_entries_sequential(
+                        entries=oversize_entries,
+                        eps=eps,
+                        min_samples=min_samples,
+                        metric=metric,
+                        constraints=constraints,
+                        backend="sklearn_cpu",
+                        show_progress=False,
+                    )
+                    rows.extend(seq_rows)
+                    sanitize_rows.append(seq_sanitize)
+                    timing_rows.extend(seq_timing_rows)
+                    cluster_progress.update(len(seq_timing_rows))
 
-            if parallel_entries:
-                # Largest matrices first to improve tail latency and make memory pressure explicit.
-                pending = sorted(parallel_entries, key=lambda e: (-int(e["matrix_bytes"]), str(e["block_key"])))
+                if parallel_entries:
+                    # Largest matrices first to improve tail latency and make memory pressure explicit.
+                    pending = sorted(parallel_entries, key=lambda e: (-int(e["matrix_bytes"]), str(e["block_key"])))
 
-                inflight: dict[Any, int] = {}
-                ctx = mp.get_context("spawn")
-                with ProcessPoolExecutor(max_workers=int(min(workers_effective, len(parallel_entries))), mp_context=ctx) as pool:
-                    while pending or inflight:
-                        submitted = False
-                        while pending and len(inflight) < int(workers_effective):
-                            candidate = pending[0]
-                            cand_bytes = int(candidate["matrix_bytes"])
-                            inflight_bytes = int(sum(inflight.values()))
-                            if (
-                                ram_budget_bytes is not None
-                                and len(inflight) > 0
-                                and inflight_bytes + cand_bytes > int(ram_budget_bytes)
-                            ):
-                                break
-                            pending.pop(0)
-                            payload = {
-                                "block_key": candidate["block_key"],
-                                "block_mentions": candidate["mentions"],
-                                "block_scores": candidate["scores"],
-                                "eps": float(candidate.get("effective_eps", eps)),
-                                "min_samples": int(min_samples),
-                                "metric": str(metric),
-                                "constraints": dict(constraints or {}),
-                                "matrix_bytes": int(cand_bytes),
-                            }
-                            fut = pool.submit(_cluster_worker, payload)
-                            inflight[fut] = int(cand_bytes)
-                            submitted = True
+                    inflight: dict[Any, int] = {}
+                    ctx = mp.get_context("spawn")
+                    with ProcessPoolExecutor(
+                        max_workers=int(min(workers_effective, len(parallel_entries))),
+                        mp_context=ctx,
+                    ) as pool:
+                        while pending or inflight:
+                            submitted = False
+                            while pending and len(inflight) < int(workers_effective):
+                                candidate = pending[0]
+                                cand_bytes = int(candidate["matrix_bytes"])
+                                inflight_bytes = int(sum(inflight.values()))
+                                if (
+                                    ram_budget_bytes is not None
+                                    and len(inflight) > 0
+                                    and inflight_bytes + cand_bytes > int(ram_budget_bytes)
+                                ):
+                                    break
+                                pending.pop(0)
+                                payload = {
+                                    "block_key": candidate["block_key"],
+                                    "block_mentions": candidate["mentions"],
+                                    "block_scores": candidate["scores"],
+                                    "eps": float(candidate.get("effective_eps", eps)),
+                                    "min_samples": int(min_samples),
+                                    "metric": str(metric),
+                                    "constraints": dict(constraints or {}),
+                                    "matrix_bytes": int(cand_bytes),
+                                }
+                                fut = pool.submit(_cluster_worker, payload)
+                                inflight[fut] = int(cand_bytes)
+                                submitted = True
 
-                        if not inflight and pending and not submitted:
-                            candidate = pending.pop(0)
-                            payload = {
-                                "block_key": candidate["block_key"],
-                                "block_mentions": candidate["mentions"],
-                                "block_scores": candidate["scores"],
-                                "eps": float(candidate.get("effective_eps", eps)),
-                                "min_samples": int(min_samples),
-                                "metric": str(metric),
-                                "constraints": dict(constraints or {}),
-                                "matrix_bytes": int(candidate["matrix_bytes"]),
-                            }
-                            fut = pool.submit(_cluster_worker, payload)
-                            inflight[fut] = int(candidate["matrix_bytes"])
+                            if not inflight and pending and not submitted:
+                                candidate = pending.pop(0)
+                                payload = {
+                                    "block_key": candidate["block_key"],
+                                    "block_mentions": candidate["mentions"],
+                                    "block_scores": candidate["scores"],
+                                    "eps": float(candidate.get("effective_eps", eps)),
+                                    "min_samples": int(min_samples),
+                                    "metric": str(metric),
+                                    "constraints": dict(constraints or {}),
+                                    "matrix_bytes": int(candidate["matrix_bytes"]),
+                                }
+                                fut = pool.submit(_cluster_worker, payload)
+                                inflight[fut] = int(candidate["matrix_bytes"])
 
-                        if inflight:
-                            done, _ = wait(set(inflight.keys()), return_when=FIRST_COMPLETED)
-                            for fut in done:
-                                inflight.pop(fut, None)
-                                result = dict(fut.result())
-                                rows.extend(result.get("rows", []))
-                                sanitize_rows.append(dict(result.get("sanitize", {})))
-                                timing_rows.append(dict(result.get("timing", {})))
+                            if inflight:
+                                done, _ = wait(set(inflight.keys()), return_when=FIRST_COMPLETED)
+                                for fut in done:
+                                    inflight.pop(fut, None)
+                                    result = dict(fut.result())
+                                    rows.extend(result.get("rows", []))
+                                    sanitize_rows.append(dict(result.get("sanitize", {})))
+                                    timing_rows.append(dict(result.get("timing", {})))
+                                    cluster_progress.update(1)
 
             sanitize_totals = _aggregate_sanitize_totals(sanitize_rows)
 

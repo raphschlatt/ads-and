@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from author_name_disambiguation.defaults import resolve_fixed_model_bundle_path
+from author_name_disambiguation.progress import ProgressHandler
 from author_name_disambiguation.source_inference import run_source_inference
 
 
@@ -35,6 +36,7 @@ class InferSourcesRequest:
     cluster_backend: ClusterBackend | None = None
     force: bool = False
     progress: bool = True
+    progress_handler: ProgressHandler | None = None
 
 
 @dataclass(slots=True)
@@ -90,6 +92,7 @@ def _build_infer_request(
             cluster_backend=request.cluster_backend,
             force=request.force,
             progress=request.progress,
+            progress_handler=request.progress_handler,
         )
     return request
 

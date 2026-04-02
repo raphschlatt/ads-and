@@ -10,6 +10,7 @@ import yaml
 from author_name_disambiguation import cli
 from author_name_disambiguation import source_inference
 from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
+from author_name_disambiguation.progress import emit_stage_progress
 
 
 def _write_yaml(path: Path, payload: dict) -> Path:
@@ -101,6 +102,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
             arr = np.load(path)
+            emit_stage_progress(current=len(mentions), total=len(mentions), unit="name")
             meta = {
                 "cache_hit": True,
                 "generation_mode": "cache",
@@ -124,6 +126,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 50), dtype=np.float32)
         np.save(path, arr)
+        emit_stage_progress(current=len(mentions), total=len(mentions), unit="name")
         meta = {
             "cache_hit": False,
             "generation_mode": "chars2vec",
@@ -153,6 +156,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
             arr = np.load(path)
+            emit_stage_progress(current=len(mentions), total=len(mentions), unit="text")
             meta = {
                 "cache_hit": True,
                 "generation_mode": "cache",
@@ -185,6 +189,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 768), dtype=np.float32)
         np.save(path, arr)
+        emit_stage_progress(current=len(mentions), total=len(mentions), unit="text")
         meta = {
             "cache_hit": False,
             "generation_mode": "model_only",
@@ -275,6 +280,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 }
             )
         out = pd.DataFrame(rows)
+        emit_stage_progress(current=len(out), total=max(1, len(out)), unit="pair")
         meta = {
             "same_publication_pairs_skipped": 0,
             "pairs_written": int(len(out)),
@@ -317,6 +323,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
         if output_path is not None:
             Path(output_path).parent.mkdir(parents=True, exist_ok=True)
             out.to_parquet(output_path, index=False)
+        emit_stage_progress(current=int(out["block_key"].nunique()), total=int(out["block_key"].nunique()), unit="block")
         if bool(_kwargs.get("return_meta")):
             return out, {
                 "build_entries_seconds": 0.01,
@@ -473,6 +480,79 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert seen["cluster_kwargs"]["sharding_mode"] == "auto"
     assert seen["cluster_kwargs"]["min_pairs_per_worker"] == 1_000_000
     assert int(seen["cluster_kwargs"]["ram_budget_bytes"]) > 0
+
+
+def test_run_infer_sources_emits_structured_progress_events(monkeypatch, tmp_path: Path, capsys):
+    publications_path, references_path = _write_dataset(tmp_path, with_references=True)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
+        lambda _device: {
+            "requested_device": "auto",
+            "resolved_device": "cpu",
+            "gpu_name": None,
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "fallback_reason": "torch_cuda_unavailable",
+            "cuda_probe_error": None,
+        },
+    )
+
+    events = []
+    result = run_infer_sources(
+        InferSourcesRequest(
+            publications_path=publications_path,
+            references_path=references_path,
+            output_root=tmp_path / "out_events",
+            dataset_id="my_ads_events_2026",
+            model_bundle=bundle_dir,
+            progress=False,
+            progress_handler=events.append,
+        )
+    )
+    captured = capsys.readouterr()
+
+    assert result.summary_path == tmp_path / "out_events" / "summary.json"
+    assert captured.err == ""
+
+    event_kinds = [event.kind for event in events]
+    assert event_kinds[0] == "stage_start"
+    assert event_kinds[-1] == "run_done"
+
+    started_stage_keys = [event.stage_key for event in events if event.kind == "stage_start"]
+    assert started_stage_keys == [
+        "bootstrap",
+        "load_inputs",
+        "preflight",
+        "name_embeddings",
+        "text_embeddings",
+        "pair_inference",
+        "clustering",
+        "export",
+    ]
+
+    progress_stage_keys = {event.stage_key for event in events if event.kind == "stage_progress"}
+    assert progress_stage_keys == {"name_embeddings", "text_embeddings", "pair_inference", "clustering"}
+
+    pair_progress_units = {event.unit for event in events if event.kind == "stage_progress" and event.stage_key == "pair_inference"}
+    assert pair_progress_units == {"pair"}
+
+    assert not any(
+        event.kind == "stage_progress"
+        and event.stage_key == "pair_inference"
+        and (event.payload or {}).get("progress_label") in {"Encode mentions", "Score batches"}
+        for event in events
+    )
+
+    run_done_event = events[-1]
+    assert run_done_event.kind == "run_done"
+    assert run_done_event.payload["go"] is True
+    assert run_done_event.payload["summary_path"].endswith("summary.json")
+    assert run_done_event.payload["counts"]["publications"] == 2
+    assert run_done_event.payload["counts"]["references"] == 1
+    assert run_done_event.payload["counts"]["mentions"] == 5
 
 
 def test_cli_run_infer_sources_passes_specter_overrides(monkeypatch, tmp_path: Path):
