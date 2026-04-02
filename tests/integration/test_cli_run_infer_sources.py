@@ -456,7 +456,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "pair_count=" in captured.err
     assert "pairs_est=" in captured.err
     assert "workers=4 | sharding=yes | score_count=" in captured.err
-    assert "backend=auto | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
+    assert "backend=sklearn_cpu | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
     assert "backend=sklearn_cpu | workers=4 | sharding=yes" in captured.err
     assert "START Export and reports" in captured.err
     assert "Run complete | run_id=" in captured.err

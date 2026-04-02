@@ -897,6 +897,7 @@ def _resolve_stage_eps(
                     cluster_config=cfg,
                     output_path=None,
                     show_progress=False,
+                    backend="sklearn_cpu",
                 )
                 row.update(_cluster_pairwise_metrics(pairs, clusters))
             except Exception as exc:
@@ -2218,6 +2219,7 @@ def cmd_run_cluster_test_report(args):
                     cluster_config=eval_cfg,
                     output_path=None,
                     show_progress=False,
+                    backend="sklearn_cpu",
                 )
                 metrics = _cluster_pairwise_metrics(test_pairs, clusters)
                 if metrics.get("f1") is None:

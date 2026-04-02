@@ -61,7 +61,7 @@ Rules:
 - Do not call derived parquet caches "the raw LSPO data".
 - Do not modify this file during experiments.
 
-### 2. Trained NAND Model
+### 2. Fixed Trained NAND Model
 
 Meaning:
 - The already trained pair-scoring model and its checkpoints/bundle.
@@ -76,12 +76,20 @@ Rules:
 - Do not say "we train LSPO" when you mean "we run LSPO evaluation".
 - `run-train-stage` is only for a real model-training experiment that intentionally changes weights, training config, or training-time representation semantics.
 
-### 3. LSPO Gate Run
+Use this term:
+- "Fixed Trained NAND Model"
+
+Do not shorten it to:
+- "the model"
+- "gold model"
+
+### 3. LSPO Quality Run
 
 Meaning:
 - The first gate for an inference-only experiment.
 - This is an LSPO evaluation run using the existing trained NAND model.
 - It checks whether a code change in inference behavior causes unacceptable deviation on the LSPO benchmark.
+- It is the run that reports LSPO quality metrics such as F1 / precision / recall.
 
 Canonical command:
 - `author-name-disambiguation run-cluster-test-report`
@@ -98,14 +106,15 @@ What it does not do:
 - It is not an ADS full run.
 
 Use this term:
-- "LSPO gate run"
+- "LSPO Quality Run"
 
 Do not use these terms for this step:
 - "training candidate"
 - "LSPO train candidate"
 - "baseline training rerun"
+- "Goldlauf"
 
-### 4. ADS Full Candidate Run
+### 4. ADS Full Inference Run
 
 Meaning:
 - The second gate for an inference-only experiment.
@@ -126,13 +135,17 @@ What it does not do:
 - It does not retrain the NAND model.
 
 Use this term:
-- "ADS full candidate run"
+- "ADS Full Inference Run"
+
+Do not call this:
+- "Goldlauf"
+- "training run"
 
 ## There Are Two Different Baselines
 
 This repo has two different baseline concepts. Always name which one you mean.
 
-### A. Trained Model Baseline
+### A. Fixed Model Baseline
 
 Meaning:
 - The fixed trained NAND model run used for LSPO gate evaluation and for exported bundles.
@@ -141,7 +154,7 @@ Example:
 - `full_20260218T111506Z_cli02681429`
 
 Use this phrase:
-- "trained model baseline"
+- "Fixed Model Baseline"
 
 ### B. ADS Inference Baseline
 
@@ -158,7 +171,7 @@ Never just say:
 - "baseline"
 
 Always say:
-- "trained model baseline"
+- "Fixed Model Baseline"
 - or "ADS inference baseline"
 
 ## Experiment Types
@@ -172,9 +185,9 @@ Examples:
 - pair-scoring runtime changes
 
 Correct workflow:
-1. Keep the Trained NAND Model fixed.
-2. Run an LSPO Gate Run with that fixed model.
-3. If LSPO gate is acceptable, run an ADS Full Candidate Run.
+1. Keep the Fixed Trained NAND Model fixed.
+2. Run an LSPO Quality Run with that fixed model.
+3. If LSPO quality is acceptable, run an ADS Full Inference Run.
 4. Compare against the ADS inference baseline.
 5. Keep the code change only if the ADS full candidate is worth keeping.
 
@@ -202,10 +215,10 @@ Important:
 Use these names exactly:
 
 - "Raw LSPO Source"
-- "Trained NAND Model"
-- "LSPO Gate Run"
-- "ADS Full Candidate Run"
-- "trained model baseline"
+- "Fixed Trained NAND Model"
+- "LSPO Quality Run"
+- "ADS Full Inference Run"
+- "Fixed Model Baseline"
 - "ADS inference baseline"
 - "inference-only experiment"
 - "model-training experiment"
@@ -215,7 +228,8 @@ Avoid these ambiguous names:
 - "LSPO train candidate"
 - "baseline run" without qualifier
 - "the model" without saying whether you mean trained weights or inference code path
-- "LSPO testset" when you really mean the LSPO Gate Run
+- "LSPO testset" when you really mean the LSPO Quality Run
+- "Goldlauf"
 
 ## What The Current chars2vec Experiment Is
 
@@ -229,14 +243,14 @@ What is being changed:
 - the chars2vec inference execution path and batch behavior
 
 What must stay fixed:
-- the Trained NAND Model
+- the Fixed Trained NAND Model
 - the Raw LSPO Source
 
 Therefore the correct next step is:
-- run an LSPO Gate Run with the existing trained model baseline
+- run an LSPO Quality Run with the existing Fixed Model Baseline
 
 The correct first command is conceptually:
-- `author-name-disambiguation run-cluster-test-report --model-run-id <trained model baseline> ... --report-tag perf_pkg2_chars_v1`
+- `author-name-disambiguation run-cluster-test-report --model-run-id <Fixed Model Baseline> ... --report-tag perf_pkg2_chars_v1`
 
 The wrong command for this experiment is:
 - `author-name-disambiguation run-train-stage ...`
@@ -245,14 +259,14 @@ The wrong command for this experiment is:
 
 If an agent starts the wrong type of run:
 - stop it immediately
-- delete only that candidate run's own artifacts
-- do not touch the trained model baseline
+- delete only that mistaken run's own artifacts
+- do not touch the Fixed Model Baseline
 - do not touch the ADS inference baseline
 - do not touch shared caches unless they belong only to that mistaken candidate run
 
 ## One-Sentence Mental Model
 
-For inference-only experiments, we keep the Trained NAND Model fixed, use an LSPO Gate Run as Gate 1, then use an ADS Full Candidate Run as Gate 2, and only keep the code change if Gate 1 is acceptable and Gate 2 beats the ADS inference baseline.
+For inference-only experiments, we keep the Fixed Trained NAND Model fixed, use an LSPO Quality Run as Gate 1, then use an ADS Full Inference Run as Gate 2, and only keep the code change if Gate 1 is acceptable and Gate 2 beats the ADS inference baseline.
 
 ## Experiment Memory
 
@@ -276,16 +290,16 @@ Upstream chars2vec behavior to treat as the historical reference path:
 
 Implication for this repo:
 - A chars2vec batch-size change is not automatically a "runtime-only" change.
-- In this repo, changing the effective chars2vec batch size can change embeddings numerically and can therefore move LSPO Gate Run metrics.
+- In this repo, changing the effective chars2vec batch size can change embeddings numerically and can therefore move LSPO Quality Run metrics.
 
 Current project lesson from `perf_pkg2_chars_v1`:
 - The large-batch chars2vec path was much faster in microbenchmarks.
-- It did not pass the LSPO Gate Run under the current no-drift policy.
+- It did not pass the LSPO Quality Run under the current no-drift policy.
 - Therefore large-batch chars2vec must not be treated as promoted behavior unless we explicitly change policy or prove equivalence.
 
 ## LSPO Control-Run Reproducibility Rule
 
-When using an `LSPO Gate Run` as a control run against a historical report:
+When using an `LSPO Quality Run` as a control run against a historical report:
 - check `subset_cache_key_computed`
 - check `subset_cache_key_expected`
 - check `subset_verification_mode`

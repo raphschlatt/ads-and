@@ -10,4 +10,4 @@ infer_overrides:
   cpu_workers: auto
   cpu_min_pairs_per_worker: 1000000
   cpu_target_ram_fraction: 0.6
-  cluster_backend: auto
+  cluster_backend: sklearn_cpu

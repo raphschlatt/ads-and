@@ -713,7 +713,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     cpu_target_ram_fraction = float(infer_overrides.get("cpu_target_ram_fraction", 0.6))
     cpu_ram_budget_bytes = compute_ram_budget_bytes(target_fraction=cpu_target_ram_fraction)
     cluster_backend = (
-        str(infer_overrides.get("cluster_backend", "auto"))
+        str(infer_overrides.get("cluster_backend", "sklearn_cpu"))
         if request.cluster_backend is None
         else str(request.cluster_backend)
     )

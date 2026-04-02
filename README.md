@@ -137,6 +137,8 @@ author-name-disambiguation run-infer-sources \
   --runtime-mode gpu
 ```
 
+The package baseline uses GPU for SPECTER/pair scoring and CPU for clustering. You only need `--cluster-backend` if you intentionally want to override that default.
+
 Run CPU-first inference with the public auto mode:
 
 ```bash
@@ -146,8 +148,7 @@ author-name-disambiguation run-infer-sources \
   --output-root artifacts/exports/ads_prod_current_cpu \
   --dataset-id ads_prod_current \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --runtime-mode cpu \
-  --cluster-backend sklearn_cpu
+  --runtime-mode cpu
 ```
 
 Run direct HF-backed inference in one package call:
@@ -160,8 +161,7 @@ author-name-disambiguation run-infer-sources \
   --output-root artifacts/exports/ads_prod_current_hf \
   --dataset-id ads_prod_current \
   --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --runtime-mode hf \
-  --cluster-backend sklearn_cpu
+  --runtime-mode hf
 ```
 
 `hf` creates a dedicated paid Hugging Face endpoint on demand, uses it for remote SPECTER embeddings, and deletes it at the end of the run. It requires a token with `inference.endpoints.write`.
