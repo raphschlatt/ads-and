@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import shutil
 import uuid
 import warnings
@@ -22,7 +21,7 @@ from author_name_disambiguation.approaches.nand.build_pairs import assign_lspo_s
 from author_name_disambiguation.approaches.nand.cluster import cluster_blockwise_dbscan, resolve_dbscan_eps
 from author_name_disambiguation.approaches.nand.infer_pairs import score_pairs_with_checkpoint
 from author_name_disambiguation.approaches.nand.train import train_nand_across_seeds
-from author_name_disambiguation.common.cli_ui import CliUI
+from author_name_disambiguation.common.cli_ui import CliUI, get_active_ui
 from author_name_disambiguation.common.cache_ops import (
     hash_checkpoint_model_state,
     hash_file,
@@ -42,7 +41,6 @@ from author_name_disambiguation.common.pipeline_reports import (
     build_pairs_qc,
     build_train_stage_metrics,
     build_subset_summary,
-    default_run_id,
     load_json,
     write_compare_infer_to_baseline,
     write_compare_train_to_baseline,
@@ -65,13 +63,15 @@ from author_name_disambiguation.defaults import DEFAULT_ARTIFACTS_ROOT, DEFAULT_
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
+from author_name_disambiguation.workflow_helpers import (
+    default_train_run_id as _cli_run_id,
+    resolve_report_paths as _resolve_report_paths,
+    sanitize_report_tag as _sanitize_report_tag,
+)
 
 SUBSET_CACHE_VERSION = "v3"
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 _CLUSTER_OVERRIDE_EPS_FIELDS = ("eps", "selected_eps", "eps_mode")
-_REPORT_TAG_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
-
-
 def _resolved_path(value: str | Path | None) -> Path | None:
     if value is None:
         return None
@@ -108,10 +108,6 @@ def _build_public_workspace_paths(args) -> dict[str, Any]:
         raw_lspo_parquet=getattr(args, "raw_lspo_parquet", None),
         raw_lspo_h5=getattr(args, "raw_lspo_h5", None),
     )
-
-
-def _cli_run_id(stage: str) -> str:
-    return default_run_id(stage, tag="cli")
 
 
 def _configure_library_noise(quiet_libraries: bool) -> None:
@@ -642,29 +638,6 @@ def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str
     return merged
 
 
-def _sanitize_report_tag(tag: str | None) -> str | None:
-    if tag is None:
-        return None
-    value = str(tag).strip()
-    if value == "":
-        raise ValueError("report_tag must be non-empty when provided.")
-    if _REPORT_TAG_PATTERN.fullmatch(value) is None:
-        raise ValueError(
-            "Invalid report_tag. Allowed characters are: a-z, A-Z, 0-9, '.', '_' and '-'."
-        )
-    return value
-
-
-def _resolve_report_paths(metrics_dir: Path, report_tag: str | None) -> dict[str, Path]:
-    suffix = "" if report_tag is None else f"__{report_tag}"
-    return {
-        "json": metrics_dir / f"06_clustering_test_report{suffix}.json",
-        "summary_csv": metrics_dir / f"06_clustering_test_summary{suffix}.csv",
-        "per_seed_csv": metrics_dir / f"06_clustering_test_per_seed{suffix}.csv",
-        "markdown": metrics_dir / f"06_clustering_test_report{suffix}.md",
-    }
-
-
 def _apply_cluster_config_override(
     *,
     base_cluster_config: dict[str, Any],
@@ -1089,7 +1062,12 @@ def _validate_cached_lspo_subset(
 
 
 def cmd_run_train_stage(args):
-    ui = CliUI(total_steps=9, progress=args.progress)
+    existing_ui = get_active_ui()
+    created_ui = None
+    ui = existing_ui
+    if ui is None:
+        created_ui = CliUI(total_steps=9, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
+        ui = created_ui
 
     try:
         ui.start("Initialize run context")
@@ -1728,11 +1706,152 @@ def cmd_run_train_stage(args):
         ui.fail(str(exc))
         raise
     finally:
-        ui.close()
+        if created_ui is not None:
+            ui.close()
+
+
+def _format_human_count(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{int(value):,}"
+    except Exception:
+        return str(value)
+
+
+def _format_human_seconds(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.1f}s"
+    except Exception:
+        return str(value)
+
+
+def _emit_simple_output(*, payload: dict[str, Any], human_summary: str, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2))
+        return
+    print(human_summary)
+
+
+def _build_infer_human_summary(summary: dict[str, Any]) -> str:
+    counts = dict(summary.get("counts", {}) or {})
+    stage_seconds = dict(summary.get("stage_seconds", {}) or {})
+    warnings_list = list(summary.get("warnings", []) or [])
+    outputs = dict(summary.get("outputs", {}) or {})
+    runtime_bits = [
+        f"mode={summary.get('runtime_mode', 'n/a')}",
+        f"device={summary.get('resolved_device', 'n/a')}",
+        f"backend={summary.get('runtime_backend', 'n/a')}",
+        f"cluster={summary.get('clustering_backend', 'n/a')}",
+    ]
+    counts_bits = [
+        f"publications={_format_human_count(counts.get('publications'))}",
+        f"references={_format_human_count(counts.get('references'))}",
+        f"mentions={_format_human_count(counts.get('mentions'))}",
+        f"clusters={_format_human_count(counts.get('clusters'))}",
+        f"authors_mapped={_format_human_count(counts.get('authors_mapped'))}/{_format_human_count(counts.get('authors_total'))}",
+    ]
+    stage_bits = [
+        f"load={_format_human_seconds(stage_seconds.get('load_inputs'))}",
+        f"preflight={_format_human_seconds(stage_seconds.get('preflight'))}",
+        f"names={_format_human_seconds(stage_seconds.get('name_embeddings'))}",
+        f"texts={_format_human_seconds(stage_seconds.get('text_embeddings'))}",
+        f"pairs={_format_human_seconds(stage_seconds.get('pair_inference'))}",
+        f"cluster={_format_human_seconds(stage_seconds.get('clustering'))}",
+        f"export={_format_human_seconds(stage_seconds.get('export'))}",
+        f"total={_format_human_seconds(stage_seconds.get('total'))}",
+    ]
+    lines = [
+        "ADS Full Inference Run complete",
+        f"GO: {summary.get('go')} | " + " | ".join(runtime_bits),
+        "Counts: " + " | ".join(counts_bits),
+        "Stage times: " + " | ".join(stage_bits),
+        f"Output root: {summary.get('output_root', 'n/a')}",
+        f"Publications: {outputs.get('publications_disambiguated_path', 'n/a')}",
+    ]
+    references_path = outputs.get("references_disambiguated_path")
+    if references_path:
+        lines.append(f"References: {references_path}")
+    lines.extend(
+        [
+            f"Assignments: {outputs.get('source_author_assignments_path', 'n/a')}",
+            f"Summary: {summary.get('summary_path', 'n/a')}",
+        ]
+    )
+    if warnings_list:
+        lines.append("Warnings: " + ", ".join(str(w) for w in warnings_list))
+    return "\n".join(lines)
+
+
+def _build_quality_payload(result) -> dict[str, Any]:
+    report_payload = load_json(result.report_json_path)
+    variants = dict(report_payload.get("variants", {}) or {})
+    with_constraints = dict(variants.get("dbscan_with_constraints", {}) or {})
+    without_constraints = dict(variants.get("dbscan_no_constraints", {}) or {})
+    delta = dict(report_payload.get("delta_with_constraints_minus_no_constraints", {}) or {})
+    return {
+        "model_run_id": result.model_run_id,
+        "metrics_dir": str(result.metrics_dir),
+        "report_json_path": str(result.report_json_path),
+        "summary_csv_path": str(result.summary_csv_path),
+        "per_seed_csv_path": str(result.per_seed_csv_path),
+        "report_markdown_path": str(result.report_markdown_path),
+        "with_constraints_f1_mean": with_constraints.get("f1_mean"),
+        "without_constraints_f1_mean": without_constraints.get("f1_mean"),
+        "delta_f1": delta.get("f1"),
+    }
+
+
+def _build_quality_human_summary(payload: dict[str, Any]) -> str:
+    lines = [
+        "LSPO Quality Run complete",
+        f"Model: {payload.get('model_run_id', 'n/a')}",
+        f"F1 with constraints: {payload.get('with_constraints_f1_mean', 'n/a')}",
+        f"F1 without constraints: {payload.get('without_constraints_f1_mean', 'n/a')}",
+        f"Delta F1: {payload.get('delta_f1', 'n/a')}",
+        f"Report JSON: {payload.get('report_json_path', 'n/a')}",
+        f"Summary CSV: {payload.get('summary_csv_path', 'n/a')}",
+    ]
+    return "\n".join(lines)
+
+
+def _build_train_payload(result) -> dict[str, Any]:
+    stage_metrics = load_json(result.stage_metrics_path)
+    go_payload = load_json(result.go_no_go_path)
+    return {
+        "run_id": result.run_id,
+        "metrics_dir": str(result.metrics_dir),
+        "train_manifest_path": str(result.train_manifest_path),
+        "stage_metrics_path": str(result.stage_metrics_path),
+        "go_no_go_path": str(result.go_no_go_path),
+        "cluster_config_used_path": str(result.cluster_config_used_path),
+        "go": go_payload.get("go"),
+        "threshold": stage_metrics.get("threshold"),
+        "lspo_pairwise_f1": stage_metrics.get("lspo_pairwise_f1"),
+        "warnings": list(go_payload.get("warnings", []) or []),
+    }
+
+
+def _build_train_human_summary(payload: dict[str, Any]) -> str:
+    lines = [
+        "LSPO Training Run complete",
+        f"Run ID: {payload.get('run_id', 'n/a')}",
+        f"GO: {payload.get('go')}",
+        f"LSPO pairwise F1: {payload.get('lspo_pairwise_f1', 'n/a')}",
+        f"Threshold: {payload.get('threshold', 'n/a')}",
+        f"Metrics dir: {payload.get('metrics_dir', 'n/a')}",
+        f"Stage metrics: {payload.get('stage_metrics_path', 'n/a')}",
+    ]
+    warnings_list = list(payload.get("warnings", []) or [])
+    if warnings_list:
+        lines.append("Warnings: " + ", ".join(str(w) for w in warnings_list))
+    return "\n".join(lines)
 
 
 def cmd_run_infer_sources(args):
-    ui = CliUI(total_steps=8, progress=args.progress)
+    ui = CliUI(total_steps=8, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
         from author_name_disambiguation.infer_sources import run_infer_sources
 
@@ -1780,7 +1899,7 @@ def cmd_run_infer_sources(args):
 
 
 def cmd_infer(args):
-    ui = CliUI(total_steps=8, progress=args.progress)
+    ui = CliUI(total_steps=8, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
         from author_name_disambiguation.api import disambiguate_sources
 
@@ -1794,23 +1913,16 @@ def cmd_infer(args):
             model_bundle=args.model_bundle,
             infer_stage=args.infer_stage,
             progress=bool(args.progress),
+            progress_style=getattr(args, "progress_style", "compact"),
         )
-        payload = {
-            "run_id": result.run_id,
-            "go": result.go,
-            "output_root": str(result.output_root),
-            "publications_disambiguated_path": str(result.publications_disambiguated_path),
-            "references_disambiguated_path": (
-                None if result.references_disambiguated_path is None else str(result.references_disambiguated_path)
-            ),
-            "author_entities_path": str(result.author_entities_path),
-            "source_author_assignments_path": str(result.source_author_assignments_path),
-            "mention_clusters_path": str(result.mention_clusters_path),
-            "stage_metrics_path": str(result.stage_metrics_path),
-            "go_no_go_path": str(result.go_no_go_path),
-            "summary_path": None if result.summary_path is None else str(result.summary_path),
-        }
-        print(json.dumps(payload, indent=2))
+        if result.summary_path is None:
+            raise RuntimeError("infer completed without summary_path.")
+        payload = load_json(result.summary_path)
+        _emit_simple_output(
+            payload=payload,
+            human_summary=_build_infer_human_summary(payload),
+            json_output=bool(getattr(args, "json_output", False)),
+        )
         return payload
     except Exception as exc:
         ui.fail(str(exc))
@@ -1820,7 +1932,7 @@ def cmd_infer(args):
 
 
 def cmd_quality_lspo(args):
-    ui = CliUI(total_steps=6, progress=args.progress)
+    ui = CliUI(total_steps=6, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
         from author_name_disambiguation.api import evaluate_lspo_quality
 
@@ -1838,17 +1950,15 @@ def cmd_quality_lspo(args):
             score_batch_size=args.score_batch_size,
             force=bool(args.force),
             progress=bool(args.progress),
+            progress_style=getattr(args, "progress_style", "compact"),
             quiet_libs=bool(args.quiet_libs),
         )
-        payload = {
-            "model_run_id": result.model_run_id,
-            "metrics_dir": str(result.metrics_dir),
-            "report_json_path": str(result.report_json_path),
-            "summary_csv_path": str(result.summary_csv_path),
-            "per_seed_csv_path": str(result.per_seed_csv_path),
-            "report_markdown_path": str(result.report_markdown_path),
-        }
-        print(json.dumps(payload, indent=2))
+        payload = _build_quality_payload(result)
+        _emit_simple_output(
+            payload=payload,
+            human_summary=_build_quality_human_summary(payload),
+            json_output=bool(getattr(args, "json_output", False)),
+        )
         return payload
     except Exception as exc:
         ui.fail(str(exc))
@@ -1858,7 +1968,7 @@ def cmd_quality_lspo(args):
 
 
 def cmd_train_lspo(args):
-    ui = CliUI(total_steps=9, progress=args.progress)
+    ui = CliUI(total_steps=9, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
         from author_name_disambiguation.api import train_lspo_model
 
@@ -1873,17 +1983,15 @@ def cmd_train_lspo(args):
             precision_mode=args.precision_mode,
             force=bool(args.force),
             progress=bool(args.progress),
+            progress_style=getattr(args, "progress_style", "compact"),
             quiet_libs=bool(args.quiet_libs),
         )
-        payload = {
-            "run_id": result.run_id,
-            "metrics_dir": str(result.metrics_dir),
-            "train_manifest_path": str(result.train_manifest_path),
-            "stage_metrics_path": str(result.stage_metrics_path),
-            "go_no_go_path": str(result.go_no_go_path),
-            "cluster_config_used_path": str(result.cluster_config_used_path),
-        }
-        print(json.dumps(payload, indent=2))
+        payload = _build_train_payload(result)
+        _emit_simple_output(
+            payload=payload,
+            human_summary=_build_train_human_summary(payload),
+            json_output=bool(getattr(args, "json_output", False)),
+        )
         return payload
     except Exception as exc:
         ui.fail(str(exc))
@@ -1893,7 +2001,7 @@ def cmd_train_lspo(args):
 
 
 def cmd_precompute_source_embeddings(args):
-    ui = CliUI(total_steps=1, progress=args.progress)
+    ui = CliUI(total_steps=1, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
         from author_name_disambiguation.precompute_source_embeddings import (
             PrecomputeSourceEmbeddingsRequest,
@@ -1934,7 +2042,7 @@ def cmd_precompute_source_embeddings(args):
 
 def cmd_compare_infer_baseline(args):
     payload = None
-    ui = CliUI(total_steps=1, progress=args.progress)
+    ui = CliUI(total_steps=1, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
         ui.start("Compare infer run to baseline")
         baseline_ref = str(args.baseline_run_id)
@@ -1968,7 +2076,12 @@ def cmd_compare_infer_baseline(args):
 
 
 def cmd_run_cluster_test_report(args):
-    ui = CliUI(total_steps=6, progress=args.progress)
+    existing_ui = get_active_ui()
+    created_ui = None
+    ui = existing_ui
+    if ui is None:
+        created_ui = CliUI(total_steps=6, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
+        ui = created_ui
     try:
         ui.start("Initialize clustering test report context")
         _configure_library_noise(args.quiet_libs)
@@ -2437,7 +2550,8 @@ def cmd_run_cluster_test_report(args):
         ui.fail(str(exc))
         raise
     finally:
-        ui.close()
+        if created_ui is not None:
+            ui.close()
 
 
 def cmd_export_model_bundle(args):
@@ -2457,9 +2571,15 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--progress", dest="progress", action="store_true")
         sp.add_argument("--no-progress", dest="progress", action="store_false")
         sp.set_defaults(progress=True)
+        sp.add_argument("--verbose-progress", dest="progress_style", action="store_const", const="verbose")
+        sp.set_defaults(progress_style="compact")
         sp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
         sp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
         sp.set_defaults(quiet_libs=True)
+
+    def _add_json_output_arg(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--json", dest="json_output", action="store_true")
+        sp.set_defaults(json_output=False)
 
     def _add_public_workspace_args(
         sp: argparse.ArgumentParser,
@@ -2504,6 +2624,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
+    _add_json_output_arg(sp)
     sp.set_defaults(func=cmd_train_lspo)
 
     sp = sub.add_parser("run-infer-sources")
@@ -2539,6 +2660,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--runtime", choices=["auto", "gpu", "cpu", "hf"], default="auto")
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
+    _add_json_output_arg(sp)
     sp.set_defaults(func=cmd_infer)
 
     sp = sub.add_parser("precompute-source-embeddings")
@@ -2585,6 +2707,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--report-tag", default=None)
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
+    _add_json_output_arg(sp)
     sp.set_defaults(func=cmd_quality_lspo)
 
     sp = sub.add_parser("export-model-bundle")

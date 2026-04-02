@@ -42,6 +42,7 @@ def test_run_train_stage_parser_defaults():
     assert args.raw_lspo_parquet == "/tmp/data/raw/lspo/mock.parquet"
     assert args.raw_lspo_h5 is None
     assert args.progress is True
+    assert args.progress_style == "compact"
     assert args.quiet_libs is True
     assert args.seeds is None
     assert args.device == "auto"
@@ -100,6 +101,7 @@ def test_run_train_stage_parser_overrides():
     assert args.baseline_run_id == "baseline_1"
     assert args.force is True
     assert args.progress is False
+    assert args.progress_style == "compact"
     assert args.quiet_libs is False
 
 
@@ -132,6 +134,7 @@ def test_run_infer_sources_parser_defaults():
     assert args.uid_scope == "dataset"
     assert args.uid_namespace is None
     assert args.progress is True
+    assert args.progress_style == "compact"
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_infer_sources
 
@@ -177,6 +180,7 @@ def test_run_infer_sources_parser_accepts_overrides():
     assert args.cluster_config == "cfg/cluster.yaml"
     assert args.gates_config == "cfg/gates.yaml"
     assert args.progress is False
+    assert args.progress_style == "compact"
     assert args.quiet_libs is False
     assert args.runtime_mode == "hf"
     assert args.precision_mode == "amp_bf16"
@@ -207,7 +211,9 @@ def test_infer_parser_defaults():
     assert args.runtime == "auto"
     assert args.force is False
     assert args.progress is True
+    assert args.progress_style == "compact"
     assert args.quiet_libs is True
+    assert args.json_output is False
     assert args.func is cli.cmd_infer
 
 
@@ -228,7 +234,9 @@ def test_quality_lspo_parser_defaults():
     assert args.report_tag is None
     assert args.force is False
     assert args.progress is True
+    assert args.progress_style == "compact"
     assert args.quiet_libs is True
+    assert args.json_output is False
     assert args.func is cli.cmd_quality_lspo
 
 
@@ -247,8 +255,36 @@ def test_train_lspo_parser_defaults():
     assert args.precision_mode is None
     assert args.force is False
     assert args.progress is True
+    assert args.progress_style == "compact"
     assert args.quiet_libs is True
+    assert args.json_output is False
     assert args.func is cli.cmd_train_lspo
+
+
+def test_simple_commands_accept_verbose_progress_and_json():
+    parser = cli.build_parser()
+
+    infer_args = parser.parse_args(
+        [
+            "infer",
+            "--publications-path",
+            "publications.parquet",
+            "--output-dir",
+            "out",
+            "--verbose-progress",
+            "--json",
+        ]
+    )
+    assert infer_args.progress_style == "verbose"
+    assert infer_args.json_output is True
+
+    quality_args = parser.parse_args(["quality-lspo", "--verbose-progress", "--json"])
+    assert quality_args.progress_style == "verbose"
+    assert quality_args.json_output is True
+
+    train_args = parser.parse_args(["train-lspo", "--verbose-progress", "--json"])
+    assert train_args.progress_style == "verbose"
+    assert train_args.json_output is True
 
 
 def test_export_model_bundle_parser():

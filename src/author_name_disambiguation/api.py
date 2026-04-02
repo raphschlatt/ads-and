@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
-from author_name_disambiguation import cli
+from author_name_disambiguation.common.cli_ui import CliUI, get_active_ui
 from author_name_disambiguation.defaults import (
     DEFAULT_ARTIFACTS_ROOT,
     DEFAULT_DATA_ROOT,
@@ -14,11 +14,17 @@ from author_name_disambiguation.defaults import (
     resolve_fixed_model_bundle_path,
 )
 from author_name_disambiguation.infer_sources import InferSourcesResult, run_infer_sources
+from author_name_disambiguation.workflow_helpers import (
+    default_train_run_id,
+    resolve_report_paths,
+    sanitize_report_tag,
+)
 
 
 UserRuntime = Literal["auto", "gpu", "cpu", "hf"]
 UserInferStage = Literal["full", "incremental", "smoke", "mini", "mid"]
 TrainStage = Literal["smoke", "mini", "mid", "full"]
+ProgressStyle = Literal["compact", "verbose"]
 
 
 @dataclass(slots=True)
@@ -39,6 +45,12 @@ class LspoTrainingResult:
     stage_metrics_path: Path
     go_no_go_path: Path
     cluster_config_used_path: Path
+
+
+def _load_cli_module():
+    from author_name_disambiguation import cli
+
+    return cli
 
 
 def _derive_dataset_id(*, publications_path: str | Path, output_dir: str | Path, dataset_id: str | None) -> str:
@@ -94,6 +106,7 @@ def disambiguate_sources(
     model_bundle: str | Path | None = None,
     infer_stage: UserInferStage = "full",
     progress: bool = True,
+    progress_style: ProgressStyle = "compact",
 ) -> InferSourcesResult:
     resolved_runtime = _resolve_user_runtime(runtime)
     resolved_dataset_id = _derive_dataset_id(
@@ -102,17 +115,24 @@ def disambiguate_sources(
         dataset_id=dataset_id,
     )
     resolved_bundle = resolve_fixed_model_bundle_path() if model_bundle is None else Path(model_bundle).expanduser()
-    return run_infer_sources(
-        publications_path=publications_path,
-        references_path=references_path,
-        output_root=output_dir,
-        dataset_id=resolved_dataset_id,
-        model_bundle=resolved_bundle,
-        infer_stage=infer_stage,
-        runtime_mode=resolved_runtime,
-        force=bool(force),
-        progress=bool(progress),
-    )
+    created_ui = None
+    if get_active_ui() is None:
+        created_ui = CliUI(total_steps=8, progress=bool(progress), progress_style=str(progress_style))
+    try:
+        return run_infer_sources(
+            publications_path=publications_path,
+            references_path=references_path,
+            output_root=output_dir,
+            dataset_id=resolved_dataset_id,
+            model_bundle=resolved_bundle,
+            infer_stage=infer_stage,
+            runtime_mode=resolved_runtime,
+            force=bool(force),
+            progress=bool(progress),
+        )
+    finally:
+        if created_ui is not None:
+            created_ui.close()
 
 
 def evaluate_lspo_quality(
@@ -130,6 +150,7 @@ def evaluate_lspo_quality(
     score_batch_size: int = 8192,
     force: bool = False,
     progress: bool = True,
+    progress_style: ProgressStyle = "compact",
     quiet_libs: bool = True,
 ) -> LspoQualityResult:
     resolved_model_run_id = _derive_model_run_id(model_run_id=model_run_id, model_bundle=model_bundle)
@@ -147,11 +168,12 @@ def evaluate_lspo_quality(
         allow_legacy_lspo_compat=bool(allow_legacy_lspo_compat),
         force=bool(force),
         progress=bool(progress),
+        progress_style=str(progress_style),
         quiet_libs=bool(quiet_libs),
     )
-    cli.cmd_run_cluster_test_report(args)
+    _load_cli_module().cmd_run_cluster_test_report(args)
     metrics_dir = Path(args.artifacts_root).expanduser().resolve() / "metrics" / resolved_model_run_id
-    report_paths = cli._resolve_report_paths(metrics_dir, report_tag=cli._sanitize_report_tag(report_tag))
+    report_paths = resolve_report_paths(metrics_dir, report_tag=sanitize_report_tag(report_tag))
     return LspoQualityResult(
         model_run_id=resolved_model_run_id,
         metrics_dir=metrics_dir,
@@ -181,9 +203,10 @@ def train_lspo_model(
     score_batch_size: int = 8192,
     force: bool = False,
     progress: bool = True,
+    progress_style: ProgressStyle = "compact",
     quiet_libs: bool = True,
 ) -> LspoTrainingResult:
-    resolved_run_id = run_id or cli._cli_run_id(run_stage)
+    resolved_run_id = run_id or default_train_run_id(run_stage)
     args = SimpleNamespace(
         run_stage=str(run_stage),
         data_root=str(Path(data_root).expanduser()),
@@ -203,9 +226,10 @@ def train_lspo_model(
         baseline_run_id=baseline_run_id,
         score_batch_size=int(score_batch_size),
         progress=bool(progress),
+        progress_style=str(progress_style),
         quiet_libs=bool(quiet_libs),
     )
-    cli.cmd_run_train_stage(args)
+    _load_cli_module().cmd_run_train_stage(args)
     metrics_dir = Path(args.artifacts_root).expanduser().resolve() / "metrics" / resolved_run_id
     stage = str(run_stage).strip().lower()
     return LspoTrainingResult(

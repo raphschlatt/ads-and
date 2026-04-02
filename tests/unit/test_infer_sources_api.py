@@ -121,14 +121,30 @@ def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch,
     class _FakeTorch:
         cuda = _FakeCuda()
 
+    created_ui = {}
+
+    class _FakeUi:
+        def __init__(self, total_steps, progress, progress_style):
+            created_ui["args"] = {
+                "total_steps": total_steps,
+                "progress": progress,
+                "progress_style": progress_style,
+            }
+
+        def close(self):
+            created_ui["closed"] = True
+
     monkeypatch.setattr("author_name_disambiguation.api.run_infer_sources", _fake_run)
     monkeypatch.setattr("author_name_disambiguation.api.resolve_fixed_model_bundle_path", lambda: tmp_path / "bundle")
     monkeypatch.setitem(sys.modules, "torch", _FakeTorch())
+    monkeypatch.setattr("author_name_disambiguation.api.CliUI", _FakeUi)
+    monkeypatch.setattr("author_name_disambiguation.api.get_active_ui", lambda: None)
 
     result = disambiguate_sources(
         publications_path=tmp_path / "publications.parquet",
         output_dir=tmp_path / "out",
         progress=False,
+        progress_style="verbose",
     )
 
     assert result.summary_path == tmp_path / "summary.json"
@@ -136,56 +152,95 @@ def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch,
     assert kwargs["dataset_id"] == "out"
     assert kwargs["runtime_mode"] == "cpu"
     assert kwargs["model_bundle"] == tmp_path / "bundle"
+    assert created_ui["args"]["progress_style"] == "verbose"
+    assert created_ui["closed"] is True
 
 
 def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp_path: Path):
     captured = {}
 
-    def _fake_cluster_report(args):
-        captured["args"] = args
+    class _FakeCli:
+        @staticmethod
+        def cmd_run_cluster_test_report(args):
+            captured["args"] = args
 
-    monkeypatch.setattr("author_name_disambiguation.api.cli.cmd_run_cluster_test_report", _fake_cluster_report)
-    monkeypatch.setattr("author_name_disambiguation.api.cli._sanitize_report_tag", lambda tag: tag)
-    monkeypatch.setattr(
-        "author_name_disambiguation.api.cli._resolve_report_paths",
-        lambda metrics_dir, report_tag: {
-            "json": metrics_dir / "06_clustering_test_report.json",
-            "summary_csv": metrics_dir / "06_clustering_test_summary.csv",
-            "per_seed_csv": metrics_dir / "06_clustering_test_per_seed.csv",
-            "markdown": metrics_dir / "06_clustering_test_report.md",
-        },
-    )
-
+    monkeypatch.setattr("author_name_disambiguation.api._load_cli_module", lambda: _FakeCli)
     result = evaluate_lspo_quality(
         data_root=tmp_path / "data",
         artifacts_root=tmp_path / "artifacts",
         raw_lspo_parquet=tmp_path / "LSPO_v1.parquet",
         progress=False,
+        progress_style="verbose",
     )
 
     assert result.model_run_id == "full_20260218T111506Z_cli02681429"
     args = captured["args"]
     assert args.allow_legacy_lspo_compat is True
     assert args.progress is False
+    assert args.progress_style == "verbose"
 
 
 def test_train_lspo_model_uses_simple_defaults(monkeypatch, tmp_path: Path):
     captured = {}
 
-    def _fake_train(args):
-        captured["args"] = args
+    class _FakeCli:
+        @staticmethod
+        def cmd_run_train_stage(args):
+            captured["args"] = args
 
-    monkeypatch.setattr("author_name_disambiguation.api.cli.cmd_run_train_stage", _fake_train)
-    monkeypatch.setattr("author_name_disambiguation.api.cli._cli_run_id", lambda stage: f"{stage}_auto_id")
+    monkeypatch.setattr("author_name_disambiguation.api._load_cli_module", lambda: _FakeCli)
+    monkeypatch.setattr("author_name_disambiguation.api.default_train_run_id", lambda stage: f"{stage}_auto_id")
 
     result = train_lspo_model(
         data_root=tmp_path / "data",
         artifacts_root=tmp_path / "artifacts",
         raw_lspo_parquet=tmp_path / "LSPO_v1.parquet",
         progress=False,
+        progress_style="verbose",
     )
 
     assert result.run_id == "full_auto_id"
     args = captured["args"]
     assert args.run_stage == "full"
     assert args.progress is False
+    assert args.progress_style == "verbose"
+
+
+def test_disambiguate_sources_reuses_active_ui_without_creating_new_one(monkeypatch, tmp_path: Path):
+    existing_ui = object()
+    created = {"called": False}
+
+    def _fake_run(request=None, **kwargs):
+        return InferSourcesResult(
+            run_id="infer_sources_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=tmp_path / "summary.json",
+        )
+
+    class _FakeUi:
+        def __init__(self, *args, **kwargs):
+            created["called"] = True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("author_name_disambiguation.api.run_infer_sources", _fake_run)
+    monkeypatch.setattr("author_name_disambiguation.api.resolve_fixed_model_bundle_path", lambda: tmp_path / "bundle")
+    monkeypatch.setattr("author_name_disambiguation.api.CliUI", _FakeUi)
+    monkeypatch.setattr("author_name_disambiguation.api.get_active_ui", lambda: existing_ui)
+
+    disambiguate_sources(
+        publications_path=tmp_path / "publications.parquet",
+        output_dir=tmp_path / "out",
+        progress=True,
+    )
+
+    assert created["called"] is False

@@ -105,6 +105,12 @@ Show help:
 author-name-disambiguation -h
 ```
 
+The console script above is the primary entrypoint. A clean module invocation works too:
+
+```bash
+python -m author_name_disambiguation -h
+```
+
 Disambiguate one source dataset with the packaged Fixed Model Baseline:
 
 ```bash
@@ -112,6 +118,16 @@ author-name-disambiguation infer \
   --publications-path data/raw/ads/ads_prod_current/publications.parquet \
   --references-path data/raw/ads/ads_prod_current/references.parquet \
   --output-dir artifacts/exports/ads_prod_current
+```
+
+By default `infer` prints a short human summary. Use `--json` if you want machine-readable output instead:
+
+```bash
+author-name-disambiguation infer \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-dir artifacts/exports/ads_prod_current \
+  --json
 ```
 
 `infer` defaults to `runtime=auto`, which means:
@@ -243,6 +259,8 @@ quality = evaluate_lspo_quality(
 )
 ```
 
+The high-level Python APIs default to compact progress output. Pass `progress_style="verbose"` if you want the old nested detail bars.
+
 Advanced/programmatic expert entry points remain available:
 
 ```python
@@ -328,6 +346,8 @@ Inference outputs under `output_root`:
 - `mention_clusters.parquet`
 - `05_stage_metrics_infer_sources.json`
 - `05_go_no_go_infer_sources.json`
+
+`summary.json` is the compact product-facing run report. The deeper `05_*` artifacts remain the advanced/debug reports.
 
 The disambiguated source files keep all input columns and add:
 

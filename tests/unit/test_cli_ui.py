@@ -39,6 +39,17 @@ class _FakeNonTtyStderr:
         return None
 
 
+def test_cli_ui_uses_bar_in_notebook_mode_even_without_tty(monkeypatch):
+    fake_stderr = _FakeNonTtyStderr()
+    monkeypatch.setattr(cli_ui, "_tqdm", lambda *args, **kwargs: _FakeBar(*args, **kwargs))
+    monkeypatch.setattr(cli_ui.sys, "stderr", fake_stderr)
+    monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: True)
+
+    ui = cli_ui.CliUI(total_steps=2, progress=True)
+    assert ui._bar.disable is False
+    ui.close()
+
+
 def test_cli_ui_emits_start_line_when_progress_bar_active(monkeypatch):
     monkeypatch.setattr(cli_ui, "_tqdm", lambda *args, **kwargs: _FakeBar(*args, **kwargs))
     monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
@@ -102,3 +113,40 @@ def test_iter_progress_plain_mode_formats_small_progress_without_repeated_zero(m
     err = "".join(fake_stderr.lines)
     assert "progress=<1% done=1/200" in err
     assert "progress=0% done=1/200" not in err
+
+
+def test_nested_progress_is_suppressed_in_compact_mode(monkeypatch, capsys):
+    monkeypatch.setattr(cli_ui, "_tqdm", lambda *args, **kwargs: _FakeBar(*args, **kwargs))
+    monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
+    monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: False)
+
+    ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="compact")
+    ui.start("Outer")
+    list(cli_ui.iter_progress(range(3), total=3, label="Inner batches", enabled=True, unit="batch"))
+    ui.done("Done.")
+    ui.close()
+
+    lines = "".join(ui._bar.lines)
+    assert "Outer" in lines
+    assert "Inner batches" not in lines
+
+
+def test_nested_progress_is_shown_in_verbose_mode(monkeypatch):
+    bars = []
+
+    def _fake_tqdm(*args, **kwargs):
+        bar = _FakeBar(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
+    monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
+    monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: False)
+
+    ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="verbose")
+    with cli_ui.loop_progress(total=2, label="Inner batches", enabled=True, unit="batch") as tracker:
+        tracker.update(2)
+    ui.close()
+
+    assert len(bars) == 2
+    assert bars[1].updates == 2

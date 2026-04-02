@@ -585,7 +585,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         if ui is not None:
             ui.skip(message)
 
-    bootstrap_started_at = perf_counter()
+    run_started_at = perf_counter()
+    bootstrap_started_at = run_started_at
     _ui_start("Bootstrap")
     _ui_info(
         f"dataset={str(request.dataset_id)} | infer_stage={str(request.infer_stage)} | "
@@ -618,7 +619,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"torch={bootstrap_runtime.get('torch_version') or 'n/a'}"
     )
     _ui_info(f"run_id={run_id} | uid_scope={uid_scope} | references_present={bool(references_present)}")
-    _ui_done(f"Bootstrap in {_format_elapsed(perf_counter() - bootstrap_started_at)}")
+    bootstrap_elapsed = perf_counter() - bootstrap_started_at
+    _ui_done(f"Bootstrap in {_format_elapsed(bootstrap_elapsed)}")
 
     result_paths = {
         "publications_disambiguated": _resolve_source_output_path(
@@ -788,13 +790,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     load_inputs_runtime = dict(prepared.get("runtime", {}) or {})
     context_payload["runtime"] = {"load_inputs": load_inputs_runtime}
     write_json(context_payload, context_path)
+    load_elapsed = perf_counter() - load_started_at
     _ui_done(
         "Loaded "
         f"publications={_format_count(len(publications))} "
         f"references={_format_count(len(references))} "
         f"canonical_records={_format_count(len(canonical_records))} "
-        f"in {_format_elapsed(perf_counter() - load_started_at)}"
+        f"in {_format_elapsed(load_elapsed)}"
     )
+    load_inputs_runtime["wall_seconds"] = float(load_elapsed)
 
     preflight_started_at = perf_counter()
     _ui_start("Preflight")
@@ -876,10 +880,12 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"specter_recompute={_format_count(precomputed_embeddings['specter_sources']['recomputed_embedding_count'])} | "
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])}"
     )
+    preflight_elapsed = perf_counter() - preflight_started_at
     _ui_done(
         f"Preflight for {_format_count(len(mentions))} mentions in "
-        f"{_format_elapsed(perf_counter() - preflight_started_at)}"
+        f"{_format_elapsed(preflight_elapsed)}"
     )
+    preflight["wall_seconds"] = float(preflight_elapsed)
 
     name_embeddings_started_at = perf_counter()
     _ui_start("Name embeddings")
@@ -911,6 +917,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     if not isinstance(chars, np.ndarray):
         chars = np.load(chars_path, mmap_mode="r")
     chars_elapsed = perf_counter() - name_embeddings_started_at
+    chars_meta["wall_seconds"] = float(chars_elapsed)
     _ui_done(
         f"{_format_count(len(mentions))} names embedded in {_format_elapsed(chars_elapsed)} "
         f"({_format_rate(len(mentions), chars_elapsed)}) | "
@@ -1010,6 +1017,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     text_runtime_meta["mention_materialization_count"] = int(len(mentions))
     text_runtime_meta["canonical_to_mentions_fanout"] = float(len(mentions) / max(1, len(specter_source_records)))
     text_elapsed = perf_counter() - text_embeddings_started_at
+    text_runtime_meta["wall_seconds"] = float(text_elapsed)
     resolved_text_device = text_runtime_meta.get("resolved_device")
     if text_runtime_meta.get("cache_hit"):
         resolved_text_device = resolved_text_device or "cache"
@@ -1145,6 +1153,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             f"distance_below_min={int(clamping_meta.get('distance_below_min_count', 0))} | "
             f"distance_above_max={int(clamping_meta.get('distance_above_max_count', 0))}"
         )
+    pair_inference_elapsed = perf_counter() - pair_inference_started_at
+    pair_meta["wall_seconds"] = float(pair_inference_elapsed)
+    pair_score_runtime_meta["wall_seconds"] = float(pair_inference_elapsed)
     _ui_done(
         f"pair_count={_format_count(len(pairs))} | "
         f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', len(pairs))))} | "
@@ -1153,7 +1164,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"score_count={_format_count(len(pair_scores))} | "
         f"device={pair_score_runtime_meta.get('resolved_device') or 'n/a'} | "
         f"precision={pair_score_runtime_meta.get('effective_precision_mode') or str(request.precision_mode)} "
-        f"in {_format_elapsed(perf_counter() - pair_inference_started_at)}"
+        f"in {_format_elapsed(pair_inference_elapsed)}"
     )
     if any(
         float(pair_score_runtime_meta.get(key) or 0.0) > 0.0
@@ -1207,13 +1218,15 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "clustering": cluster_runtime_meta,
     }
     write_json(preflight, preflight_path)
+    clustering_elapsed = perf_counter() - clustering_started_at
+    cluster_runtime_meta["wall_seconds"] = float(clustering_elapsed)
     _ui_done(
         f"clusters={_format_count(int(clusters['author_uid'].nunique()))} | "
         f"mentions={_format_count(len(clusters))} | "
         f"backend={cluster_runtime_meta.get('cluster_backend_effective') or cluster_runtime_meta.get('backend_effective')} | "
         f"workers={_format_worker_request(cluster_runtime_meta.get('cpu_workers_effective'))} | "
         f"sharding={_yes_no(bool(cluster_runtime_meta.get('cpu_sharding_enabled')))} "
-        f"in {_format_elapsed(perf_counter() - clustering_started_at)}"
+        f"in {_format_elapsed(clustering_elapsed)}"
     )
 
     export_started_at = perf_counter()
@@ -1266,6 +1279,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         export_runtime_meta.update(dict(export_mirror_runtime))
     else:
         source_export_qc = source_export_result
+    export_elapsed = perf_counter() - export_started_at
+    export_runtime_meta["wall_seconds"] = float(export_elapsed)
     write_json(source_export_qc, source_export_qc_path)
     preflight["runtime"] = {
         "load_inputs": load_inputs_runtime,
@@ -1393,29 +1408,76 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
     write_go_no_go_report(go, result_paths["go_no_go"])
+    total_elapsed = perf_counter() - run_started_at
     summary_path = write_json(
         {
             "run_id": run_id,
             "dataset_id": str(request.dataset_id),
+            "output_root": str(output_root),
+            "summary_path": str(output_root / "summary.json"),
             "go": go.get("go"),
             "infer_stage_requested": infer_stage_requested,
             "infer_stage_effective": infer_stage,
             "runtime_mode": runtime_mode,
+            "runtime_backend": text_runtime_meta.get("runtime_backend"),
+            "resolved_device": text_runtime_meta.get("resolved_device") or bootstrap_runtime.get("resolved_device"),
+            "precision_mode": text_runtime_meta.get("effective_precision_mode") or str(request.precision_mode),
+            "clustering_backend": cluster_runtime_meta.get("cluster_backend_effective")
+            or cluster_runtime_meta.get("backend_effective"),
+            "counts": {
+                "publications": int(len(publications)),
+                "references": int(len(references)),
+                "canonical_records": int(len(canonical_records)),
+                "specter_sources": int(len(specter_source_records)),
+                "mentions": int(len(mentions)),
+                "clusters": int(clusters["author_uid"].nunique()),
+                "authors_total": int(source_export_qc.get("authors_total", 0)),
+                "authors_mapped": int(source_export_qc.get("authors_mapped", 0)),
+                "authors_unmapped": int(source_export_qc.get("authors_unmapped", 0)),
+            },
+            "stage_seconds": {
+                "bootstrap": float(bootstrap_elapsed),
+                "load_inputs": float(load_elapsed),
+                "preflight": float(preflight_elapsed),
+                "name_embeddings": float(chars_elapsed),
+                "text_embeddings": float(text_elapsed),
+                "pair_inference": float(pair_inference_elapsed),
+                "clustering": float(clustering_elapsed),
+                "export": float(export_elapsed),
+                "total": float(total_elapsed),
+            },
+            "warnings": list(go.get("warnings", []) or []),
+            "blockers": list(go.get("blockers", []) or []),
             "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
             "references_disambiguated_path": (
-                None if result_paths["references_disambiguated"] is None else str(result_paths["references_disambiguated"])
+                None
+                if result_paths["references_disambiguated"] is None
+                else str(result_paths["references_disambiguated"])
             ),
             "author_entities_path": str(result_paths["author_entities"]),
             "source_author_assignments_path": str(result_paths["source_author_assignments"]),
             "mention_clusters_path": str(result_paths["mention_clusters"]),
             "stage_metrics_path": str(result_paths["stage_metrics"]),
             "go_no_go_path": str(result_paths["go_no_go"]),
+            "outputs": {
+                "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
+                "references_disambiguated_path": (
+                    None
+                    if result_paths["references_disambiguated"] is None
+                    else str(result_paths["references_disambiguated"])
+                ),
+                "author_entities_path": str(result_paths["author_entities"]),
+                "source_author_assignments_path": str(result_paths["source_author_assignments"]),
+                "mention_clusters_path": str(result_paths["mention_clusters"]),
+                "stage_metrics_path": str(result_paths["stage_metrics"]),
+                "go_no_go_path": str(result_paths["go_no_go"]),
+            },
         },
         output_root / "summary.json",
     )
     _ui_done(
         f"GO={go.get('go')} | blockers={len(go.get('blockers', []))} "
-        f"in {_format_elapsed(perf_counter() - export_started_at)}"
+        f"in {_format_elapsed(export_elapsed)}"
     )
     _ui_info(f"Run complete | run_id={run_id}")
 

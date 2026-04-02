@@ -604,7 +604,11 @@ def test_run_infer_sources_accepts_incremental_alias_and_writes_summary(monkeypa
     assert context["infer_stage_effective"] == "full"
     assert summary["infer_stage_requested"] == "incremental"
     assert summary["infer_stage_effective"] == "full"
-    assert summary["publications_disambiguated_path"] == str(result.publications_disambiguated_path)
+    assert summary["outputs"]["publications_disambiguated_path"] == str(result.publications_disambiguated_path)
+    assert summary["runtime_mode"] in {"cpu", "gpu", "hf"}
+    assert summary["counts"]["publications"] == 2
+    assert summary["counts"]["mentions"] >= 2
+    assert summary["stage_seconds"]["total"] >= 0.0
 
 
 def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_path: Path):

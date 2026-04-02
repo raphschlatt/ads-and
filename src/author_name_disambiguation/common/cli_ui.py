@@ -14,6 +14,23 @@ except Exception:  # pragma: no cover
 
 T = TypeVar("T")
 _ACTIVE_UI: ContextVar["CliUI | None"] = ContextVar("active_cli_ui", default=None)
+_NESTED_PROGRESS_ENABLED: ContextVar[bool] = ContextVar("nested_progress_enabled", default=True)
+
+
+def _is_notebook_environment() -> bool:
+    try:  # pragma: no cover - environment dependent
+        from IPython import get_ipython
+
+        shell = get_ipython()
+        if shell is None:
+            return False
+        return shell.__class__.__name__ == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
+
+def _supports_live_progress() -> bool:
+    return bool(sys.stderr.isatty() or _is_notebook_environment())
 
 
 @dataclass
@@ -26,11 +43,15 @@ class _StepState:
 class CliUI:
     """Tiny terminal UX helper for consistent CLI status + progress output."""
 
-    def __init__(self, total_steps: int, progress: bool = True) -> None:
+    def __init__(self, total_steps: int, progress: bool = True, progress_style: str = "compact") -> None:
         self.total_steps = int(max(1, total_steps))
         self.current_step = 0
         self._state: _StepState | None = None
-        show_bar = bool(progress) and sys.stderr.isatty()
+        normalized_style = str(progress_style or "compact").strip().lower() or "compact"
+        if normalized_style not in {"compact", "verbose"}:
+            normalized_style = "compact"
+        self.progress_style = normalized_style
+        show_bar = bool(progress) and _supports_live_progress()
         if _tqdm is None:
             self._bar = _NullProgressBar()
         else:
@@ -42,6 +63,9 @@ class CliUI:
                 leave=False,
             )
         self._active_token = _ACTIVE_UI.set(self)
+        self._nested_progress_token = _NESTED_PROGRESS_ENABLED.set(
+            bool(progress) and self.progress_style == "verbose"
+        )
 
     def _prefix(self) -> str:
         step_idx = self.current_step if self.current_step > 0 else 1
@@ -105,6 +129,7 @@ class CliUI:
 
     def close(self) -> None:
         self._bar.close()
+        _NESTED_PROGRESS_ENABLED.reset(self._nested_progress_token)
         _ACTIVE_UI.reset(self._active_token)
 
 
@@ -123,6 +148,10 @@ class _NullProgressBar:
 
 def get_active_ui() -> CliUI | None:
     return _ACTIVE_UI.get()
+
+
+def nested_progress_enabled() -> bool:
+    return bool(_NESTED_PROGRESS_ENABLED.get())
 
 
 def _format_duration(seconds: float | None) -> str:
@@ -173,13 +202,13 @@ class _LoopProgress:
 
     def __post_init__(self) -> None:
         self.total = int(max(0, self.total))
-        self.enabled = bool(self.enabled)
+        self.enabled = bool(self.enabled) and nested_progress_enabled()
         self._started_at = perf_counter()
         self._done = 0
         self._last_plain_emit = 0.0
         self._plain_started = False
         self._completion_emitted = False
-        show_bar = self.enabled and sys.stderr.isatty()
+        show_bar = self.enabled and _supports_live_progress()
         if _tqdm is None:
             self._bar = _NullProgressBar()
         else:
