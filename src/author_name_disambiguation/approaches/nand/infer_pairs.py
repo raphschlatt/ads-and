@@ -157,6 +157,7 @@ def _encode_mentions(
         label="Encode mentions",
         enabled=show_progress,
         unit="batch",
+        compact_visible=False,
     )
     mention_embeddings: np.ndarray | None = None
 
@@ -218,6 +219,7 @@ def _build_scored_pair_arrays(
         label="Score batches",
         enabled=show_progress,
         unit="batch",
+        compact_visible=False,
     )
     score_started_at = perf_counter()
     for start in starts:

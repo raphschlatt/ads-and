@@ -785,6 +785,7 @@ def _cluster_entries_sequential(
         label="Cluster blocks",
         enabled=show_progress,
         unit="block",
+        compact_label="Clustering",
     )
 
     for entry in iterator:

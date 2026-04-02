@@ -259,7 +259,7 @@ quality = evaluate_lspo_quality(
 )
 ```
 
-The high-level Python APIs default to compact progress output. Pass `progress_style="verbose"` if you want the old nested detail bars.
+The high-level Python APIs default to compact progress output: short text for quick stages, plus persistent dynamic bars for the long-running stages. Pass `progress_style="verbose"` if you want the old nested detail bars.
 
 Advanced/programmatic expert entry points remain available:
 

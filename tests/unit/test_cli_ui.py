@@ -2,8 +2,10 @@ from author_name_disambiguation.common import cli_ui
 
 
 class _FakeBar:
-    def __init__(self, *args, disable=False, **kwargs):
+    def __init__(self, *args, disable=False, desc=None, leave=False, **kwargs):
         self.disable = bool(disable)
+        self.desc = desc
+        self.leave = bool(leave)
         self.lines = []
         self.updates = 0
 
@@ -21,8 +23,17 @@ class _FakeBar:
 
 
 class _FakeStderr:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
     def isatty(self) -> bool:
         return True
+
+    def write(self, text: str) -> None:
+        self.lines.append(str(text))
+
+    def flush(self) -> None:
+        return None
 
 
 class _FakeNonTtyStderr:
@@ -45,7 +56,7 @@ def test_cli_ui_uses_bar_in_notebook_mode_even_without_tty(monkeypatch):
     monkeypatch.setattr(cli_ui.sys, "stderr", fake_stderr)
     monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: True)
 
-    ui = cli_ui.CliUI(total_steps=2, progress=True)
+    ui = cli_ui.CliUI(total_steps=2, progress=True, progress_style="verbose")
     assert ui._bar.disable is False
     ui.close()
 
@@ -54,7 +65,7 @@ def test_cli_ui_emits_start_line_when_progress_bar_active(monkeypatch):
     monkeypatch.setattr(cli_ui, "_tqdm", lambda *args, **kwargs: _FakeBar(*args, **kwargs))
     monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
 
-    ui = cli_ui.CliUI(total_steps=2, progress=True)
+    ui = cli_ui.CliUI(total_steps=2, progress=True, progress_style="verbose")
     ui.start("Load things")
     ui.done("Loaded.")
     ui.close()
@@ -115,20 +126,59 @@ def test_iter_progress_plain_mode_formats_small_progress_without_repeated_zero(m
     assert "progress=0% done=1/200" not in err
 
 
-def test_nested_progress_is_suppressed_in_compact_mode(monkeypatch, capsys):
-    monkeypatch.setattr(cli_ui, "_tqdm", lambda *args, **kwargs: _FakeBar(*args, **kwargs))
+def test_compact_mode_uses_persistent_stage_bar_without_global_step_bar(monkeypatch):
+    bars = []
+
+    def _fake_tqdm(*args, **kwargs):
+        bar = _FakeBar(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
     monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
     monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: False)
 
     ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="compact")
-    ui.start("Outer")
-    list(cli_ui.iter_progress(range(3), total=3, label="Inner batches", enabled=True, unit="batch"))
+    assert ui._bar.disable is True
+    ui.start("Text embeddings")
+    list(cli_ui.iter_progress(range(3), total=3, label="SPECTER texts", enabled=True, unit="text"))
     ui.done("Done.")
     ui.close()
 
-    lines = "".join(ui._bar.lines)
-    assert "Outer" in lines
-    assert "Inner batches" not in lines
+    assert len(bars) == 1
+    assert bars[0].desc == "[01/01] Text embeddings"
+    assert bars[0].leave is True
+    assert bars[0].updates == 3
+
+
+def test_compact_mode_can_hide_selected_nested_progress(monkeypatch):
+    bars = []
+
+    def _fake_tqdm(*args, **kwargs):
+        bar = _FakeBar(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
+    monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
+    monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: False)
+
+    ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="compact")
+    ui.start("Pair inference")
+    list(
+        cli_ui.iter_progress(
+            range(3),
+            total=3,
+            label="Score batches",
+            enabled=True,
+            unit="batch",
+            compact_visible=False,
+        )
+    )
+    ui.done("Done.")
+    ui.close()
+
+    assert bars == []
 
 
 def test_nested_progress_is_shown_in_verbose_mode(monkeypatch):

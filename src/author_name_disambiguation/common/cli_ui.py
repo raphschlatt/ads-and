@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover
 
 T = TypeVar("T")
 _ACTIVE_UI: ContextVar["CliUI | None"] = ContextVar("active_cli_ui", default=None)
+_ACTIVE_PROGRESS_BAR: ContextVar[object | None] = ContextVar("active_progress_bar", default=None)
 _NESTED_PROGRESS_ENABLED: ContextVar[bool] = ContextVar("nested_progress_enabled", default=True)
 
 
@@ -51,27 +52,29 @@ class CliUI:
         if normalized_style not in {"compact", "verbose"}:
             normalized_style = "compact"
         self.progress_style = normalized_style
-        show_bar = bool(progress) and _supports_live_progress()
-        if _tqdm is None:
+        show_bar = bool(progress) and _supports_live_progress() and self.progress_style == "verbose"
+        if _tqdm is None or not show_bar:
             self._bar = _NullProgressBar()
         else:
             self._bar = _tqdm(
                 total=self.total_steps,
-                disable=not show_bar,
+                disable=False,
                 dynamic_ncols=True,
                 unit="step",
                 leave=False,
             )
         self._active_token = _ACTIVE_UI.set(self)
-        self._nested_progress_token = _NESTED_PROGRESS_ENABLED.set(
-            bool(progress) and self.progress_style == "verbose"
-        )
+        self._nested_progress_token = _NESTED_PROGRESS_ENABLED.set(bool(progress))
 
     def _prefix(self) -> str:
         step_idx = self.current_step if self.current_step > 0 else 1
         return f"[{step_idx:02d}/{self.total_steps:02d}]"
 
     def _write_line(self, line: str) -> None:
+        active_progress_bar = _ACTIVE_PROGRESS_BAR.get()
+        if active_progress_bar is not None and hasattr(active_progress_bar, "write"):
+            active_progress_bar.write(line)
+            return
         if not self._bar.disable and hasattr(self._bar, "write"):
             self._bar.write(line)
             return
@@ -131,6 +134,11 @@ class CliUI:
         self._bar.close()
         _NESTED_PROGRESS_ENABLED.reset(self._nested_progress_token)
         _ACTIVE_UI.reset(self._active_token)
+
+    def current_stage_label(self) -> str | None:
+        if self._state is None or not self._state.active:
+            return None
+        return str(self._state.label)
 
 
 class _NullProgressBar:
@@ -198,31 +206,48 @@ class _LoopProgress:
     total: int
     enabled: bool
     unit: str
+    compact_label: str | None = None
+    compact_visible: bool = True
     min_plain_interval: float = 30.0
 
     def __post_init__(self) -> None:
         self.total = int(max(0, self.total))
         self.enabled = bool(self.enabled) and nested_progress_enabled()
+        self._ui = get_active_ui()
+        self._compact_mode = bool(self._ui is not None and self._ui.progress_style == "compact")
+        self._suppress_output = bool(self.enabled and self._compact_mode and not bool(self.compact_visible))
         self._started_at = perf_counter()
         self._done = 0
         self._last_plain_emit = 0.0
         self._plain_started = False
         self._completion_emitted = False
-        show_bar = self.enabled and _supports_live_progress()
-        if _tqdm is None:
+        self._display_label = str(self.label)
+        self._plain_prefix = _active_prefix()
+        self._active_bar_token = None
+
+        if self.enabled and self._compact_mode and not self._suppress_output and self._ui is not None:
+            compact_display = str(self.compact_label or self._ui.current_stage_label() or self.label)
+            self._display_label = f"{self._ui._prefix()} {compact_display}"
+            self._plain_prefix = ""
+
+        show_bar = self.enabled and not self._suppress_output and _supports_live_progress()
+        leave_bar = bool(self._compact_mode and not self._suppress_output)
+        if _tqdm is None or self._suppress_output:
             self._bar = _NullProgressBar()
         else:
             self._bar = _tqdm(
                 total=self.total,
                 disable=not show_bar,
-                desc=self.label,
+                desc=self._display_label,
                 dynamic_ncols=True,
                 unit=self.unit,
-                leave=False,
+                leave=leave_bar,
             )
 
     def __enter__(self) -> _LoopProgress:
-        if self.enabled and self._bar.disable:
+        if self.enabled and not self._bar.disable:
+            self._active_bar_token = _ACTIVE_PROGRESS_BAR.set(self._bar)
+        elif self.enabled and not self._suppress_output and self._bar.disable:
             self._emit_plain_start()
         return self
 
@@ -233,17 +258,19 @@ class _LoopProgress:
             else:
                 self._bar.close()
         finally:
+            if self._active_bar_token is not None:
+                _ACTIVE_PROGRESS_BAR.reset(self._active_bar_token)
+                self._active_bar_token = None
             return None
 
     def _emit_plain_start(self) -> None:
         if self._plain_started:
             return
         self._plain_started = True
-        prefix = _active_prefix()
-        _write_progress_line(f"{prefix}INFO {self.label}: total={self.total} unit={self.unit}")
+        _write_progress_line(f"{self._plain_prefix}INFO {self._display_label}: total={self.total} unit={self.unit}")
 
     def _emit_plain_snapshot(self, *, force: bool = False) -> None:
-        if not self.enabled or not self._bar.disable:
+        if not self.enabled or self._suppress_output or not self._bar.disable:
             return
         self._emit_plain_start()
         now = perf_counter()
@@ -253,16 +280,15 @@ class _LoopProgress:
         rate = (self._done / elapsed) if elapsed > 0 else 0.0
         eta = None if rate <= 0 or self.total <= 0 else max(0.0, (self.total - self._done) / rate)
         pct = _format_progress_percent(self._done, self.total)
-        prefix = _active_prefix()
         _write_progress_line(
-            f"{prefix}INFO {self.label}: progress={pct} done={self._done}/{self.total} "
+            f"{self._plain_prefix}INFO {self._display_label}: progress={pct} done={self._done}/{self.total} "
             f"rate={rate:.2f}{self.unit}/s eta={_format_duration(eta)}"
         )
         self._last_plain_emit = now
         self._completion_emitted = self._done >= self.total
 
     def update(self, n: int = 1) -> None:
-        if not self.enabled:
+        if not self.enabled or self._suppress_output:
             return
         step = int(max(0, n))
         self._done += step
@@ -272,7 +298,7 @@ class _LoopProgress:
         self._emit_plain_snapshot()
 
     def close(self) -> None:
-        if self.enabled and self._bar.disable and not self._completion_emitted:
+        if self.enabled and not self._suppress_output and self._bar.disable and not self._completion_emitted:
             self._emit_plain_snapshot(force=True)
         self._bar.close()
 
@@ -284,6 +310,8 @@ def iter_progress(
     label: str,
     enabled: bool,
     unit: str = "it",
+    compact_label: str | None = None,
+    compact_visible: bool = True,
     min_plain_interval: float = 30.0,
 ) -> Iterator[T]:
     if not enabled:
@@ -295,6 +323,8 @@ def iter_progress(
         total=total,
         enabled=enabled,
         unit=unit,
+        compact_label=compact_label,
+        compact_visible=compact_visible,
         min_plain_interval=min_plain_interval,
     )
     with tracker:
@@ -310,6 +340,8 @@ def loop_progress(
     label: str,
     enabled: bool,
     unit: str = "it",
+    compact_label: str | None = None,
+    compact_visible: bool = True,
     min_plain_interval: float = 30.0,
 ) -> Iterator[_LoopProgress]:
     tracker = _LoopProgress(
@@ -317,6 +349,8 @@ def loop_progress(
         total=total,
         enabled=enabled,
         unit=unit,
+        compact_label=compact_label,
+        compact_visible=compact_visible,
         min_plain_interval=min_plain_interval,
     )
     with tracker:

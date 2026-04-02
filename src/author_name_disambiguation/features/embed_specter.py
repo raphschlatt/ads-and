@@ -709,6 +709,7 @@ def generate_specter_embeddings(
             label="SPECTER texts",
             enabled=show_progress,
             unit="text",
+            compact_label="Text embeddings",
         ) as tracker:
             with cpu_thread_policy as cpu_thread_meta:
                 if isinstance(cpu_thread_meta, dict) and cpu_thread_meta:

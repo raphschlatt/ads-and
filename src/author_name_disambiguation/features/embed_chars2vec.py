@@ -256,6 +256,7 @@ def _predict_word_vectors(
                 label="Chars2Vec batches",
                 enabled=show_progress,
                 unit="batch",
+                compact_label="Name embeddings",
             ) as tracker:
                 if show_progress:
                     callback_base = model.keras.callbacks.Callback

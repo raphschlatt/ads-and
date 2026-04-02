@@ -772,6 +772,7 @@ def build_pairs_within_blocks(
         label="Pair candidates",
         enabled=show_progress,
         unit="pair",
+        compact_label="Pair inference · build pairs",
     ) as tracker:
         progress_update = tracker.update if show_progress else None
 
