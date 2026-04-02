@@ -201,14 +201,22 @@ Examples:
 - changing training features in a way that requires relearning weights
 - changing training config / seeds / threshold selection policy
 
+Use this term:
+- "LSPO Training Run"
+
+Meaning:
+- A real training run that learns new NAND model weights from LSPO.
+- This is the only run type that is allowed to change the model itself.
+
 Correct workflow:
 1. Run `run-train-stage`.
-2. Run `run-cluster-test-report` for that newly trained run.
+2. Run an `LSPO Quality Run` for that newly trained run.
 3. Optionally export a new bundle.
 4. Only after that, run ADS inference with the new bundle if promotion is justified.
 
 Important:
 - This is the only case where "training a candidate" is the right phrase.
+- This is the only case where "LSPO Training Run" is the right phrase.
 
 ## Canonical Names To Use In Conversation
 
@@ -217,6 +225,7 @@ Use these names exactly:
 - "Raw LSPO Source"
 - "Fixed Trained NAND Model"
 - "LSPO Quality Run"
+- "LSPO Training Run"
 - "ADS Full Inference Run"
 - "Fixed Model Baseline"
 - "ADS inference baseline"
