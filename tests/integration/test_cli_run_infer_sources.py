@@ -578,6 +578,35 @@ def test_cli_and_api_infer_sources_parity(monkeypatch, tmp_path: Path):
     assert cli_stage["counts"]["ads_mentions"] == api_stage["counts"]["ads_mentions"]
 
 
+def test_run_infer_sources_accepts_incremental_alias_and_writes_summary(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+
+    output_root = tmp_path / "out_incremental"
+    result = run_infer_sources(
+        publications_path=publications_path,
+        output_root=output_root,
+        dataset_id="my_ads_2026",
+        model_bundle=bundle_dir,
+        infer_stage="incremental",
+        progress=False,
+    )
+
+    stage_metrics = json.loads(result.stage_metrics_path.read_text(encoding="utf-8"))
+    context = json.loads((output_root / "00_context.json").read_text(encoding="utf-8"))
+    summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
+
+    assert stage_metrics["infer_stage"] == "full"
+    assert stage_metrics["runtime"]["infer_stage_requested"] == "incremental"
+    assert stage_metrics["runtime"]["infer_stage_effective"] == "full"
+    assert context["infer_stage_requested"] == "incremental"
+    assert context["infer_stage_effective"] == "full"
+    assert summary["infer_stage_requested"] == "incremental"
+    assert summary["infer_stage_effective"] == "full"
+    assert summary["publications_disambiguated_path"] == str(result.publications_disambiguated_path)
+
+
 def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_path: Path):
     publications_path, references_path = _write_dataset(tmp_path, with_references=True)
     bundle_dir = _write_bundle(tmp_path)

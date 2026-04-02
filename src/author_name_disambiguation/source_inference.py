@@ -44,7 +44,8 @@ if TYPE_CHECKING:
 
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 UID_SCOPE_VALUES = {"dataset", "local", "registry"}
-INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full"}
+INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full", "incremental"}
+INFER_STAGE_ALIASES = {"incremental": "full"}
 RUNTIME_MODE_VALUES = {"gpu", "cpu", "hf"}
 
 
@@ -172,6 +173,13 @@ def _normalize_runtime_mode(value: str | None) -> str | None:
     return normalized
 
 
+def _normalize_infer_stage(value: str | None) -> tuple[str, str]:
+    requested = str(value or "full").strip().lower() or "full"
+    if requested not in INFER_STAGE_VALUES:
+        raise ValueError(f"Unsupported infer_stage={value!r}.")
+    return requested, INFER_STAGE_ALIASES.get(requested, requested)
+
+
 def _requested_device_for_runtime_mode(*, runtime_mode: str | None, requested_device: str) -> str:
     device = str(requested_device or "auto").strip().lower() or "auto"
     if runtime_mode == "gpu":
@@ -196,8 +204,7 @@ def _infer_runtime_mode(*, runtime_mode: str | None, specter_runtime_backend: st
 def _validate_request(request: InferSourcesRequest) -> None:
     if str(request.dataset_id).strip() == "":
         raise ValueError("dataset_id must be non-empty.")
-    if str(request.infer_stage).strip().lower() not in INFER_STAGE_VALUES:
-        raise ValueError(f"Unsupported infer_stage={request.infer_stage!r}.")
+    _normalize_infer_stage(getattr(request, "infer_stage", None))
     if str(request.uid_scope).strip().lower() not in UID_SCOPE_VALUES:
         raise ValueError(f"Unsupported uid_scope={request.uid_scope!r}.")
     _normalize_runtime_mode(getattr(request, "runtime_mode", None))
@@ -210,6 +217,8 @@ def _validate_request(request: InferSourcesRequest) -> None:
     if refs is not None and not refs.exists():
         raise FileNotFoundError(f"references_path not found: {refs}")
 
+    if request.model_bundle is None:
+        raise ValueError("model_bundle must be provided or resolved before source inference runs.")
     bundle = Path(request.model_bundle).expanduser()
     if not bundle.exists():
         raise FileNotFoundError(f"model_bundle not found: {bundle}")
@@ -584,7 +593,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     _validate_request(request)
 
-    infer_stage = str(request.infer_stage).strip().lower()
+    infer_stage_requested, infer_stage = _normalize_infer_stage(getattr(request, "infer_stage", None))
     uid_scope = str(request.uid_scope).strip().lower()
     uid_namespace = _resolve_uid_namespace(
         uid_scope=uid_scope,
@@ -646,6 +655,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             mention_clusters_path=result_paths["mention_clusters"],
             stage_metrics_path=result_paths["stage_metrics"],
             go_no_go_path=result_paths["go_no_go"],
+            summary_path=output_root / "summary.json",
         )
 
     load_started_at = perf_counter()
@@ -738,6 +748,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "references_path": None if request.references_path is None else str(Path(request.references_path).expanduser().resolve()),
         "output_root": str(output_root),
         "infer_stage": infer_stage,
+        "infer_stage_requested": infer_stage_requested,
+        "infer_stage_effective": infer_stage,
         "uid_scope": uid_scope,
         "uid_namespace": uid_namespace,
         "model_bundle": str(Path(request.model_bundle).expanduser().resolve()),
@@ -1357,6 +1369,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         source_export_qc=source_export_qc,
         runtime={
             "load_inputs": load_inputs_runtime,
+            "infer_stage_requested": infer_stage_requested,
+            "infer_stage_effective": infer_stage,
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
@@ -1379,6 +1393,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     go = evaluate_go_no_go(stage_metrics, gate_config=gate_cfg)
     write_go_no_go_report(go, result_paths["go_no_go"])
+    summary_path = write_json(
+        {
+            "run_id": run_id,
+            "dataset_id": str(request.dataset_id),
+            "go": go.get("go"),
+            "infer_stage_requested": infer_stage_requested,
+            "infer_stage_effective": infer_stage,
+            "runtime_mode": runtime_mode,
+            "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
+            "references_disambiguated_path": (
+                None if result_paths["references_disambiguated"] is None else str(result_paths["references_disambiguated"])
+            ),
+            "author_entities_path": str(result_paths["author_entities"]),
+            "source_author_assignments_path": str(result_paths["source_author_assignments"]),
+            "mention_clusters_path": str(result_paths["mention_clusters"]),
+            "stage_metrics_path": str(result_paths["stage_metrics"]),
+            "go_no_go_path": str(result_paths["go_no_go"]),
+        },
+        output_root / "summary.json",
+    )
     _ui_done(
         f"GO={go.get('go')} | blockers={len(go.get('blockers', []))} "
         f"in {_format_elapsed(perf_counter() - export_started_at)}"
@@ -1396,4 +1430,5 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         mention_clusters_path=result_paths["mention_clusters"],
         stage_metrics_path=result_paths["stage_metrics"],
         go_no_go_path=result_paths["go_no_go"],
+        summary_path=summary_path,
     )

@@ -61,6 +61,7 @@ from author_name_disambiguation.common.subset_artifacts import (
 )
 from author_name_disambiguation.common.subset_builder import build_stage_subset, write_subset_manifest
 from author_name_disambiguation.data.prepare_lspo import prepare_lspo_mentions
+from author_name_disambiguation.defaults import DEFAULT_ARTIFACTS_ROOT, DEFAULT_DATA_ROOT, DEFAULT_RAW_LSPO_PARQUET
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
@@ -1733,28 +1734,26 @@ def cmd_run_train_stage(args):
 def cmd_run_infer_sources(args):
     ui = CliUI(total_steps=8, progress=args.progress)
     try:
-        from author_name_disambiguation.infer_sources import InferSourcesRequest, run_infer_sources
+        from author_name_disambiguation.infer_sources import run_infer_sources
 
         result = run_infer_sources(
-            InferSourcesRequest(
-                publications_path=args.publications_path,
-                references_path=args.references_path,
-                output_root=args.output_root,
-                dataset_id=args.dataset_id,
-                model_bundle=args.model_bundle,
-                uid_scope=args.uid_scope,
-                uid_namespace=args.uid_namespace,
-                infer_stage=args.infer_stage,
-                cluster_config=args.cluster_config,
-                gates_config=args.gates_config,
-                runtime_mode=args.runtime_mode,
-                device=getattr(args, "device", "auto"),
-                precision_mode=args.precision_mode,
-                specter_runtime_backend=getattr(args, "specter_runtime_backend", None),
-                cluster_backend=args.cluster_backend,
-                force=bool(args.force),
-                progress=bool(args.progress),
-            )
+            publications_path=args.publications_path,
+            references_path=args.references_path,
+            output_root=args.output_root,
+            dataset_id=args.dataset_id,
+            model_bundle=args.model_bundle,
+            uid_scope=args.uid_scope,
+            uid_namespace=args.uid_namespace,
+            infer_stage=args.infer_stage,
+            cluster_config=args.cluster_config,
+            gates_config=args.gates_config,
+            runtime_mode=args.runtime_mode,
+            device=getattr(args, "device", "auto"),
+            precision_mode=args.precision_mode,
+            specter_runtime_backend=getattr(args, "specter_runtime_backend", None),
+            cluster_backend=args.cluster_backend,
+            force=bool(args.force),
+            progress=bool(args.progress),
         )
         payload = {
             "run_id": result.run_id,
@@ -1769,6 +1768,120 @@ def cmd_run_infer_sources(args):
             "mention_clusters_path": str(result.mention_clusters_path),
             "stage_metrics_path": str(result.stage_metrics_path),
             "go_no_go_path": str(result.go_no_go_path),
+            "summary_path": None if result.summary_path is None else str(result.summary_path),
+        }
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
+def cmd_infer(args):
+    ui = CliUI(total_steps=8, progress=args.progress)
+    try:
+        from author_name_disambiguation.api import disambiguate_sources
+
+        result = disambiguate_sources(
+            publications_path=args.publications_path,
+            references_path=args.references_path,
+            output_dir=args.output_dir,
+            runtime=args.runtime,
+            dataset_id=args.dataset_id,
+            force=bool(args.force),
+            model_bundle=args.model_bundle,
+            infer_stage=args.infer_stage,
+            progress=bool(args.progress),
+        )
+        payload = {
+            "run_id": result.run_id,
+            "go": result.go,
+            "output_root": str(result.output_root),
+            "publications_disambiguated_path": str(result.publications_disambiguated_path),
+            "references_disambiguated_path": (
+                None if result.references_disambiguated_path is None else str(result.references_disambiguated_path)
+            ),
+            "author_entities_path": str(result.author_entities_path),
+            "source_author_assignments_path": str(result.source_author_assignments_path),
+            "mention_clusters_path": str(result.mention_clusters_path),
+            "stage_metrics_path": str(result.stage_metrics_path),
+            "go_no_go_path": str(result.go_no_go_path),
+            "summary_path": None if result.summary_path is None else str(result.summary_path),
+        }
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
+def cmd_quality_lspo(args):
+    ui = CliUI(total_steps=6, progress=args.progress)
+    try:
+        from author_name_disambiguation.api import evaluate_lspo_quality
+
+        result = evaluate_lspo_quality(
+            data_root=args.data_root,
+            artifacts_root=args.artifacts_root,
+            raw_lspo_parquet=args.raw_lspo_parquet,
+            raw_lspo_h5=args.raw_lspo_h5,
+            model_run_id=args.model_run_id,
+            model_bundle=args.model_bundle,
+            report_tag=args.report_tag,
+            allow_legacy_lspo_compat=True,
+            device=args.device,
+            precision_mode=args.precision_mode,
+            score_batch_size=args.score_batch_size,
+            force=bool(args.force),
+            progress=bool(args.progress),
+            quiet_libs=bool(args.quiet_libs),
+        )
+        payload = {
+            "model_run_id": result.model_run_id,
+            "metrics_dir": str(result.metrics_dir),
+            "report_json_path": str(result.report_json_path),
+            "summary_csv_path": str(result.summary_csv_path),
+            "per_seed_csv_path": str(result.per_seed_csv_path),
+            "report_markdown_path": str(result.report_markdown_path),
+        }
+        print(json.dumps(payload, indent=2))
+        return payload
+    except Exception as exc:
+        ui.fail(str(exc))
+        raise
+    finally:
+        ui.close()
+
+
+def cmd_train_lspo(args):
+    ui = CliUI(total_steps=9, progress=args.progress)
+    try:
+        from author_name_disambiguation.api import train_lspo_model
+
+        result = train_lspo_model(
+            data_root=args.data_root,
+            artifacts_root=args.artifacts_root,
+            raw_lspo_parquet=args.raw_lspo_parquet,
+            raw_lspo_h5=args.raw_lspo_h5,
+            run_stage=args.run_stage,
+            run_id=args.run_id,
+            device=args.device,
+            precision_mode=args.precision_mode,
+            force=bool(args.force),
+            progress=bool(args.progress),
+            quiet_libs=bool(args.quiet_libs),
+        )
+        payload = {
+            "run_id": result.run_id,
+            "metrics_dir": str(result.metrics_dir),
+            "train_manifest_path": str(result.train_manifest_path),
+            "stage_metrics_path": str(result.stage_metrics_path),
+            "go_no_go_path": str(result.go_no_go_path),
+            "cluster_config_used_path": str(result.cluster_config_used_path),
         }
         print(json.dumps(payload, indent=2))
         return payload
@@ -2380,13 +2493,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_train_stage_args(sp)
     sp.set_defaults(func=cmd_run_train_stage)
 
+    sp = sub.add_parser("train-lspo")
+    sp.add_argument("--run-stage", choices=["smoke", "mini", "mid", "full"], default="full")
+    sp.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
+    sp.add_argument("--artifacts-root", default=str(DEFAULT_ARTIFACTS_ROOT))
+    sp.add_argument("--raw-lspo-parquet", default=str(DEFAULT_RAW_LSPO_PARQUET))
+    sp.add_argument("--raw-lspo-h5", default=None)
+    sp.add_argument("--run-id", default=None)
+    sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_train_lspo)
+
     sp = sub.add_parser("run-infer-sources")
     sp.add_argument("--publications-path", required=True)
     sp.add_argument("--references-path", default=None)
     sp.add_argument("--output-root", required=True)
     sp.add_argument("--dataset-id", required=True)
-    sp.add_argument("--model-bundle", required=True)
-    sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full"], default="full")
+    sp.add_argument("--model-bundle", default=None)
+    sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full", "incremental"], default="full")
     sp.add_argument("--cluster-config", default=None)
     sp.add_argument("--gates-config", default=None)
     sp.add_argument(
@@ -2402,6 +2528,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_infer_sources)
+
+    sp = sub.add_parser("infer")
+    sp.add_argument("--publications-path", required=True)
+    sp.add_argument("--references-path", default=None)
+    sp.add_argument("--output-dir", required=True)
+    sp.add_argument("--dataset-id", default=None)
+    sp.add_argument("--model-bundle", default=None)
+    sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full", "incremental"], default="full")
+    sp.add_argument("--runtime", choices=["auto", "gpu", "cpu", "hf"], default="auto")
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_infer)
 
     sp = sub.add_parser("precompute-source-embeddings")
     sp.add_argument("--publications-path", required=True)
@@ -2433,6 +2571,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_cluster_test_report)
+
+    sp = sub.add_parser("quality-lspo")
+    sp.add_argument("--model-run-id", default=None)
+    sp.add_argument("--model-bundle", default=None)
+    sp.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
+    sp.add_argument("--artifacts-root", default=str(DEFAULT_ARTIFACTS_ROOT))
+    sp.add_argument("--raw-lspo-parquet", default=str(DEFAULT_RAW_LSPO_PARQUET))
+    sp.add_argument("--raw-lspo-h5", default=None)
+    sp.add_argument("--device", default="auto")
+    sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
+    sp.add_argument("--score-batch-size", type=int, default=8192)
+    sp.add_argument("--report-tag", default=None)
+    sp.add_argument("--force", action="store_true")
+    _add_progress_and_logging_args(sp)
+    sp.set_defaults(func=cmd_quality_lspo)
 
     sp = sub.add_parser("export-model-bundle")
     sp.add_argument("--model-run-id", required=True)

@@ -13,14 +13,20 @@ The intent is a lightweight package with one clear public runtime story: `gpu | 
 
 The installed surface is intentionally small:
 
+- `infer`
+- `quality-lspo`
+- `train-lspo`
 - `run-train-stage`
 - `run-cluster-test-report`
 - `export-model-bundle`
 - `precompute-source-embeddings`
 - `run-infer-sources`
 
-The public Python API for inference surfaces is intentionally small:
+The public Python API is intentionally small:
 
+- `disambiguate_sources()`
+- `evaluate_lspo_quality()`
+- `train_lspo_model()`
 - `InferSourcesRequest`
 - `InferSourcesResult`
 - `PrecomputeSourceEmbeddingsRequest`
@@ -91,11 +97,80 @@ If that class of error returns, repair the venv with the `uv pip` command above.
 
 ## Public CLI
 
+Normal package usage first:
+
 Show help:
 
 ```bash
 author-name-disambiguation -h
 ```
+
+Disambiguate one source dataset with the packaged Fixed Model Baseline:
+
+```bash
+author-name-disambiguation infer \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-dir artifacts/exports/ads_prod_current
+```
+
+`infer` defaults to `runtime=auto`, which means:
+
+- use `gpu` when CUDA is available
+- otherwise use `cpu`
+- never choose `hf` automatically
+
+The packaged Fixed Model Baseline bundle is used automatically unless you explicitly pass `--model-bundle`.
+
+Run an LSPO Quality Run with the Fixed Model Baseline:
+
+```bash
+author-name-disambiguation quality-lspo
+```
+
+Run an LSPO Training Run:
+
+```bash
+author-name-disambiguation train-lspo
+```
+
+Expert commands remain available when you need explicit control:
+
+```bash
+author-name-disambiguation run-infer-sources \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/exports/ads_prod_current \
+  --dataset-id ads_prod_current \
+  --runtime-mode gpu
+```
+
+The package baseline uses GPU for SPECTER/pair scoring and CPU for clustering. You only need `--cluster-backend` if you intentionally want to override that default.
+
+Run CPU-only inference explicitly:
+
+```bash
+author-name-disambiguation run-infer-sources \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/exports/ads_prod_current_cpu \
+  --dataset-id ads_prod_current \
+  --runtime-mode cpu
+```
+
+Run direct HF-backed inference in one package call:
+
+```bash
+export HF_TOKEN=...
+author-name-disambiguation run-infer-sources \
+  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
+  --references-path data/raw/ads/ads_prod_current/references.parquet \
+  --output-root artifacts/exports/ads_prod_current_hf \
+  --dataset-id ads_prod_current \
+  --runtime-mode hf
+```
+
+`hf` creates a dedicated paid Hugging Face endpoint on demand, uses it for remote SPECTER embeddings, and deletes it at the end of the run. It requires a token with `inference.endpoints.write`.
 
 Train a stage from explicit workspace paths:
 
@@ -125,47 +200,6 @@ author-name-disambiguation export-model-bundle \
   --artifacts-root artifacts
 ```
 
-Run source inference:
-
-```bash
-author-name-disambiguation run-infer-sources \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/exports/ads_prod_current \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --runtime-mode gpu
-```
-
-The package baseline uses GPU for SPECTER/pair scoring and CPU for clustering. You only need `--cluster-backend` if you intentionally want to override that default.
-
-Run CPU-first inference with the public auto mode:
-
-```bash
-author-name-disambiguation run-infer-sources \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/exports/ads_prod_current_cpu \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --runtime-mode cpu
-```
-
-Run direct HF-backed inference in one package call:
-
-```bash
-export HF_TOKEN=...
-author-name-disambiguation run-infer-sources \
-  --publications-path data/raw/ads/ads_prod_current/publications.parquet \
-  --references-path data/raw/ads/ads_prod_current/references.parquet \
-  --output-root artifacts/exports/ads_prod_current_hf \
-  --dataset-id ads_prod_current \
-  --model-bundle artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1 \
-  --runtime-mode hf
-```
-
-`hf` creates a dedicated paid Hugging Face endpoint on demand, uses it for remote SPECTER embeddings, and deletes it at the end of the run. It requires a token with `inference.endpoints.write`.
-
 Precompute remote SPECTER embeddings when you want reusable enriched source files:
 
 ```bash
@@ -180,10 +214,10 @@ author-name-disambiguation precompute-source-embeddings \
 
 ```python
 from author_name_disambiguation import (
-    InferSourcesRequest,
+    disambiguate_sources,
+    evaluate_lspo_quality,
     PrecomputeSourceEmbeddingsRequest,
     precompute_source_embeddings,
-    run_infer_sources,
 )
 
 precompute_source_embeddings(
@@ -195,11 +229,30 @@ precompute_source_embeddings(
     )
 )
 
+result = disambiguate_sources(
+    publications_path="data/raw/ads/ads_prod_current/publications.parquet",
+    references_path="data/raw/ads/ads_prod_current/references.parquet",
+    output_dir="artifacts/exports/ads_prod_current",
+    runtime="auto",
+)
+
+quality = evaluate_lspo_quality(
+    data_root="data",
+    artifacts_root="artifacts",
+    raw_lspo_parquet="data/raw/lspo/LSPO_v1.parquet",
+)
+```
+
+Advanced/programmatic expert entry points remain available:
+
+```python
+from author_name_disambiguation import InferSourcesRequest, run_infer_sources
+
 result = run_infer_sources(
     InferSourcesRequest(
         publications_path="data/raw/ads/ads_prod_current/publications.parquet",
         references_path="data/raw/ads/ads_prod_current/references.parquet",
-        output_root="artifacts/exports/ads_prod_current",
+        output_root="artifacts/exports/ads_prod_current_expert",
         dataset_id="ads_prod_current",
         model_bundle="artifacts/models/smoke_20260309T120000Z_cli12345678/bundle_v1",
         runtime_mode="cpu",
@@ -271,6 +324,7 @@ Inference outputs under `output_root`:
 - optional `references_disambiguated.{parquet|jsonl}`
 - `source_author_assignments.parquet`
 - `author_entities.parquet`
+- `summary.json`
 - `mention_clusters.parquet`
 - `05_stage_metrics_infer_sources.json`
 - `05_go_no_go_infer_sources.json`

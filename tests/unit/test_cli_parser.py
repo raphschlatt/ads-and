@@ -7,6 +7,9 @@ def test_build_parser_exposes_only_public_commands():
     parser = cli.build_parser()
     commands = set(parser._subparsers._group_actions[0].choices.keys())
     assert commands == {
+        "infer",
+        "quality-lspo",
+        "train-lspo",
         "run-train-stage",
         "run-infer-sources",
         "precompute-source-embeddings",
@@ -111,8 +114,6 @@ def test_run_infer_sources_parser_defaults():
             "out",
             "--dataset-id",
             "my_ads_2026",
-            "--model-bundle",
-            "/tmp/bundle",
         ]
     )
 
@@ -121,7 +122,7 @@ def test_run_infer_sources_parser_defaults():
     assert args.references_path is None
     assert args.output_root == "out"
     assert args.dataset_id == "my_ads_2026"
-    assert args.model_bundle == "/tmp/bundle"
+    assert args.model_bundle is None
     assert args.cluster_config is None
     assert args.gates_config is None
     assert args.infer_stage == "full"
@@ -151,7 +152,7 @@ def test_run_infer_sources_parser_accepts_overrides():
             "--model-bundle",
             "/tmp/bundle",
             "--infer-stage",
-            "mini",
+            "incremental",
             "--cluster-config",
             "cfg/cluster.yaml",
             "--gates-config",
@@ -172,7 +173,7 @@ def test_run_infer_sources_parser_accepts_overrides():
     )
 
     assert args.references_path == "references.parquet"
-    assert args.infer_stage == "mini"
+    assert args.infer_stage == "incremental"
     assert args.cluster_config == "cfg/cluster.yaml"
     assert args.gates_config == "cfg/gates.yaml"
     assert args.progress is False
@@ -182,6 +183,72 @@ def test_run_infer_sources_parser_accepts_overrides():
     assert args.cluster_backend == "sklearn_cpu"
     assert args.uid_scope == "registry"
     assert args.uid_namespace == "stable_ads"
+
+
+def test_infer_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "infer",
+            "--publications-path",
+            "publications.parquet",
+            "--output-dir",
+            "out",
+        ]
+    )
+
+    assert args.command == "infer"
+    assert args.publications_path == "publications.parquet"
+    assert args.references_path is None
+    assert args.output_dir == "out"
+    assert args.dataset_id is None
+    assert args.model_bundle is None
+    assert args.infer_stage == "full"
+    assert args.runtime == "auto"
+    assert args.force is False
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_infer
+
+
+def test_quality_lspo_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(["quality-lspo"])
+
+    assert args.command == "quality-lspo"
+    assert args.model_run_id is None
+    assert args.model_bundle is None
+    assert args.data_root == "data"
+    assert args.artifacts_root == "artifacts"
+    assert args.raw_lspo_parquet == "data/raw/lspo/LSPO_v1.parquet"
+    assert args.raw_lspo_h5 is None
+    assert args.device == "auto"
+    assert args.precision_mode == "fp32"
+    assert args.score_batch_size == 8192
+    assert args.report_tag is None
+    assert args.force is False
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_quality_lspo
+
+
+def test_train_lspo_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(["train-lspo"])
+
+    assert args.command == "train-lspo"
+    assert args.run_stage == "full"
+    assert args.data_root == "data"
+    assert args.artifacts_root == "artifacts"
+    assert args.raw_lspo_parquet == "data/raw/lspo/LSPO_v1.parquet"
+    assert args.raw_lspo_h5 is None
+    assert args.run_id is None
+    assert args.device == "auto"
+    assert args.precision_mode is None
+    assert args.force is False
+    assert args.progress is True
+    assert args.quiet_libs is True
+    assert args.func is cli.cmd_train_lspo
 
 
 def test_export_model_bundle_parser():
