@@ -421,27 +421,27 @@ def generate_chars2vec_embeddings(
         os.environ["ABSL_LOG_LEVEL"] = "3"
         os.environ["KERAS_BACKEND"] = "tensorflow"
 
-    tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
     generation_started_at = perf_counter()
     try:
-        import chars2vec  # type: ignore
-
-        model_load_started_at = perf_counter()
         with _filter_known_library_stderr(enabled=quiet_libraries):
+            tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
+            import chars2vec  # type: ignore
+
+            model_load_started_at = perf_counter()
             model = chars2vec.load_model(model_name)
-        model_load_seconds = float(perf_counter() - model_load_started_at)
-        setattr(model, "keras", chars2vec.keras)
-        cleanup_error = None
-        try:
-            emb, vectorize_meta = _vectorize_words_silently(
-                model,
-                names,
-                batch_size=batch_size,
-                execution_mode=execution_mode,
-                show_progress=show_progress if execution_mode == "predict" else False,
-            )
-        finally:
-            cleanup_error = _cleanup_tensorflow_runtime(model)
+            model_load_seconds = float(perf_counter() - model_load_started_at)
+            setattr(model, "keras", chars2vec.keras)
+            cleanup_error = None
+            try:
+                emb, vectorize_meta = _vectorize_words_silently(
+                    model,
+                    names,
+                    batch_size=batch_size,
+                    execution_mode=execution_mode,
+                    show_progress=show_progress if execution_mode == "predict" else False,
+                )
+            finally:
+                cleanup_error = _cleanup_tensorflow_runtime(model)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:
             raise ValueError(f"Unexpected chars2vec output shape: {emb.shape}")

@@ -533,7 +533,9 @@ def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_clea
     assert tf_state["clear_calls"] == 1
 
 
-def test_generate_chars2vec_embeddings_filters_model_load_but_not_predict(monkeypatch: pytest.MonkeyPatch):
+def test_generate_chars2vec_embeddings_filters_known_tensorflow_startup_noise_for_full_chars2vec_run(
+    monkeypatch: pytest.MonkeyPatch,
+):
     filter_state = {"active": False}
     call_states: dict[str, bool] = {}
 
@@ -559,11 +561,21 @@ def test_generate_chars2vec_embeddings_filters_model_load_but_not_predict(monkey
             self.vocab_size = 1
             self.embedding_model = _FakeEmbeddingModel()
 
+    def _configure_tensorflow_memory_growth():
+        call_states["memory_growth_filter_active"] = bool(filter_state["active"])
+        return True, None
+
     def _load_model(_model_name):
         call_states["load_filter_active"] = bool(filter_state["active"])
         return _FakeModel()
 
+    def _cleanup_tensorflow_runtime(_model):
+        call_states["cleanup_filter_active"] = bool(filter_state["active"])
+        return None
+
     monkeypatch.setattr(embed_chars2vec, "_filter_known_library_stderr", _fake_filter_known_library_stderr)
+    monkeypatch.setattr(embed_chars2vec, "_configure_tensorflow_memory_growth", _configure_tensorflow_memory_growth)
+    monkeypatch.setattr(embed_chars2vec, "_cleanup_tensorflow_runtime", _cleanup_tensorflow_runtime)
     monkeypatch.setattr(embed_chars2vec, "_pad_sequences", lambda _model, _words: np.ones((1, 1, 1), dtype=np.float32))
     monkeypatch.setitem(
         sys.modules,
@@ -586,8 +598,12 @@ def test_generate_chars2vec_embeddings_filters_model_load_but_not_predict(monkey
 
     assert out.shape == (1, 50)
     assert meta["generation_mode"] == "chars2vec"
+    assert meta["tensorflow_memory_growth_enabled"] is True
+    assert meta["tensorflow_memory_growth_error"] is None
+    assert call_states["memory_growth_filter_active"] is True
     assert call_states["load_filter_active"] is True
-    assert call_states["predict_filter_active"] is False
+    assert call_states["predict_filter_active"] is True
+    assert call_states["cleanup_filter_active"] is True
 
 
 def test_generate_chars2vec_embeddings_tolerates_tensorflow_memory_growth_and_cleanup_errors(
