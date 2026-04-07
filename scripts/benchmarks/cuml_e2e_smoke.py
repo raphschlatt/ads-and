@@ -126,8 +126,8 @@ def _format_env_integrity_failure(report: dict[str, Any]) -> str:
         for package_name in GPU_ENV_PACKAGES:
             lines.append(f"- {package_name}={versions.get(package_name)}")
     lines.append(
-        "Repair the venv with `uv pip --no-deps -r requirements-gpu-cu126.txt`; "
-        "do not mix pip and uv installs."
+        "This smoke test expects a dedicated RAPIDS/cuML environment. "
+        "The standard repo `.venv` now only guarantees the shared Torch + TensorFlow GPU runtime for infer_sources."
     )
     return "\n".join(lines)
 

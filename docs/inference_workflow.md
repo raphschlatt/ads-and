@@ -129,18 +129,17 @@ uv pip install \
 source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
 python -m pip check
 python scripts/ops/gpu_env_doctor.py --json
-python scripts/benchmarks/cuml_e2e_smoke.py --require-gpu-backend
 ```
 
 - Do not trust TensorFlow-only GPU logs as proof of SPECTER acceleration.
 - If `gpu_env_doctor.py` reports `tensorflow_expected_cu12_but_detected_cu13_stack`, `chars2vec` will run on CPU even while PyTorch still uses CUDA.
 - `requirements-gpu-cu126.txt` is the repo-managed `cu126/cu12` overlay for:
   - `torch 2.10.x + cu126`
-  - RAPIDS `cu12`
   - TensorFlow `2.20` GPU vendor wheels on `cu12`
-- The repair command uses `--no-deps` on purpose so `uv` does not replace the working Torch CUDA wheels with a second transitive solve from RAPIDS.
+- The repair command uses `--no-deps` on purpose so `uv` does not replace the working Torch CUDA wheels during runtime repair.
 - `python -m pip check` is a diagnostic, not an install path.
-- Do not manually patch single CUDA, TensorFlow, or RAPIDS packages with `pip install ...`; always repair from `requirements-gpu-cu126.txt` with `uv pip`.
+- Do not manually patch single CUDA or TensorFlow packages with `pip install ...`; always repair from `requirements-gpu-cu126.txt` with `uv pip`.
+- `cuml_e2e_smoke.py` is an optional smoke test for a separate RAPIDS/cuML environment and is no longer part of the standard repo-`.venv` gate for `infer_sources`.
 
 ## Output Contract
 

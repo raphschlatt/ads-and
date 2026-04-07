@@ -1,12 +1,10 @@
-# GPU overlay for the repo venv at
+# Shared GPU runtime overlay for the repo venv at
 # `/home/ubuntu/Author_Name_Disambiguation/.venv`.
 # Repair this stack with `uv pip --no-deps`; it is an overlay for the
-# repo-managed cu126/cu12 runtime, not a standalone solver input.
-cupy-cuda12x==14.0.1
-cuml-cu12==26.2.0
-cuda-python==12.9.4
-cuda-bindings==12.9.4
-cuda-pathfinder==1.3.3
+# repo-managed infer_sources runtime, not a standalone solver input.
+# This file intentionally covers the shared Torch + TensorFlow cu12 runtime.
+# RAPIDS / cuML are not part of the standard repo venv because their current
+# pip overlay conflicts with the Torch cu126 vendor wheels used by infer_sources.
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cuda-cupti-cu12==12.6.80
 nvidia-cuda-nvrtc-cu12==12.6.77
@@ -22,5 +20,3 @@ nvidia-nccl-cu12==2.27.5
 nvidia-nvjitlink-cu12==12.6.85
 nvidia-nvshmem-cu12==3.4.5
 nvidia-nvtx-cu12==12.6.77
-rmm-cu12==26.2.0
-pylibraft-cu12==26.2.0

@@ -20,6 +20,8 @@
   - `--require-tensorflow-gpu`
 - Repo-GPU-Standard ist jetzt `/home/ubuntu/Author_Name_Disambiguation/.venv`, nicht mehr das alte Shared-Host-`.venv`.
 - Zielstack ist wieder klar `cu126/cu12`, nicht `cu13`.
+- `requirements-gpu-cu126.txt` beschreibt jetzt nur noch den gemeinsamen Torch-/TensorFlow-GPU-Stack fuer die Standard-`.venv`.
+- RAPIDS / `cuml_gpu` sind vorerst kein Teil der Standard-`.venv`, weil die aktuelle RAPIDS-Pip-Overlay die Torch-`cu126`-Vendor-Wheels im selben Venv kaputtzieht.
 - Exact-Graph-Clustering sendet wieder blockweisen Fortschritt statt nur eines finalen `100%`-Signals.
 - Balanced Progress bleibt bewusst begrenzt:
   - sichtbar: `chars2vec`, `pair_building`, `exact-graph clustering`
@@ -41,14 +43,14 @@
 
 ## Next gated experiments
 
-1. Repo-`.venv` mit `gpu_env_doctor.py` auf gesunden `cu126/cu12`-Status bringen.
-2. `chars2vec exact32` CPU vs GPU auf der aktuellen Maschine erneut benchmarken.
-3. Produktives ADS `chars2vec auto` auf repariertem GPU-Stack erneut benchmarken.
-2. SPECTER A/B mit unveraenderter vs nicht erzwungener `TOKENIZERS_PARALLELISM`-Einstellung laufen lassen.
+1. `chars2vec exact32` CPU vs GPU auf der aktuellen Maschine erneut benchmarken.
+2. Produktives ADS `chars2vec auto` auf repariertem GPU-Stack erneut benchmarken.
+3. SPECTER A/B mit unveraenderter vs nicht erzwungener `TOKENIZERS_PARALLELISM`-Einstellung laufen lassen.
 4. ADS Full Run nach dieser Welle neu messen und gegen die Baseline vergleichen.
 5. Nur bei ausreichendem Netto-Gewinn den naechsten groesseren Refactor anfassen:
    - Pair-Building auf block spans statt Block-DataFrames
    - Exact-Graph-Union-Find in kompilierten Pfad schieben
+6. Separat entscheiden, ob `cuml_gpu` kuenftig eine dedizierte zweite GPU-Umgebung bekommt oder ein kompatibler gemeinsamer Stack benoetigt wird.
 
 ## Repo hygiene
 

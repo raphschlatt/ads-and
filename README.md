@@ -77,14 +77,16 @@ Do not start a large infer run unless all of these succeed:
 source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
 python -m pip check
 python scripts/ops/gpu_env_doctor.py --json
-python scripts/benchmarks/cuml_e2e_smoke.py --require-gpu-backend
 ```
 
 The active repair target is the repo-managed `cu126/cu12` stack in [requirements-gpu-cu126.txt](/home/ubuntu/Author_Name_Disambiguation/requirements-gpu-cu126.txt).
-That file now pins the `torch 2.10.x + cu126` vendor wheels and the extra `cu12` TensorFlow GPU runtime packages so `chars2vec` and the PyTorch stages land on the same CUDA major.
+That file now pins the shared `torch 2.10.x + cu126` vendor wheels and the extra `cu12` TensorFlow GPU runtime packages so `chars2vec` and the PyTorch stages land on the same CUDA major.
 
 If `scripts/ops/gpu_env_doctor.py` reports a mismatch like `tensorflow_expected_cu12_but_detected_cu13_stack`, the venv has drifted and `chars2vec` will fall back to CPU even if PyTorch still sees CUDA.
-Repair from the repo commands above; do not manually patch single CUDA, TensorFlow, or RAPIDS packages with `pip install ...`.
+Repair from the repo commands above; do not manually patch single CUDA or TensorFlow packages with `pip install ...`.
+
+`scripts/benchmarks/cuml_e2e_smoke.py` is now an optional check for a dedicated RAPIDS/cuML environment.
+It is not part of the standard `infer_sources` repo venv health gate, because the current RAPIDS pip overlay does not coexist cleanly with the Torch `cu126` vendor wheel set in the same `.venv`.
 
 ## Public CLI
 

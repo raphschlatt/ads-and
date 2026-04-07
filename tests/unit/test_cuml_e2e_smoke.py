@@ -64,4 +64,4 @@ def test_check_gpu_env_integrity_reports_version_drift(monkeypatch):
     message = module._format_env_integrity_failure(report)
     assert "GPU environment integrity failed." in message
     assert "cuda-pathfinder=1.2.2" in message
-    assert "Repair the venv with `uv pip --no-deps -r requirements-gpu-cu126.txt`" in message
+    assert "dedicated RAPIDS/cuML environment" in message
