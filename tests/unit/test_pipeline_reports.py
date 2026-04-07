@@ -311,6 +311,10 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
             "specter": {"tokenize_seconds_total": 12.0, "forward_seconds_total": 4.0},
             "pair_scoring": {"parquet_write_seconds": 6.0},
         },
+        storage_mode="out_of_core_exact",
+        scratch_dir="/tmp/scratch",
+        scratch_free_bytes=1234,
+        projected_scratch_bytes=5678,
     )
     assert stage_metrics["metric_scope"] == "infer"
     assert stage_metrics["counts"]["ads_clusters"] == 4
@@ -323,6 +327,10 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     assert stage_metrics["pair_score_range_ok"] is True
     assert stage_metrics["split_high_sim_rate_probe"] == 0.13
     assert stage_metrics["lspo_pairwise_f1"] is None
+    assert stage_metrics["storage_mode"] == "out_of_core_exact"
+    assert stage_metrics["scratch_dir"] == "/tmp/scratch"
+    assert stage_metrics["scratch_free_bytes"] == 1234
+    assert stage_metrics["projected_scratch_bytes"] == 5678
 
     write_json(stage_metrics, current_dir / "05_stage_metrics_infer_sources.json")
     write_json({"go": True, "blockers": [], "warnings": []}, current_dir / "05_go_no_go_infer_sources.json")

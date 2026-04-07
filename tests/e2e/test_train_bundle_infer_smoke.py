@@ -269,6 +269,9 @@ def _apply_fast_mocks(monkeypatch) -> None:
         return manifest
 
     def _score(mentions, pairs, output_path=None, **_kwargs):
+        del mentions
+        if isinstance(pairs, (str, Path)):
+            pairs = pd.read_parquet(pairs)
         out = pairs[["pair_id", "mention_id_1", "mention_id_2", "block_key"]].copy()
         if len(out):
             out["cosine_sim"] = np.linspace(0.6, 0.9, num=len(out), dtype=np.float32)
@@ -299,6 +302,100 @@ def _apply_fast_mocks(monkeypatch) -> None:
             }
         return out
 
+    def _encode_mentions(chars2vec, source_text_embeddings, mention_source_index, output_path, norms_output_path=None, **_kwargs):
+        del chars2vec, source_text_embeddings
+        mention_index = np.load(mention_source_index)
+        arr = np.ones((len(mention_index), 4), dtype=np.float32)
+        norms = np.linalg.norm(arr, axis=1).astype(np.float32)
+        np.save(output_path, arr)
+        np.save(norms_output_path, norms)
+        return (
+            Path(output_path),
+            {
+                "resolved_device": "cpu",
+                "effective_precision_mode": "fp32",
+                "mention_encode_seconds": 0.01,
+                "mention_embedding_shape": [int(len(arr)), int(arr.shape[1])],
+                "mention_embedding_bytes": int(arr.nbytes),
+                "mention_norm_bytes": int(norms.nbytes),
+                "cuda_oom_fallback_used": False,
+            },
+        )
+
+    def _score_from_embeddings(mentions, pairs, output_path=None, score_callback=None, **_kwargs):
+        out = _score(mentions=mentions, pairs=pairs, output_path=output_path, **_kwargs)
+        score_df = out[0] if isinstance(out, tuple) else out
+        if score_callback is not None:
+            score_callback(
+                {
+                    "pair_id": score_df["pair_id"].astype(str).to_numpy(copy=False),
+                    "mention_id_1": score_df["mention_id_1"].astype(str).to_numpy(copy=False),
+                    "mention_id_2": score_df["mention_id_2"].astype(str).to_numpy(copy=False),
+                    "block_key": score_df["block_key"].astype(str).to_numpy(copy=False),
+                    "distance": score_df["distance"].astype(np.float32).to_numpy(copy=False),
+                }
+            )
+        if _kwargs.get("return_runtime_meta"):
+            return score_df, {
+                "requested_device": str(_kwargs.get("device", "cpu")),
+                "resolved_device": "cpu",
+                "fallback_reason": None,
+                "torch_version": "2.10.0+cpu",
+                "torch_cuda_version": None,
+                "torch_cuda_available": False,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": "fp32",
+                "pair_scoring_strategy": "preencoded_mentions",
+                "mention_storage_device": "cpu",
+                "cuda_oom_fallback_used": False,
+                "numeric_clamping": {"clamped": False},
+            }
+        return out
+
+    class _FakeExactGraphClusterAccumulator:
+        def __init__(self, *, mentions, cluster_config, backend_requested="auto"):
+            del cluster_config
+            self._mentions = mentions
+            self._backend_requested = backend_requested
+            self._pair_rows = 0
+
+        def consume_score_columns(self, score_columns):
+            self._pair_rows += int(len(score_columns.get("block_key", [])))
+
+        def finalize(self):
+            out = self._mentions[["mention_id", "block_key"]].copy()
+            out["author_uid"] = out["block_key"].astype(str) + "::0"
+            return out, {
+                "cluster_backend_requested": str(self._backend_requested),
+                "cluster_backend_effective": "connected_components_cpu",
+                "cpu_sharding_mode": "off",
+                "cpu_sharding_enabled": False,
+                "cpu_workers_requested": 4,
+                "cpu_workers_effective": 4,
+                "ram_budget_bytes": None,
+                "total_pairs_est": int(self._pair_rows),
+                "block_p95": 2.0,
+                "block_size_histogram": {"1": 1},
+                "block_count_by_bucket": {"1": 1},
+                "total_seconds_by_bucket": {},
+                "dbscan_seconds_by_bucket": {},
+                "distance_matrix_seconds_total": 0.0,
+                "constraints_seconds_total": 0.0,
+                "sanitize_seconds_total": 0.0,
+                "dbscan_seconds_total": 0.0,
+                "gpu_transfer_seconds_total": 0.0,
+                "top_slow_blocks": [],
+                "sanitize_totals": {
+                    "corrected_blocks": 0,
+                    "non_finite_count": 0,
+                    "negative_count": 0,
+                    "above_max_count": 0,
+                    "asymmetry_pairs": 0,
+                    "diag_reset_count": 0,
+                },
+            }
+
     def _export(mentions, clusters, output_path):
         out = mentions[["bibcode", "author_idx", "mention_id", "source_type"]].merge(
             clusters[["mention_id", "author_uid"]],
@@ -322,6 +419,9 @@ def _apply_fast_mocks(monkeypatch) -> None:
     monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _pairs)
     monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score)
     monkeypatch.setattr("author_name_disambiguation.source_inference.cluster_blockwise_dbscan", _cluster)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.encode_mentions_to_memmap", _encode_mentions)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_from_mention_embeddings", _score_from_embeddings)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.ExactGraphClusterAccumulator", _FakeExactGraphClusterAccumulator)
 
 
 def test_train_bundle_infer_contract_smoke(monkeypatch, tmp_path: Path):

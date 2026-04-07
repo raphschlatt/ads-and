@@ -125,6 +125,7 @@ def test_run_infer_sources_parser_defaults():
     assert args.output_root == "out"
     assert args.dataset_id == "my_ads_2026"
     assert args.model_bundle is None
+    assert args.scratch_dir is None
     assert args.cluster_config is None
     assert args.gates_config is None
     assert args.infer_stage == "full"
@@ -154,6 +155,8 @@ def test_run_infer_sources_parser_accepts_overrides():
             "my_ads_2026",
             "--model-bundle",
             "/tmp/bundle",
+            "--scratch-dir",
+            "/tmp/scratch",
             "--infer-stage",
             "incremental",
             "--cluster-config",
@@ -176,6 +179,7 @@ def test_run_infer_sources_parser_accepts_overrides():
     )
 
     assert args.references_path == "references.parquet"
+    assert args.scratch_dir == "/tmp/scratch"
     assert args.infer_stage == "incremental"
     assert args.cluster_config == "cfg/cluster.yaml"
     assert args.gates_config == "cfg/gates.yaml"

@@ -10,17 +10,28 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from author_name_disambiguation.approaches.nand.build_pairs import build_pairs_within_blocks, write_pairs
-from author_name_disambiguation.approaches.nand.cluster import cluster_blockwise_dbscan
+from author_name_disambiguation.approaches.nand.build_pairs import build_pairs_within_blocks
+from author_name_disambiguation.approaches.nand.cluster import ExactGraphClusterAccumulator, cluster_blockwise_dbscan
 from author_name_disambiguation.approaches.nand.export import (
     build_author_entities,
     build_source_author_assignments,
     export_source_mirrored_outputs,
 )
-from author_name_disambiguation.approaches.nand.infer_pairs import score_pairs_with_checkpoint
+from author_name_disambiguation.approaches.nand.infer_pairs import (
+    encode_mentions_to_memmap,
+    score_pairs_from_mention_embeddings,
+    score_pairs_with_checkpoint,
+)
 from author_name_disambiguation.common.cli_ui import CliProgressHandler, get_active_ui
 from author_name_disambiguation.common.cpu_runtime import compute_ram_budget_bytes, normalize_workers_request
-from author_name_disambiguation.common.io_schema import PAIR_REQUIRED_COLUMNS, PAIR_SCORE_REQUIRED_COLUMNS, read_parquet, save_parquet
+from author_name_disambiguation.common.io_schema import (
+    PAIR_REQUIRED_COLUMNS,
+    PAIR_SCORE_REQUIRED_COLUMNS,
+    available_disk_bytes,
+    save_parquet,
+    sort_parquet_file,
+    write_parquet_block_manifest,
+)
 from author_name_disambiguation.common.package_resources import load_yaml_like, load_yaml_resource
 from author_name_disambiguation.common.pipeline_reports import (
     build_cluster_qc,
@@ -131,6 +142,64 @@ def _fanout_specter_embeddings_to_mentions(
     except KeyError as exc:
         raise RuntimeError("Missing source embeddings for one or more mention canonical_record_id values.") from exc
     return np.asarray(source_embeddings[mention_positions], dtype=np.float32)
+
+
+def _build_mention_source_index(
+    *,
+    specter_source_records: pd.DataFrame,
+    mentions: pd.DataFrame,
+) -> np.ndarray:
+    if "canonical_record_id" not in specter_source_records.columns:
+        raise ValueError("specter_source_records missing required column: canonical_record_id")
+    if "canonical_record_id" not in mentions.columns:
+        raise ValueError("mentions missing required column: canonical_record_id")
+
+    source_ids = pd.to_numeric(specter_source_records["canonical_record_id"], errors="coerce")
+    mention_ids = pd.to_numeric(mentions["canonical_record_id"], errors="coerce")
+    if source_ids.isna().any():
+        raise ValueError("specter_source_records contain null canonical_record_id values.")
+    if mention_ids.isna().any():
+        raise ValueError("mentions contain null canonical_record_id values.")
+
+    source_ids = source_ids.astype("int64")
+    mention_ids = mention_ids.astype("int64")
+    if source_ids.duplicated().any():
+        raise ValueError("specter_source_records canonical_record_id values must be unique.")
+
+    source_positions = pd.Series(np.arange(len(source_ids), dtype=np.int64), index=source_ids.to_numpy())
+    try:
+        mention_positions = source_positions.loc[mention_ids.to_numpy()].to_numpy(dtype=np.int64, copy=False)
+    except KeyError as exc:
+        raise RuntimeError("Missing source embeddings for one or more mention canonical_record_id values.") from exc
+    return np.asarray(mention_positions, dtype=np.int64)
+
+
+def _resolve_scratch_dir(output_root: Path, scratch_dir: str | Path | None) -> Path:
+    if scratch_dir is None:
+        return _ensure_dir(output_root / "scratch")
+    return _ensure_dir(Path(scratch_dir).expanduser().resolve())
+
+
+def _estimate_exact_scratch_bytes(
+    *,
+    n_mentions: int,
+    pair_upper_bound: int,
+    mention_embedding_dim: int,
+) -> int:
+    mention_source_index_bytes = int(n_mentions) * 8
+    mention_embedding_bytes = int(n_mentions) * int(mention_embedding_dim) * 4
+    mention_norm_bytes = int(n_mentions) * 4
+    pairs_bytes = int(pair_upper_bound) * 384
+    pair_scores_bytes = int(pair_upper_bound) * 320
+    manifest_bytes = int(max(1, n_mentions)) * 64
+    return int(
+        mention_source_index_bytes
+        + mention_embedding_bytes
+        + mention_norm_bytes
+        + pairs_bytes
+        + pair_scores_bytes
+        + manifest_bytes
+    )
 
 
 def _default_runtime_meta(*, requested_device: str, effective_precision_mode: str | None = None) -> dict[str, Any]:
@@ -412,6 +481,8 @@ def _build_infer_preflight(
     max_pairs_per_block: int | None,
     score_batch_size: int,
     max_ram_fraction: float,
+    mention_embedding_dim: int,
+    scratch_dir: Path,
 ) -> dict[str, Any]:
     n_mentions = int(len(mentions))
     block_sizes = mentions.groupby("block_key").size() if len(mentions) and "block_key" in mentions.columns else pd.Series(dtype=int)
@@ -422,15 +493,40 @@ def _build_infer_preflight(
     pair_upper_bound = _estimate_pair_upper_bound(mentions, max_pairs_per_block=max_pairs_per_block)
     emb_chars_bytes = n_mentions * 50 * 4
     emb_text_bytes = n_mentions * 768 * 4
-    pairs_bytes = pair_upper_bound * 160
-    pair_scores_bytes = pair_upper_bound * 80
+    mention_embedding_bytes = n_mentions * int(mention_embedding_dim) * 4
+    mention_source_index_bytes = n_mentions * 8
+    mention_norm_bytes = n_mentions * 4
+    pairs_bytes = pair_upper_bound * 384
+    pair_scores_bytes = pair_upper_bound * 320
     qc_bytes = pair_upper_bound * 48
     score_batch_rows = max(1, min(pair_upper_bound, int(score_batch_size)))
     score_batch_bytes = score_batch_rows * (50 + 768) * 4 * 2
-    estimate_total = int(emb_chars_bytes + emb_text_bytes + pairs_bytes + pair_scores_bytes + qc_bytes + score_batch_bytes)
+    estimate_total = int(
+        emb_chars_bytes
+        + emb_text_bytes
+        + mention_embedding_bytes
+        + mention_source_index_bytes
+        + mention_norm_bytes
+        + pairs_bytes
+        + pair_scores_bytes
+        + qc_bytes
+        + score_batch_bytes
+    )
     ram_total = _estimate_ram_total_bytes()
     ram_budget = int(ram_total * float(max_ram_fraction)) if ram_total is not None else None
     memory_feasible = None if ram_budget is None else bool(estimate_total <= ram_budget)
+    scratch_free_bytes = available_disk_bytes(scratch_dir)
+    projected_scratch_bytes = _estimate_exact_scratch_bytes(
+        n_mentions=n_mentions,
+        pair_upper_bound=pair_upper_bound,
+        mention_embedding_dim=mention_embedding_dim,
+    )
+    exact_infeasible_reason = None
+    if scratch_free_bytes is not None and projected_scratch_bytes > int(scratch_free_bytes * 0.95):
+        exact_infeasible_reason = (
+            "projected_scratch_bytes_exceeds_available_free_space:"
+            f"{projected_scratch_bytes}>{int(scratch_free_bytes * 0.95)}"
+        )
 
     return {
         "n_mentions": n_mentions,
@@ -442,6 +538,9 @@ def _build_infer_preflight(
         "estimate_bytes": {
             "emb_chars": int(emb_chars_bytes),
             "emb_text": int(emb_text_bytes),
+            "mention_embeddings": int(mention_embedding_bytes),
+            "mention_source_index": int(mention_source_index_bytes),
+            "mention_norms": int(mention_norm_bytes),
             "pairs": int(pairs_bytes),
             "pair_scores": int(pair_scores_bytes),
             "cluster_qc": int(qc_bytes),
@@ -452,6 +551,11 @@ def _build_infer_preflight(
         "ram_budget_bytes": ram_budget,
         "max_ram_fraction": float(max_ram_fraction),
         "memory_feasible": memory_feasible,
+        "storage_mode": "out_of_core_exact",
+        "scratch_dir": str(scratch_dir),
+        "scratch_free_bytes": None if scratch_free_bytes is None else int(scratch_free_bytes),
+        "projected_scratch_bytes": int(projected_scratch_bytes),
+        "exact_infeasible_reason": exact_infeasible_reason,
     }
 
 
@@ -629,6 +733,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
         output_root = Path(request.output_root).expanduser().resolve()
         dirs = _build_output_dirs(output_root)
+        scratch_dir = _resolve_scratch_dir(output_root, getattr(request, "scratch_dir", None))
         run_id = default_run_id("infer_sources")
         references_present = request.references_path is not None
         bootstrap_runtime = _probe_bootstrap_runtime(str(bootstrap_device))
@@ -760,7 +865,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             requested_device=effective_request_device,
         )
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
-    score_chunked_threshold = int(infer_overrides.get("score_chunked_threshold", 500_000))
     pair_chunk_rows = int(infer_overrides.get("pair_chunk_rows", 200_000))
     cpu_workers = normalize_workers_request(infer_overrides.get("cpu_workers"))
     cpu_sharding_mode = str(infer_overrides.get("cpu_sharding_mode", "auto")).strip().lower()
@@ -792,6 +896,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "publications_path": str(Path(request.publications_path).expanduser().resolve()),
         "references_path": None if request.references_path is None else str(Path(request.references_path).expanduser().resolve()),
         "output_root": str(output_root),
+        "scratch_dir": str(scratch_dir),
         "infer_stage": infer_stage,
         "infer_stage_requested": infer_stage_requested,
         "infer_stage_effective": infer_stage,
@@ -808,6 +913,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "generation_mode": None,
         "precision_mode": str(request.precision_mode),
         "cluster_backend": str(cluster_backend),
+        "storage_mode": "out_of_core_exact",
         "cpu_runtime_policy": {
             "cpu_workers": _format_worker_request(cpu_workers),
             "cpu_sharding_mode": cpu_sharding_mode,
@@ -821,15 +927,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     prepared = prepare_ads_source_data(
         publications_path=request.publications_path,
         references_path=request.references_path,
-        return_raw_sources=True,
+        return_raw_sources=False,
         return_runtime_meta=True,
     )
     publications = prepared["publications"]
     references = prepared["references"]
     canonical_records = prepared["canonical_records"]
     full_mentions = prepared["mentions"]
-    raw_publications = prepared.get("raw_publications")
-    raw_references = prepared.get("raw_references")
     load_inputs_runtime = dict(prepared.get("runtime", {}) or {})
     context_payload["runtime"] = {"load_inputs": load_inputs_runtime}
     write_json(context_payload, context_path)
@@ -849,7 +953,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     save_parquet(full_mentions, dirs["interim"] / "mentions_full.parquet", index=False)
 
     if infer_stage == "full":
-        mentions = full_mentions.copy()
+        mentions = full_mentions
     else:
         mentions = build_stage_subset(
             full_mentions,
@@ -902,6 +1006,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         max_pairs_per_block=max_pairs_per_block,
         score_batch_size=score_batch_size,
         max_ram_fraction=max_ram_fraction,
+        mention_embedding_dim=int(model_info["model_cfg"].get("training", {}).get("output_dim", 256)),
+        scratch_dir=scratch_dir,
     )
     preflight["run_id"] = run_id
     preflight["run_stage"] = "infer_sources"
@@ -924,6 +1030,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"specter_recompute={_format_count(precomputed_embeddings['specter_sources']['recomputed_embedding_count'])} | "
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])}"
     )
+    if preflight.get("exact_infeasible_reason"):
+        raise RuntimeError(
+            "Exact out-of-core inference is physically infeasible on this scratch volume: "
+            f"{preflight['exact_infeasible_reason']}. "
+            f"scratch_dir={preflight.get('scratch_dir')} "
+            f"scratch_free_bytes={preflight.get('scratch_free_bytes')} "
+            f"projected_scratch_bytes={preflight.get('projected_scratch_bytes')}"
+        )
     preflight_elapsed = perf_counter() - preflight_started_at
     _stage_done(
         f"Preflight for {_format_count(len(mentions))} mentions in "
@@ -1056,21 +1170,24 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     write_json(context_payload, context_path)
     if not isinstance(text_source_embeddings, np.ndarray):
         text_source_embeddings = np.load(text_path, mmap_mode="r")
-    text = _fanout_specter_embeddings_to_mentions(
+    mention_source_index_path = scratch_dir / "mention_source_index.npy"
+    mention_source_index = _build_mention_source_index(
         specter_source_records=specter_source_records,
         mentions=mentions,
-        source_embeddings=np.asarray(text_source_embeddings),
     )
+    np.save(mention_source_index_path, mention_source_index.astype(np.int64, copy=False))
     text_runtime_meta["source_embedding_count"] = int(len(specter_source_records))
-    text_runtime_meta["mention_materialization_count"] = int(len(mentions))
+    text_runtime_meta["mention_materialization_count"] = 0
     text_runtime_meta["canonical_to_mentions_fanout"] = float(len(mentions) / max(1, len(specter_source_records)))
+    text_runtime_meta["mention_source_index_path"] = str(mention_source_index_path)
+    text_runtime_meta["mention_source_index_bytes"] = int(mention_source_index.nbytes)
     text_elapsed = perf_counter() - text_embeddings_started_at
     text_runtime_meta["wall_seconds"] = float(text_elapsed)
     resolved_text_device = text_runtime_meta.get("resolved_device")
     if text_runtime_meta.get("cache_hit"):
         resolved_text_device = resolved_text_device or "cache"
     _stage_done(
-        f"{_format_count(len(specter_source_records))} source texts -> {_format_count(len(mentions))} mentions in "
+        f"{_format_count(len(specter_source_records))} source texts prepared for {_format_count(len(mentions))} mentions in "
         f"{_format_elapsed(text_elapsed)} ({_format_rate(len(specter_source_records), text_elapsed)}) | "
         f"cache={'hit' if text_runtime_meta.get('cache_hit') else 'miss'} | "
         f"precomputed={_format_count(text_runtime_meta.get('precomputed_embedding_count') or 0)} | "
@@ -1097,8 +1214,30 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
     )
     pairs_path = dirs["processed"] / "pairs.parquet"
+    pairs_manifest_path = dirs["processed"] / "pairs_manifest.json"
+    pair_scores_path = dirs["pair_scores"] / "pair_scores.parquet"
+    pair_scores_manifest_path = dirs["pair_scores"] / "pair_scores_manifest.json"
+    mention_embeddings_path = scratch_dir / "mention_embeddings.npy"
+    mention_norms_path = scratch_dir / "mention_embeddings_norms.npy"
+    cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
+    cluster_cfg_used["eps_mode"] = "fixed"
+    cluster_cfg_used["selected_eps"] = float(model_info["selected_eps"])
+    cluster_cfg_used["eps"] = float(model_info["selected_eps"])
+    use_exact_graph_clustering = (
+        str(cluster_cfg_used.get("metric", "precomputed")) == "precomputed"
+        and int(cluster_cfg_used.get("min_samples", 1)) == 1
+    )
+    cluster_accumulator = (
+        ExactGraphClusterAccumulator(
+            mentions=mentions,
+            cluster_config=cluster_cfg_used,
+            backend_requested=str(cluster_backend),
+        )
+        if use_exact_graph_clustering
+        else None
+    )
     with activate_progress_reporter(reporter):
-        pairs, pair_meta = build_pairs_within_blocks(
+        _pairs_unused, pair_meta = build_pairs_within_blocks(
             mentions=mentions,
             max_pairs_per_block=max_pairs_per_block,
             seed=int(infer_cfg.get("seed", 11)),
@@ -1107,24 +1246,24 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             balance_train=False,
             exclude_same_bibcode=bool(pair_build_cfg.get("exclude_same_bibcode", True)),
             show_progress=progress_enabled,
-            output_path=None,
+            output_path=pairs_path,
             chunk_rows=pair_chunk_rows,
-            return_pairs=True,
+            return_pairs=False,
             return_meta=True,
             num_workers=cpu_workers,
             sharding_mode=cpu_sharding_mode,
             min_pairs_per_worker=cpu_min_pairs_per_worker,
             ram_budget_bytes=cpu_ram_budget_bytes,
         )
-    if pairs is None:
-        pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
-    pairs = pairs.copy()
-    if "label" not in pairs.columns:
-        pairs["label"] = pd.Series(dtype="object")
-    if len(pairs) == 0:
-        save_parquet(pairs, pairs_path, index=False)
-    else:
-        write_pairs(pairs, pairs_path)
+    if not pairs_path.exists() and isinstance(_pairs_unused, pd.DataFrame):
+        save_parquet(_pairs_unused, pairs_path)
+    sort_parquet_file(pairs_path, order_by=["block_key", "mention_id_1", "mention_id_2", "pair_id"])
+    pairs_manifest = write_parquet_block_manifest(pairs_path, pairs_manifest_path)
+    pairs_count = int(pairs_manifest["row_count"])
+    pair_meta["pairs_written"] = int(pairs_count)
+    pair_meta["output_path"] = str(pairs_path)
+    pair_meta["manifest_path"] = str(pairs_manifest_path)
+    pair_meta["storage_mode"] = "out_of_core_exact"
 
     empty_mentions = pd.DataFrame(columns=["mention_id", "block_key", "orcid", "split"])
     empty_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
@@ -1135,60 +1274,99 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         split_meta={"status": "not_applicable"},
         lspo_pair_build_meta={},
         ads_pair_build_meta=pair_meta,
-        ads_pairs_count=int(len(pairs)),
+        ads_pairs_count=int(pairs_count),
     )
     write_json(pairs_qc, pairs_qc_path)
 
-    pair_scores_path = dirs["pair_scores"] / "pair_scores.parquet"
-    if len(pairs) == 0:
-        pair_scores = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
-        save_parquet(pair_scores, pair_scores_path, index=False)
+    if pairs_count == 0:
+        save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), pair_scores_path, index=False)
+        pair_scores_manifest = write_parquet_block_manifest(pair_scores_path, pair_scores_manifest_path)
+        mention_encode_runtime_meta = _normalize_runtime_meta(
+            None,
+            requested_device=str(effective_request_device),
+            effective_precision_mode=str(request.precision_mode),
+            skipped=True,
+        )
+        mention_encode_runtime_meta["storage_mode"] = "out_of_core_exact"
         pair_score_runtime_meta = _normalize_runtime_meta(
             None,
             requested_device=str(effective_request_device),
             effective_precision_mode=str(request.precision_mode),
             skipped=True,
         )
-        pair_score_runtime_meta["pair_scoring_strategy"] = "preencoded_mentions"
-        pair_score_runtime_meta["mention_storage_device"] = "cpu"
+        pair_score_runtime_meta["pair_scoring_strategy"] = "preencoded_mentions_memmap"
+        pair_score_runtime_meta["mention_storage_device"] = "disk_memmap"
         pair_score_runtime_meta["cuda_oom_fallback_used"] = False
+        pair_score_runtime_meta["storage_mode"] = "out_of_core_exact"
+        pair_score_runtime_meta["output_path"] = str(pair_scores_path)
+        pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
     else:
-        pairs_input: pd.DataFrame | str | Path = pairs_path if len(pairs) > score_chunked_threshold else pairs
-        use_file_backed_pair_scores = isinstance(pairs_input, Path)
         with activate_progress_reporter(reporter):
-            pair_scores_result = score_pairs_with_checkpoint(
-                mentions=mentions,
-                pairs=pairs_input,
+            _mention_embeddings_path, mention_encode_runtime_meta_raw = encode_mentions_to_memmap(
                 chars2vec=chars,
-                text_emb=text,
+                source_text_embeddings=text_source_embeddings,
+                mention_source_index=mention_source_index_path,
                 checkpoint_path=model_info["checkpoint_path"],
-                output_path=pair_scores_path,
+                output_path=mention_embeddings_path,
+                norms_output_path=mention_norms_path,
                 batch_size=score_batch_size,
                 device=str(effective_request_device),
                 precision_mode=str(request.precision_mode),
                 show_progress=progress_enabled,
-                chunk_rows=score_chunk_rows,
-                return_scores=not use_file_backed_pair_scores,
                 return_runtime_meta=True,
             )
-        if isinstance(pair_scores_result, tuple) and len(pair_scores_result) == 2:
-            pair_scores, pair_score_runtime_meta_raw = pair_scores_result
-        else:
-            pair_scores = pair_scores_result
-            pair_score_runtime_meta_raw = None
+        mention_encode_runtime_meta = _normalize_runtime_meta(
+            mention_encode_runtime_meta_raw,
+            requested_device=str(effective_request_device),
+            effective_precision_mode=str(request.precision_mode),
+        )
+        mention_encode_runtime_meta["storage_mode"] = "out_of_core_exact"
+        mention_encode_runtime_meta["mention_embeddings_path"] = str(mention_embeddings_path)
+        mention_encode_runtime_meta["mention_norms_path"] = str(mention_norms_path)
+        with activate_progress_reporter(reporter):
+            _pair_scores_unused, pair_score_runtime_meta_raw = score_pairs_from_mention_embeddings(
+                mentions=mentions,
+                pairs=pairs_path,
+                mention_embeddings=mention_embeddings_path,
+                mention_norms=mention_norms_path,
+                output_path=pair_scores_path,
+                batch_size=score_batch_size,
+                show_progress=progress_enabled,
+                chunk_rows=score_chunk_rows,
+                return_scores=False,
+                return_runtime_meta=True,
+                score_callback=(
+                    None if cluster_accumulator is None else cluster_accumulator.consume_score_columns
+                ),
+            )
         pair_score_runtime_meta = _normalize_runtime_meta(
             pair_score_runtime_meta_raw,
             requested_device=str(effective_request_device),
             effective_precision_mode=str(request.precision_mode),
         )
-        if use_file_backed_pair_scores:
-            pair_scores = read_parquet(pair_scores_path)
+        pair_scores_manifest = write_parquet_block_manifest(pair_scores_path, pair_scores_manifest_path)
+        pair_score_runtime_meta["resolved_device"] = mention_encode_runtime_meta.get("resolved_device")
+        pair_score_runtime_meta["effective_precision_mode"] = (
+            mention_encode_runtime_meta.get("effective_precision_mode") or str(request.precision_mode)
+        )
+        pair_score_runtime_meta["fallback_reason"] = mention_encode_runtime_meta.get("fallback_reason")
+        pair_score_runtime_meta["cuda_oom_fallback_used"] = bool(mention_encode_runtime_meta.get("cuda_oom_fallback_used"))
+        pair_score_runtime_meta["mention_encode_seconds"] = float(mention_encode_runtime_meta.get("mention_encode_seconds") or 0.0)
+        pair_score_runtime_meta["mention_embedding_shape"] = mention_encode_runtime_meta.get("mention_embedding_shape")
+        pair_score_runtime_meta["mention_embedding_bytes"] = int(mention_encode_runtime_meta.get("mention_embedding_bytes") or 0)
+        pair_score_runtime_meta["mention_norm_bytes"] = int(mention_encode_runtime_meta.get("mention_norm_bytes") or 0)
+        pair_score_runtime_meta["mention_embeddings_path"] = str(mention_embeddings_path)
+        pair_score_runtime_meta["mention_norms_path"] = str(mention_norms_path)
+        pair_score_runtime_meta["storage_mode"] = "out_of_core_exact"
+        pair_score_runtime_meta["output_path"] = str(pair_scores_path)
+        pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
 
     preflight["runtime"] = {
         "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
     }
     write_json(preflight, preflight_path)
@@ -1208,11 +1386,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     pair_meta["wall_seconds"] = float(pair_inference_elapsed)
     pair_score_runtime_meta["wall_seconds"] = float(pair_inference_elapsed)
     _stage_done(
-        f"pair_count={_format_count(len(pairs))} | "
-        f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', len(pairs))))} | "
+        f"pair_count={_format_count(pairs_count)} | "
+        f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', pairs_count)))} | "
         f"workers={_format_worker_request(pair_meta.get('cpu_workers_effective'))} | "
         f"sharding={_yes_no(bool(pair_meta.get('cpu_sharding_enabled')))} | "
-        f"score_count={_format_count(len(pair_scores))} | "
+        f"score_count={_format_count(int(pair_scores_manifest.get('row_count', 0)))} | "
         f"device={pair_score_runtime_meta.get('resolved_device') or 'n/a'} | "
         f"precision={pair_score_runtime_meta.get('effective_precision_mode') or str(request.precision_mode)} "
         f"in {_format_elapsed(pair_inference_elapsed)}",
@@ -1236,25 +1414,26 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"backend={cluster_backend} | cpu_workers={_format_worker_request(cpu_workers)} | "
         f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
     )
-    cluster_cfg_used = json.loads(json.dumps(cluster_cfg))
-    cluster_cfg_used["eps_mode"] = "fixed"
-    cluster_cfg_used["selected_eps"] = float(model_info["selected_eps"])
-    cluster_cfg_used["eps"] = float(model_info["selected_eps"])
-
-    with activate_progress_reporter(reporter):
-        clusters, cluster_runtime_meta = cluster_blockwise_dbscan(
-            mentions=mentions,
-            pair_scores=pair_scores,
-            cluster_config=cluster_cfg_used,
-            output_path=None,
-            show_progress=progress_enabled,
-            num_workers=cpu_workers,
-            sharding_mode=cpu_sharding_mode,
-            min_pairs_per_worker=cpu_min_pairs_per_worker,
-            ram_budget_bytes=cpu_ram_budget_bytes,
-            backend=cluster_backend,
-            return_meta=True,
-        )
+    if cluster_accumulator is not None:
+        clusters, cluster_runtime_meta = cluster_accumulator.finalize()
+        if reporter.has_handler():
+            block_total = int(max(1, clusters["block_key"].nunique())) if "block_key" in clusters.columns else 1
+            reporter.progress(current=block_total, total=block_total, unit="block")
+    else:
+        with activate_progress_reporter(reporter):
+            clusters, cluster_runtime_meta = cluster_blockwise_dbscan(
+                mentions=mentions,
+                pair_scores=pair_scores_path,
+                cluster_config=cluster_cfg_used,
+                output_path=None,
+                show_progress=progress_enabled,
+                num_workers=cpu_workers,
+                sharding_mode=cpu_sharding_mode,
+                min_pairs_per_worker=cpu_min_pairs_per_worker,
+                ram_budget_bytes=cpu_ram_budget_bytes,
+                backend=cluster_backend,
+                return_meta=True,
+            )
     uid_registry_path = None if uid_scope != "registry" else dirs["root"] / "uid_registry" / f"{uid_namespace}.json"
     clusters, uid_mode_meta = _apply_uid_mode_to_clusters(
         clusters=clusters,
@@ -1267,6 +1446,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
     }
@@ -1324,8 +1504,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         references_path=request.references_path,
         publications_output_path=result_paths["publications_disambiguated"],
         references_output_path=result_paths["references_disambiguated"],
-        publications_frame=raw_publications,
-        references_frame=raw_references,
         return_runtime_meta=True,
     )
     if isinstance(source_export_result, tuple) and len(source_export_result) == 2:
@@ -1341,6 +1519,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
         "export": export_runtime_meta,
@@ -1348,7 +1527,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     write_json(preflight, preflight_path)
 
     cluster_qc = build_cluster_qc(
-        pair_scores=pair_scores,
+        pair_scores=pair_scores_path,
         clusters=clusters,
         threshold=float(model_info["best_threshold"]),
         cluster_uid_col="author_uid_local" if uid_scope == "registry" else "author_uid",
@@ -1373,6 +1552,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
+            "mention_encoding": mention_encode_runtime_meta,
             "pair_scoring": pair_score_runtime_meta,
             "clustering": cluster_runtime_meta,
             "export": export_runtime_meta,
@@ -1386,6 +1566,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
         "export": export_runtime_meta,
@@ -1443,11 +1624,17 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
+            "mention_encoding": mention_encode_runtime_meta,
             "pair_scoring": pair_score_runtime_meta,
             "clustering": cluster_runtime_meta,
             "export": export_runtime_meta,
         },
         precomputed_embeddings=precomputed_embeddings,
+        storage_mode=str(preflight.get("storage_mode") or "out_of_core_exact"),
+        scratch_dir=str(preflight.get("scratch_dir")) if preflight.get("scratch_dir") is not None else None,
+        scratch_free_bytes=preflight.get("scratch_free_bytes"),
+        projected_scratch_bytes=preflight.get("projected_scratch_bytes"),
+        exact_infeasible_reason=preflight.get("exact_infeasible_reason"),
     )
     stage_metrics["embedding_contract"] = dict(model_info.get("embedding_contract", {}) or {})
     _stage_info(f"writing {result_paths['stage_metrics'].name}")

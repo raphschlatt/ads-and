@@ -584,6 +584,334 @@ def _resolve_block_backend(
     return str(requested_backend).strip().lower(), None
 
 
+def _sanitize_pair_distance_array(distances: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
+    arr = np.asarray(distances, dtype=np.float32).copy()
+    non_finite_mask = ~np.isfinite(arr)
+    negative_mask = arr < 0.0
+    above_max_mask = arr > 2.0
+    if bool(non_finite_mask.any()):
+        arr[non_finite_mask] = 1.0
+    if bool(negative_mask.any()):
+        arr[negative_mask] = 0.0
+    if bool(above_max_mask.any()):
+        arr[above_max_mask] = 2.0
+    return arr, {
+        "corrected_blocks": int(bool(non_finite_mask.any() or negative_mask.any() or above_max_mask.any())),
+        "non_finite_count": int(non_finite_mask.sum()),
+        "negative_count": int(negative_mask.sum()),
+        "above_max_count": int(above_max_mask.sum()),
+        "asymmetry_pairs": 0,
+        "diag_reset_count": 0,
+    }
+
+
+def _prepare_constraint_state(block_mentions: pd.DataFrame) -> dict[str, Any]:
+    authors = block_mentions["author_raw"].fillna("").astype(str).tolist()
+    years_raw = pd.to_numeric(block_mentions["year"], errors="coerce").to_numpy(dtype=np.float64, copy=False)
+
+    given_tokens: list[str] = []
+    surname_tokens: list[str] = []
+    first_chars: list[str] = []
+    given_initial_flags: list[bool] = []
+    surname_long_flags: list[bool] = []
+    for author in authors:
+        given, surname = _extract_name_tokens(author)
+        given = str(given or "")
+        surname = str(surname or "")
+        given_tokens.append(given)
+        surname_tokens.append(surname)
+        first_chars.append(given[:1])
+        given_initial_flags.append(bool(_is_initial_token(given)))
+        surname_long_flags.append(bool(len(surname) > 2))
+
+    return {
+        "given": np.asarray(given_tokens, dtype=str),
+        "surname": np.asarray(surname_tokens, dtype=str),
+        "first_char": np.asarray(first_chars, dtype=str),
+        "given_is_initial": np.asarray(given_initial_flags, dtype=bool),
+        "surname_long": np.asarray(surname_long_flags, dtype=bool),
+        "years": years_raw,
+        "years_valid": ~np.isnan(years_raw),
+    }
+
+
+def _apply_constraints_to_pair_distances(
+    *,
+    distances: np.ndarray,
+    idx1: np.ndarray,
+    idx2: np.ndarray,
+    constraint_state: dict[str, Any],
+    constraints: Dict[str, Any],
+) -> np.ndarray:
+    if not constraints or not constraints.get("enabled", False) or len(distances) == 0:
+        return np.asarray(distances, dtype=np.float32, copy=False)
+
+    out = np.asarray(distances, dtype=np.float32).copy()
+    max_year_gap = int(constraints.get("max_year_gap", 30))
+    enforce_name_conflict = bool(constraints.get("enforce_name_conflict", True))
+    constraint_mode = str(constraints.get("constraint_mode", "soft")).lower()
+    name_conflict_mode = str(constraints.get("name_conflict_mode", constraint_mode)).lower()
+    year_gap_mode = str(constraints.get("year_gap_mode", constraint_mode)).lower()
+    name_conflict_min_distance = float(constraints.get("name_conflict_min_distance", 1.0))
+    year_gap_min_distance = float(constraints.get("year_gap_min_distance", 1.0))
+
+    force_name = np.zeros(len(out), dtype=bool)
+    if enforce_name_conflict:
+        given = constraint_state["given"]
+        surname = constraint_state["surname"]
+        first_char = constraint_state["first_char"]
+        given_is_initial = constraint_state["given_is_initial"]
+        surname_long = constraint_state["surname_long"]
+
+        ga = given[idx1]
+        gb = given[idx2]
+        sa = surname[idx1]
+        sb = surname[idx2]
+        first_diff = first_char[idx1] != first_char[idx2]
+        missing_given = (ga == "") | (gb == "")
+        same_given = ga == gb
+        surname_conflict = surname_long[idx1] & surname_long[idx2] & (sa != "") & (sb != "") & (sa != sb)
+        initial_case = given_is_initial[idx1] | given_is_initial[idx2]
+        prefix_case = np.char.startswith(ga, gb) | np.char.startswith(gb, ga)
+        non_initial_conflict = (~missing_given) & (~same_given) & (~initial_case) & (first_diff | (~prefix_case))
+        initial_conflict = (~missing_given) & (~same_given) & initial_case & first_diff
+        force_name = surname_conflict | initial_conflict | non_initial_conflict
+
+    years = constraint_state["years"]
+    years_valid = constraint_state["years_valid"]
+    force_year = (
+        years_valid[idx1]
+        & years_valid[idx2]
+        & (np.abs(years[idx1] - years[idx2]) > float(max_year_gap))
+    )
+
+    hard_mask = (force_name & (name_conflict_mode == "hard")) | (force_year & (year_gap_mode == "hard"))
+    if bool(hard_mask.any()):
+        out[hard_mask] = 1.0
+
+    soft_name_mask = force_name & ~hard_mask
+    if bool(soft_name_mask.any()):
+        out[soft_name_mask] = np.maximum(out[soft_name_mask], np.float32(name_conflict_min_distance))
+
+    soft_year_mask = force_year & ~hard_mask
+    if bool(soft_year_mask.any()):
+        out[soft_year_mask] = np.maximum(out[soft_year_mask], np.float32(year_gap_min_distance))
+
+    return out
+
+
+class _UnionFind:
+    def __init__(self, n: int):
+        self.parent = np.arange(int(n), dtype=np.int64)
+        self.rank = np.zeros(int(n), dtype=np.int8)
+
+    def find(self, x: int) -> int:
+        parent = self.parent
+        root = int(x)
+        while int(parent[root]) != root:
+            root = int(parent[root])
+        while int(parent[x]) != x:
+            next_x = int(parent[x])
+            parent[x] = root
+            x = next_x
+        return root
+
+    def union(self, a: int, b: int) -> None:
+        ra = self.find(int(a))
+        rb = self.find(int(b))
+        if ra == rb:
+            return
+        rank = self.rank
+        parent = self.parent
+        if int(rank[ra]) < int(rank[rb]):
+            parent[ra] = rb
+            return
+        if int(rank[ra]) > int(rank[rb]):
+            parent[rb] = ra
+            return
+        parent[rb] = ra
+        rank[ra] = np.int8(int(rank[ra]) + 1)
+
+
+class ExactGraphClusterAccumulator:
+    def __init__(
+        self,
+        *,
+        mentions: pd.DataFrame,
+        cluster_config: Dict[str, Any],
+        backend_requested: str = "connected_components_cpu",
+    ):
+        self.mentions = mentions
+        self.cluster_config = dict(cluster_config or {})
+        self.eps = float(self.cluster_config.get("eps", 0.35))
+        self.eps_min = float(self.cluster_config.get("eps_min", 0.0))
+        self.eps_max = float(self.cluster_config.get("eps_max", 1.0))
+        self.constraints = dict(self.cluster_config.get("constraints", {}) or {})
+        self.eps_block_policy = _normalize_eps_block_policy(self.cluster_config)
+        self.backend_requested = str(backend_requested)
+        self.sanitize_totals = {
+            "corrected_blocks": 0,
+            "non_finite_count": 0,
+            "negative_count": 0,
+            "above_max_count": 0,
+            "asymmetry_pairs": 0,
+            "diag_reset_count": 0,
+        }
+        self.scoring_seconds_total = 0.0
+        self.constraint_seconds_total = 0.0
+        self.union_seconds_total = 0.0
+        self.processed_pair_rows = 0
+
+        self.block_states: dict[str, dict[str, Any]] = {}
+        eps_rows: list[dict[str, Any]] = []
+        for block_key, block_mentions in mentions.groupby("block_key", sort=False):
+            block_mentions = block_mentions.reset_index(drop=True)
+            n = int(len(block_mentions))
+            effective_eps, eps_row = _resolve_block_eps(
+                block_size=n,
+                eps_base=float(self.eps),
+                eps_min=float(self.eps_min),
+                eps_max=float(self.eps_max),
+                eps_block_policy=self.eps_block_policy,
+            )
+            eps_rows.append(eps_row)
+            mention_ids = block_mentions["mention_id"].astype(str).tolist()
+            self.block_states[str(block_key)] = {
+                "block_key": str(block_key),
+                "mentions": block_mentions,
+                "mention_to_local": {mention_id: idx for idx, mention_id in enumerate(mention_ids)},
+                "mention_ids": mention_ids,
+                "uf": _UnionFind(n),
+                "size": n,
+                "pair_est": int(n * (n - 1) // 2),
+                "effective_eps": float(effective_eps),
+                "eps_bucket": str(eps_row["bucket"]),
+                "constraint_state": _prepare_constraint_state(block_mentions),
+            }
+        self.eps_block_policy_summary = _summarize_block_eps(
+            eps_base=float(self.eps),
+            eps_block_policy=self.eps_block_policy,
+            block_rows=eps_rows,
+        )
+
+    def consume_score_columns(self, score_columns: dict[str, np.ndarray]) -> None:
+        block_keys = np.asarray(score_columns.get("block_key", []), dtype=object)
+        if len(block_keys) == 0:
+            return
+        mention_id_1 = np.asarray(score_columns["mention_id_1"], dtype=object)
+        mention_id_2 = np.asarray(score_columns["mention_id_2"], dtype=object)
+        distances, sanitize_meta = _sanitize_pair_distance_array(score_columns["distance"])
+        for key, value in sanitize_meta.items():
+            self.sanitize_totals[key] = int(self.sanitize_totals.get(key, 0)) + int(value)
+
+        self.processed_pair_rows += int(len(block_keys))
+        unique_block_keys, starts = np.unique(block_keys, return_index=True)
+        order = np.argsort(starts)
+        block_order = unique_block_keys[order]
+        block_starts = starts[order]
+        block_ends = list(block_starts[1:]) + [len(block_keys)]
+
+        for raw_block_key, start, end in zip(block_order.tolist(), block_starts.tolist(), block_ends):
+            block_key = str(raw_block_key)
+            state = self.block_states.get(block_key)
+            if state is None:
+                continue
+            map_started_at = perf_counter()
+            local_index = state["mention_to_local"]
+            idx1 = np.fromiter(
+                (int(local_index[str(value)]) for value in mention_id_1[start:end]),
+                dtype=np.int64,
+                count=int(end - start),
+            )
+            idx2 = np.fromiter(
+                (int(local_index[str(value)]) for value in mention_id_2[start:end]),
+                dtype=np.int64,
+                count=int(end - start),
+            )
+            self.scoring_seconds_total += float(perf_counter() - map_started_at)
+
+            constraint_started_at = perf_counter()
+            effective = _apply_constraints_to_pair_distances(
+                distances=distances[start:end],
+                idx1=idx1,
+                idx2=idx2,
+                constraint_state=state["constraint_state"],
+                constraints=self.constraints,
+            )
+            self.constraint_seconds_total += float(perf_counter() - constraint_started_at)
+
+            union_started_at = perf_counter()
+            edge_mask = effective <= float(state["effective_eps"])
+            if bool(edge_mask.any()):
+                uf = state["uf"]
+                for i, j in zip(idx1[edge_mask].tolist(), idx2[edge_mask].tolist()):
+                    uf.union(int(i), int(j))
+            self.union_seconds_total += float(perf_counter() - union_started_at)
+
+    def finalize(self) -> tuple[pd.DataFrame, dict[str, Any]]:
+        rows: list[dict[str, str]] = []
+        block_count_by_bucket: dict[str, int] = {}
+        for state in self.block_states.values():
+            block_count_by_bucket[str(_block_size_bucket_label(int(state["size"])) or "unknown")] = (
+                int(block_count_by_bucket.get(str(_block_size_bucket_label(int(state["size"])) or "unknown"), 0)) + 1
+            )
+            root_to_label: dict[int, int] = {}
+            next_label = 0
+            uf = state["uf"]
+            for local_idx, mention_id in enumerate(state["mention_ids"]):
+                root = uf.find(int(local_idx))
+                if root not in root_to_label:
+                    root_to_label[root] = int(next_label)
+                    next_label += 1
+                rows.append(
+                    {
+                        "mention_id": str(mention_id),
+                        "block_key": str(state["block_key"]),
+                        "author_uid": f"{state['block_key']}::{int(root_to_label[root])}",
+                    }
+                )
+
+        out = pd.DataFrame(rows, columns=CLUSTER_REQUIRED_COLUMNS)
+        validate_columns(out, CLUSTER_REQUIRED_COLUMNS, "clusters")
+
+        block_sizes = np.asarray([int(state["size"]) for state in self.block_states.values()], dtype=np.int64)
+        meta = {
+            "cluster_backend_requested": self.backend_requested,
+            "cluster_backend_effective": "connected_components_cpu",
+            "cluster_backend_reason": "exact_min_samples_1_graph",
+            "cluster_strategy": "connected_components_exact",
+            "eps_base": float(self.eps),
+            "eps_block_policy_enabled": bool(self.eps_block_policy.get("enabled", False)),
+            "eps_block_policy_summary": self.eps_block_policy_summary,
+            "backend_block_counts": {"connected_components_cpu": int(len(self.block_states))},
+            "cpu_sharding_mode": "off",
+            "cpu_sharding_enabled": False,
+            "cpu_workers_requested": 1,
+            "cpu_workers_effective": 1,
+            "cpu_limit_detected": 1,
+            "cpu_limit_source": "graph_exact_single_process",
+            "cpu_min_pairs_per_worker": 0,
+            "ram_budget_bytes": None,
+            "total_pairs_est": int(sum(int(state["pair_est"]) for state in self.block_states.values())),
+            "block_p95": float(np.percentile(block_sizes, 95)) if len(block_sizes) else 0.0,
+            "block_size_histogram": _build_block_size_histogram(list(self.block_states.values())),
+            "block_count_by_bucket": {str(key): int(value) for key, value in sorted(block_count_by_bucket.items())},
+            "total_seconds_by_bucket": {},
+            "dbscan_seconds_by_bucket": {},
+            "build_entries_seconds": 0.0,
+            "distance_matrix_seconds_total": 0.0,
+            "constraints_seconds_total": float(self.constraint_seconds_total),
+            "sanitize_seconds_total": 0.0,
+            "dbscan_seconds_total": float(self.union_seconds_total),
+            "gpu_transfer_seconds_total": 0.0,
+            "top_slow_blocks": [],
+            "sanitize_totals": dict(self.sanitize_totals),
+            "processed_pair_rows": int(self.processed_pair_rows),
+            "pair_index_seconds_total": float(self.scoring_seconds_total),
+        }
+        return out, meta
+
+
 def _cluster_single_block(
     *,
     block_key: str,
@@ -808,7 +1136,7 @@ def _cluster_entries_sequential(
 
 def cluster_blockwise_dbscan(
     mentions: pd.DataFrame,
-    pair_scores: pd.DataFrame,
+    pair_scores: pd.DataFrame | str | Path,
     cluster_config: Dict,
     output_path: str | Path | None = None,
     show_progress: bool = False,
@@ -826,6 +1154,40 @@ def cluster_blockwise_dbscan(
     metric = str(cluster_config.get("metric", "precomputed"))
     constraints = cluster_config.get("constraints", {})
     eps_block_policy = _normalize_eps_block_policy(cluster_config)
+
+    if isinstance(pair_scores, (str, Path)) and metric == "precomputed" and int(min_samples) == 1:
+        accumulator = ExactGraphClusterAccumulator(
+            mentions=mentions,
+            cluster_config=cluster_config,
+            backend_requested=str(backend),
+        )
+        pair_path = Path(pair_scores)
+        if not pair_path.exists():
+            raise FileNotFoundError(pair_path)
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("Exact graph clustering from parquet inputs requires pyarrow.") from exc
+
+        iterator = pq.ParquetFile(pair_path).iter_batches(batch_size=200_000)
+        for batch in iterator:
+            accumulator.consume_score_columns(
+                {
+                    "mention_id_1": np.asarray(batch.column(batch.schema.get_field_index("mention_id_1")).to_pylist(), dtype=object),
+                    "mention_id_2": np.asarray(batch.column(batch.schema.get_field_index("mention_id_2")).to_pylist(), dtype=object),
+                    "block_key": np.asarray(batch.column(batch.schema.get_field_index("block_key")).to_pylist(), dtype=object),
+                    "distance": np.asarray(batch.column(batch.schema.get_field_index("distance")).to_pylist(), dtype=np.float32),
+                }
+            )
+        out, meta = accumulator.finalize()
+        if output_path is not None:
+            save_parquet(out, output_path, index=False)
+        out.attrs["cluster_meta"] = meta
+        if return_meta:
+            return out, meta
+        return out
+    if isinstance(pair_scores, (str, Path)):
+        pair_scores = pd.read_parquet(pair_scores)
 
     build_entries_started_at = perf_counter()
     entries, eps_block_policy_summary = _build_block_entries(

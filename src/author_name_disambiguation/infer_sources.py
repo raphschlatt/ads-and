@@ -24,6 +24,7 @@ class InferSourcesRequest:
     dataset_id: str
     model_bundle: str | Path | None = None
     references_path: str | Path | None = None
+    scratch_dir: str | Path | None = None
     uid_scope: UidScope = "dataset"
     uid_namespace: str | None = None
     infer_stage: InferStage = "full"
@@ -80,6 +81,7 @@ def _build_infer_request(
             dataset_id=request.dataset_id,
             model_bundle=resolve_fixed_model_bundle_path(),
             references_path=request.references_path,
+            scratch_dir=request.scratch_dir,
             uid_scope=request.uid_scope,
             uid_namespace=request.uid_namespace,
             infer_stage=request.infer_stage,

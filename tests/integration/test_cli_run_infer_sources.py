@@ -261,6 +261,57 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             return (empty, meta) if _kwargs.get("return_runtime_meta") else empty
         return (out, meta) if _kwargs.get("return_runtime_meta") else out
 
+    def _encode_mentions(
+        chars2vec,
+        source_text_embeddings,
+        mention_source_index,
+        output_path,
+        norms_output_path=None,
+        **_kwargs,
+    ):
+        del chars2vec, source_text_embeddings
+        mention_index = np.load(mention_source_index)
+        arr = np.ones((len(mention_index), 4), dtype=np.float32)
+        norms = np.linalg.norm(arr, axis=1).astype(np.float32)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        np.save(output_path, arr)
+        norms_path = Path(norms_output_path) if norms_output_path is not None else Path(output_path).with_name("mention_embeddings_norms.npy")
+        np.save(norms_path, norms)
+        meta = {
+            "requested_device": str(_kwargs.get("device", "auto")),
+            "resolved_device": "cpu",
+            "fallback_reason": "torch_cuda_unavailable",
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": str(_kwargs.get("precision_mode", "fp32")),
+            "mention_encode_seconds": 0.01,
+            "mention_embedding_shape": [int(len(arr)), int(arr.shape[1])],
+            "mention_embedding_bytes": int(arr.nbytes),
+            "mention_norm_bytes": int(norms.nbytes),
+            "cuda_oom_fallback_used": False,
+        }
+        return (Path(output_path), meta) if _kwargs.get("return_runtime_meta") else Path(output_path)
+
+    def _score_from_embeddings(mentions, pairs, output_path=None, score_callback=None, **_kwargs):
+        out, meta = _score(mentions=mentions, pairs=pairs, output_path=output_path, **_kwargs)
+        if score_callback is not None:
+            score_callback(
+                {
+                    "pair_id": out["pair_id"].astype(str).to_numpy(copy=False),
+                    "mention_id_1": out["mention_id_1"].astype(str).to_numpy(copy=False),
+                    "mention_id_2": out["mention_id_2"].astype(str).to_numpy(copy=False),
+                    "block_key": out["block_key"].astype(str).to_numpy(copy=False),
+                    "distance": out["distance"].astype(np.float32).to_numpy(copy=False),
+                }
+            )
+        if empty_chunked_score_return and isinstance(pairs, (str, Path)) and not _kwargs.get("return_scores", True):
+            empty = pd.DataFrame(columns=out.columns)
+            return (empty, meta) if _kwargs.get("return_runtime_meta") else empty
+        return (out, meta) if _kwargs.get("return_runtime_meta") else out
+
     def _pairs(mentions, output_path=None, **_kwargs):
         seen["pair_kwargs"] = dict(_kwargs)
         rows = []
@@ -350,11 +401,69 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             }
         return out
 
+    class _FakeExactGraphClusterAccumulator:
+        def __init__(self, *, mentions, cluster_config, backend_requested="auto"):
+            del cluster_config
+            self._mentions = mentions
+            self._backend_requested = backend_requested
+            self._pair_rows = 0
+
+        def consume_score_columns(self, score_columns):
+            self._pair_rows += int(len(score_columns.get("block_key", [])))
+            seen["cluster_pair_scores_rows"] = int(seen.get("cluster_pair_scores_rows", 0)) + int(
+                len(score_columns.get("block_key", []))
+            )
+
+        def finalize(self):
+            out = self._mentions[["mention_id", "block_key"]].copy()
+            out["author_uid"] = [
+                "blk.a.0",
+                "blk.a.1",
+                "blk.a.0",
+                "blk.r.0",
+                "blk.r.1",
+            ][: len(out)]
+            meta = {
+                "build_entries_seconds": 0.01,
+                "cluster_backend_requested": str(self._backend_requested),
+                "cluster_backend_effective": "connected_components_cpu",
+                "cluster_backend_reason": "test",
+                "cpu_sharding_mode": "off",
+                "cpu_sharding_enabled": False,
+                "cpu_workers_requested": 4,
+                "cpu_workers_effective": 4,
+                "ram_budget_bytes": None,
+                "total_pairs_est": int(self._pair_rows),
+                "block_p95": 2.0,
+                "block_size_histogram": {"1": 1, "2": 2},
+                "block_count_by_bucket": {"1": 1, "2": 2},
+                "total_seconds_by_bucket": {"1": 0.002, "2": 0.008},
+                "dbscan_seconds_by_bucket": {"1": 0.0, "2": 0.01},
+                "distance_matrix_seconds_total": 0.0,
+                "constraints_seconds_total": 0.0,
+                "sanitize_seconds_total": 0.0,
+                "dbscan_seconds_total": 0.01,
+                "gpu_transfer_seconds_total": 0.0,
+                "top_slow_blocks": [],
+                "sanitize_totals": {
+                    "corrected_blocks": 0,
+                    "non_finite_count": 0,
+                    "negative_count": 0,
+                    "above_max_count": 0,
+                    "asymmetry_pairs": 0,
+                    "diag_reset_count": 0,
+                },
+            }
+            return out, meta
+
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_chars2vec_embeddings", _chars)
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_specter_embeddings", _text)
     monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _pairs)
     monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score)
     monkeypatch.setattr("author_name_disambiguation.source_inference.cluster_blockwise_dbscan", _cluster)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.encode_mentions_to_memmap", _encode_mentions)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_from_mention_embeddings", _score_from_embeddings)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.ExactGraphClusterAccumulator", _FakeExactGraphClusterAccumulator)
     return seen
 
 
@@ -431,25 +540,27 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["load_inputs"]["explode_mentions_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
-    assert preflight["runtime"]["clustering"]["cpu_sharding_enabled"] is True
-    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_frame_reuse"
+    assert preflight["runtime"]["clustering"]["cpu_workers_effective"] == 4
+    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_reread"
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert stage_metrics["runtime"]["load_inputs"]["deduplicate_seconds"] >= 0.0
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "gpu"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
     assert stage_metrics["runtime"]["specter"]["resolved_device"] == "cpu"
     assert stage_metrics["runtime"]["specter"]["source_embedding_count"] == 3
-    assert stage_metrics["runtime"]["specter"]["mention_materialization_count"] == 5
+    assert stage_metrics["runtime"]["specter"]["mention_materialization_count"] == 0
     assert "device_to_host_flushes" in stage_metrics["runtime"]["specter"]
     assert "token_count_total" in stage_metrics["runtime"]["specter"]
     assert stage_metrics["runtime"]["pair_building"]["cpu_workers_requested"] == "auto"
     assert "group_blocks_seconds" in stage_metrics["runtime"]["pair_building"]
     assert "top_slow_blocks" in stage_metrics["runtime"]["pair_building"]
+    assert stage_metrics["runtime"]["mention_encoding"]["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["clustering"]["block_count_by_bucket"]
     assert stage_metrics["runtime"]["clustering"]["total_seconds_by_bucket"]
     assert stage_metrics["runtime"]["clustering"]["dbscan_seconds_by_bucket"]
-    assert stage_metrics["runtime"]["export"]["source_reread_seconds"] == 0.0
+    assert stage_metrics["runtime"]["export"]["source_reread_seconds"] >= 0.0
+    assert stage_metrics["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
     assert "START Bootstrap" in captured.err
     assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err
@@ -458,13 +569,13 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "START Name embeddings" in captured.err
     assert "DONE 5 names embedded in " in captured.err
     assert "START Text embeddings" in captured.err
-    assert "DONE 3 source texts -> 5 mentions in " in captured.err
+    assert "DONE 3 source texts prepared for 5 mentions in " in captured.err
     assert "cpu_stage=pair_building | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
     assert "pair_count=" in captured.err
     assert "pairs_est=" in captured.err
     assert "workers=4 | sharding=yes | score_count=" in captured.err
     assert "backend=sklearn_cpu | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
-    assert "backend=sklearn_cpu | workers=4 | sharding=yes" in captured.err
+    assert "backend=connected_components_cpu | workers=4 | sharding=no" in captured.err
     assert "START Export and reports" in captured.err
     assert "Run complete | run_id=" in captured.err
     assert "\r" not in captured.err
@@ -476,10 +587,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert seen["pair_kwargs"]["sharding_mode"] == "auto"
     assert seen["pair_kwargs"]["min_pairs_per_worker"] == 1_000_000
     assert int(seen["pair_kwargs"]["ram_budget_bytes"]) > 0
-    assert seen["cluster_kwargs"]["num_workers"] is None
-    assert seen["cluster_kwargs"]["sharding_mode"] == "auto"
-    assert seen["cluster_kwargs"]["min_pairs_per_worker"] == 1_000_000
-    assert int(seen["cluster_kwargs"]["ram_budget_bytes"]) > 0
+    assert "cluster_kwargs" not in seen
+    assert int(seen["cluster_pair_scores_rows"]) > 0
 
 
 def test_run_infer_sources_emits_structured_progress_events(monkeypatch, tmp_path: Path, capsys):
@@ -742,8 +851,9 @@ def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_
     args.func(args)
 
     preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
-    assert seen["cluster_pair_scores_rows"] > 0
-    assert int(preflight["runtime"]["pair_building"]["pairs_written"]) == int(seen["cluster_pair_scores_rows"])
+    pair_scores = pd.read_parquet(output_root / "artifacts" / "pair_scores" / "pair_scores.parquet")
+    assert len(pair_scores) > 0
+    assert int(preflight["runtime"]["pair_building"]["pairs_written"]) == int(len(pair_scores))
 
 
 def test_cli_run_infer_sources_emits_single_aggregated_pair_clamp_warning(monkeypatch, tmp_path: Path, capsys):
@@ -788,7 +898,25 @@ def test_cli_run_infer_sources_emits_single_aggregated_pair_clamp_warning(monkey
         }
         return (out, meta) if _kwargs.get("return_runtime_meta") else out
 
+    def _score_from_embeddings_with_clamp(mentions, pairs, output_path=None, score_callback=None, **_kwargs):
+        out, meta = _score_with_clamp_meta(mentions=mentions, pairs=pairs, output_path=output_path, **_kwargs)
+        if score_callback is not None:
+            score_callback(
+                {
+                    "pair_id": out["pair_id"].astype(str).to_numpy(copy=False),
+                    "mention_id_1": out["mention_id_1"].astype(str).to_numpy(copy=False),
+                    "mention_id_2": out["mention_id_2"].astype(str).to_numpy(copy=False),
+                    "block_key": out["block_key"].astype(str).to_numpy(copy=False),
+                    "distance": out["distance"].astype(np.float32).to_numpy(copy=False),
+                }
+            )
+        return (out, meta) if _kwargs.get("return_runtime_meta") else out
+
     monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score_with_clamp_meta)
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference.score_pairs_from_mention_embeddings",
+        _score_from_embeddings_with_clamp,
+    )
 
     output_root = tmp_path / "out_warn"
     parser = cli.build_parser()

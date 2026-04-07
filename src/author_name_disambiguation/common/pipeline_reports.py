@@ -489,6 +489,11 @@ def build_infer_stage_metrics(
     source_export_qc: Mapping[str, Any] | None = None,
     runtime: Mapping[str, Any] | None = None,
     precomputed_embeddings: Mapping[str, Any] | None = None,
+    storage_mode: str | None = None,
+    scratch_dir: str | None = None,
+    scratch_free_bytes: int | None = None,
+    projected_scratch_bytes: int | None = None,
+    exact_infeasible_reason: str | None = None,
 ) -> dict[str, Any]:
     cluster_qc = dict(cluster_qc or {})
     eps_meta = dict(eps_meta or {})
@@ -551,6 +556,11 @@ def build_infer_stage_metrics(
         "subset_ratio": _optional_float(subset_ratio),
         "memory_feasible": None if memory_feasible is None else bool(memory_feasible),
         "pair_upper_bound": None if pair_upper_bound is None else int(pair_upper_bound),
+        "storage_mode": None if storage_mode is None else str(storage_mode),
+        "scratch_dir": None if scratch_dir is None else str(scratch_dir),
+        "scratch_free_bytes": None if scratch_free_bytes is None else int(scratch_free_bytes),
+        "projected_scratch_bytes": None if projected_scratch_bytes is None else int(projected_scratch_bytes),
+        "exact_infeasible_reason": None if exact_infeasible_reason is None else str(exact_infeasible_reason),
         "val_class_counts": {},
         "test_class_counts": {},
         "subset_cache_key": None,

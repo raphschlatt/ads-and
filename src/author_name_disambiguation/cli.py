@@ -1861,6 +1861,7 @@ def cmd_run_infer_sources(args):
             output_root=args.output_root,
             dataset_id=args.dataset_id,
             model_bundle=args.model_bundle,
+            scratch_dir=getattr(args, "scratch_dir", None),
             uid_scope=args.uid_scope,
             uid_namespace=args.uid_namespace,
             infer_stage=args.infer_stage,
@@ -2633,6 +2634,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--output-root", required=True)
     sp.add_argument("--dataset-id", required=True)
     sp.add_argument("--model-bundle", default=None)
+    sp.add_argument("--scratch-dir", default=None)
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full", "incremental"], default="full")
     sp.add_argument("--cluster-config", default=None)
     sp.add_argument("--gates-config", default=None)

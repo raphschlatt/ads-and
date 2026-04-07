@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from pathlib import Path
 from time import perf_counter
-from typing import Dict, Any
+from typing import Callable, Dict, Any
 import warnings
 
 import numpy as np
@@ -30,6 +30,34 @@ def _require_torch():
 
 def _build_mention_index(mentions: pd.DataFrame) -> Dict[str, int]:
     return {str(m): i for i, m in enumerate(mentions["mention_id"].tolist())}
+
+
+def _open_array_view(value: np.ndarray | str | Path) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        return value
+    path = Path(value)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return np.load(path, mmap_mode="r")
+
+
+def _init_encoder_runtime_meta(device: str) -> dict[str, Any]:
+    return {
+        "requested_device": str(device),
+        "resolved_device": None,
+        "fallback_reason": None,
+        "torch_version": None,
+        "torch_cuda_version": None,
+        "torch_cuda_available": None,
+        "cuda_probe_error": None,
+        "model_to_cuda_error": None,
+        "effective_precision_mode": None,
+        "mention_encode_seconds": 0.0,
+        "mention_embedding_shape": None,
+        "mention_embedding_bytes": 0,
+        "mention_norm_bytes": 0,
+        "cuda_oom_fallback_used": False,
+    }
 
 
 def _resolve_device(torch, device: str) -> str:
@@ -188,6 +216,361 @@ def _encode_mentions(
 
 def _pair_index_array(values: np.ndarray, mention_index: Dict[str, int]) -> np.ndarray:
     return np.fromiter((int(mention_index.get(str(value), -1)) for value in values), dtype=np.int64, count=len(values))
+
+
+def _build_feature_batch(
+    *,
+    chars2vec: np.ndarray,
+    source_text_embeddings: np.ndarray,
+    mention_source_index: np.ndarray,
+    start: int,
+    end: int,
+) -> np.ndarray:
+    name_batch = np.asarray(chars2vec[start:end], dtype=np.float32)
+    source_indices = np.asarray(mention_source_index[start:end], dtype=np.int64)
+    if len(source_indices) != len(name_batch):
+        raise ValueError("mention_source_index length must match chars2vec row count.")
+    text_batch = np.asarray(source_text_embeddings[source_indices], dtype=np.float32)
+    if len(text_batch) != len(name_batch):
+        raise ValueError("source_text_embeddings gather length mismatch.")
+    return np.concatenate([name_batch, text_batch], axis=1).astype(np.float32, copy=False)
+
+
+def _load_encoder_for_inference(
+    *,
+    torch,
+    checkpoint_path: str | Path,
+    requested_device: str,
+) -> tuple[Any, str, dict[str, Any]]:
+    runtime_meta = _init_encoder_runtime_meta(requested_device)
+    device, device_meta = resolve_torch_device(torch, requested_device, runtime_label="Pair scoring")
+    runtime_meta.update(dict(device_meta))
+
+    checkpoint = load_checkpoint(checkpoint_path=checkpoint_path, device=device)
+    model = create_encoder(checkpoint["model_config"])
+    model.load_state_dict(checkpoint["state_dict"])
+    try:
+        model.to(device)
+    except Exception as exc:
+        if str(requested_device).strip().lower() == "auto" and str(device).startswith("cuda"):
+            device, runtime_meta = apply_auto_cuda_move_fallback(
+                requested_device=requested_device,
+                runtime_label="Pair scoring",
+                runtime_meta=runtime_meta,
+                exc=exc,
+            )
+            model.to(device)
+        else:
+            raise
+    model.eval()
+    return model, str(device), runtime_meta
+
+
+def _write_empty_npy(path: str | Path, array: np.ndarray) -> Path:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    np.save(target, array)
+    return target
+
+
+def encode_mentions_to_memmap(
+    *,
+    chars2vec: np.ndarray | str | Path,
+    source_text_embeddings: np.ndarray | str | Path,
+    mention_source_index: np.ndarray | str | Path,
+    checkpoint_path: str | Path,
+    output_path: str | Path,
+    norms_output_path: str | Path | None = None,
+    batch_size: int = 8192,
+    device: str = "auto",
+    precision_mode: str = "fp32",
+    show_progress: bool = False,
+    return_runtime_meta: bool = False,
+) -> Path | tuple[Path, dict[str, Any]]:
+    torch = _require_torch()
+    batch_size = max(1, int(batch_size))
+    requested_device = str(device)
+    chars = _open_array_view(chars2vec)
+    source_emb = _open_array_view(source_text_embeddings)
+    mention_to_source = _open_array_view(mention_source_index)
+    output = Path(output_path)
+    norms_output = output.with_name(output.stem + "_norms.npy") if norms_output_path is None else Path(norms_output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    norms_output.parent.mkdir(parents=True, exist_ok=True)
+
+    runtime_meta = _init_encoder_runtime_meta(requested_device)
+
+    if len(chars) == 0:
+        _write_empty_npy(output, np.zeros((0, 0), dtype=np.float32))
+        _write_empty_npy(norms_output, np.zeros((0,), dtype=np.float32))
+        runtime_meta["resolved_device"] = "cpu"
+        runtime_meta["effective_precision_mode"] = "fp32"
+        runtime_meta["mention_embedding_shape"] = [0, 0]
+        result: Path | tuple[Path, dict[str, Any]] = output
+        if return_runtime_meta:
+            return output, runtime_meta
+        return result
+
+    if len(chars) != len(mention_to_source):
+        raise ValueError("chars2vec and mention_source_index lengths must match.")
+
+    model, active_device, runtime_meta = _load_encoder_for_inference(
+        torch=torch,
+        checkpoint_path=checkpoint_path,
+        requested_device=requested_device,
+    )
+
+    def _encode(active_device_name: str, active_runtime_meta: dict[str, Any]) -> dict[str, Any]:
+        effective_precision_mode = _resolve_effective_precision_mode(
+            torch=torch,
+            precision_mode=precision_mode,
+            device=active_device_name,
+        )
+        active_runtime_meta["resolved_device"] = str(active_device_name)
+        active_runtime_meta["effective_precision_mode"] = effective_precision_mode
+        total = (len(chars) + batch_size - 1) // batch_size
+        starts = iter_progress(
+            range(0, len(chars), batch_size),
+            total=total,
+            label="Encode mentions",
+            enabled=show_progress,
+            unit="batch",
+            compact_visible=False,
+            emit_events=False,
+        )
+        embeddings_mm = None
+        norms_mm = np.lib.format.open_memmap(norms_output, mode="w+", dtype=np.float32, shape=(len(chars),))
+        encode_started_at = perf_counter()
+        with torch.no_grad():
+            for start in starts:
+                end = min(start + batch_size, len(chars))
+                feature_batch = _build_feature_batch(
+                    chars2vec=chars,
+                    source_text_embeddings=source_emb,
+                    mention_source_index=mention_to_source,
+                    start=start,
+                    end=end,
+                )
+                batch_tensor = torch.from_numpy(np.asarray(feature_batch, dtype=np.float32)).to(active_device_name)
+                with _autocast_context(torch, effective_precision_mode):
+                    z = model(batch_tensor)
+                batch_embeddings = np.asarray(z.detach().cpu().numpy(), dtype=np.float32)
+                if embeddings_mm is None:
+                    if batch_embeddings.ndim != 2:
+                        raise ValueError(f"Unexpected encoder output shape: {batch_embeddings.shape}")
+                    embeddings_mm = np.lib.format.open_memmap(
+                        output,
+                        mode="w+",
+                        dtype=np.float32,
+                        shape=(len(chars), batch_embeddings.shape[1]),
+                    )
+                embeddings_mm[start:end] = batch_embeddings
+                norms_mm[start:end] = np.linalg.norm(batch_embeddings, axis=1).astype(np.float32, copy=False)
+        active_runtime_meta["mention_encode_seconds"] = float(perf_counter() - encode_started_at)
+        if embeddings_mm is None:
+            _write_empty_npy(output, np.zeros((0, 0), dtype=np.float32))
+            active_runtime_meta["mention_embedding_shape"] = [0, 0]
+            active_runtime_meta["mention_embedding_bytes"] = 0
+            active_runtime_meta["mention_norm_bytes"] = int(norms_mm.nbytes)
+        else:
+            embeddings_mm.flush()
+            active_runtime_meta["mention_embedding_shape"] = [int(embeddings_mm.shape[0]), int(embeddings_mm.shape[1])]
+            active_runtime_meta["mention_embedding_bytes"] = int(embeddings_mm.nbytes)
+            active_runtime_meta["mention_norm_bytes"] = int(norms_mm.nbytes)
+        norms_mm.flush()
+        return active_runtime_meta
+
+    try:
+        runtime_meta = _encode(active_device, runtime_meta)
+    except Exception as exc:
+        can_retry_on_cpu = (
+            str(requested_device).strip().lower() == "auto"
+            and str(active_device).startswith("cuda")
+            and _is_cuda_oom_error(torch, exc)
+        )
+        if not can_retry_on_cpu:
+            raise
+        warnings.warn(
+            "Mention encoding hit CUDA OOM; retrying on CPU for this run.",
+            RuntimeWarning,
+        )
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+        _best_effort_clear_cuda_cache(torch)
+        retry_meta = dict(runtime_meta)
+        retry_meta["resolved_device"] = "cpu"
+        retry_meta["fallback_reason"] = "pair_scoring_cuda_oom_retry_cpu"
+        retry_meta["cuda_oom_fallback_used"] = True
+        retry_meta = _encode("cpu", retry_meta)
+        runtime_meta = retry_meta
+
+    if return_runtime_meta:
+        return output, runtime_meta
+    return output
+
+
+def score_pairs_from_mention_embeddings(
+    *,
+    mentions: pd.DataFrame,
+    pairs: pd.DataFrame | str | Path,
+    mention_embeddings: np.ndarray | str | Path,
+    mention_norms: np.ndarray | str | Path | None = None,
+    output_path: str | Path | None = None,
+    batch_size: int = 8192,
+    show_progress: bool = False,
+    chunk_rows: int | None = None,
+    return_scores: bool = True,
+    return_runtime_meta: bool = False,
+    score_callback: Callable[[dict[str, np.ndarray]], None] | None = None,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
+    batch_size = max(1, int(batch_size))
+    mindex = _build_mention_index(mentions)
+    embedding_view = _open_array_view(mention_embeddings)
+    if mention_norms is None:
+        norms_view = (
+            np.linalg.norm(np.asarray(embedding_view), axis=1).astype(np.float32, copy=False)
+            if len(embedding_view)
+            else np.array([], dtype=np.float32)
+        )
+    else:
+        norms_view = _open_array_view(mention_norms)
+
+    runtime_meta: dict[str, Any] = {
+        "pair_scoring_strategy": "preencoded_mentions_memmap"
+        if not isinstance(mention_embeddings, np.ndarray)
+        else "preencoded_mentions",
+        "mention_storage_device": "disk_memmap" if not isinstance(mention_embeddings, np.ndarray) else "cpu",
+        "cuda_oom_fallback_used": False,
+        "score_batch_size": int(batch_size),
+        "parquet_read_seconds": 0.0,
+        "pandas_conversion_seconds": 0.0,
+        "arrow_column_extract_seconds": 0.0,
+        "pair_score_seconds": 0.0,
+        "parquet_output_table_seconds": 0.0,
+        "parquet_write_seconds": 0.0,
+        "pairs_total_rows": 0,
+        "pairs_valid_rows": 0,
+        "numeric_clamping": _init_numeric_clamp_summary(),
+        "mention_embedding_shape": (
+            [int(embedding_view.shape[0]), int(embedding_view.shape[1])]
+            if getattr(embedding_view, "ndim", 0) == 2
+            else [int(len(embedding_view))]
+        ),
+        "mention_embedding_bytes": int(getattr(embedding_view, "nbytes", 0)),
+        "mention_norm_bytes": int(getattr(norms_view, "nbytes", 0)),
+    }
+
+    def _score_columns_to_output(score_columns: dict[str, np.ndarray], out_rows: list[pd.DataFrame]) -> None:
+        if score_callback is not None:
+            score_callback(score_columns)
+        if return_scores:
+            out_rows.append(_scored_pair_arrays_to_frame(score_columns))
+
+    if isinstance(pairs, (str, Path)):
+        pair_path = Path(pairs)
+        if not pair_path.exists():
+            raise FileNotFoundError(pair_path)
+        runtime_meta["pair_input_mode"] = "parquet_chunked"
+        active_chunk_rows = chunk_rows if chunk_rows is not None else max(10_000, int(batch_size) * 4)
+        out_rows: list[pd.DataFrame] = []
+        writer = None
+        writer_schema = None
+        out_path = None if output_path is None else Path(output_path)
+        if out_path is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            if out_path.exists():
+                out_path.unlink()
+
+        try:
+            import pyarrow as pa  # type: ignore
+            import pyarrow.parquet as pq  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("Chunked parquet scoring requires pyarrow.") from exc
+
+        parquet = pq.ParquetFile(pair_path)
+        batch_iter = parquet.iter_batches(batch_size=int(active_chunk_rows))
+        while True:
+            read_started_at = perf_counter()
+            try:
+                batch = next(batch_iter)
+            except StopIteration:
+                break
+            runtime_meta["parquet_read_seconds"] = float(runtime_meta.get("parquet_read_seconds", 0.0)) + float(
+                perf_counter() - read_started_at
+            )
+            extract_started_at = perf_counter()
+            score_columns = _build_scored_pair_arrays(
+                pair_id=np.asarray(batch.column(batch.schema.get_field_index("pair_id")).to_pylist(), dtype=object),
+                mention_id_1=np.asarray(batch.column(batch.schema.get_field_index("mention_id_1")).to_pylist(), dtype=object),
+                mention_id_2=np.asarray(batch.column(batch.schema.get_field_index("mention_id_2")).to_pylist(), dtype=object),
+                block_key=np.asarray(batch.column(batch.schema.get_field_index("block_key")).to_pylist(), dtype=object),
+                mention_index=mindex,
+                mention_embeddings=embedding_view,
+                mention_norms=norms_view,
+                batch_size=batch_size,
+                show_progress=show_progress,
+                active_runtime_meta=runtime_meta,
+            )
+            runtime_meta["arrow_column_extract_seconds"] = float(
+                runtime_meta.get("arrow_column_extract_seconds", 0.0)
+            ) + float(perf_counter() - extract_started_at)
+            _score_columns_to_output(score_columns, out_rows)
+            if out_path is not None and len(score_columns["pair_id"]) > 0:
+                table_started_at = perf_counter()
+                table = pa.Table.from_pydict(score_columns)
+                runtime_meta["parquet_output_table_seconds"] = float(
+                    runtime_meta.get("parquet_output_table_seconds", 0.0)
+                ) + float(perf_counter() - table_started_at)
+                write_started_at = perf_counter()
+                if writer is None:
+                    writer_schema = table.schema
+                    writer = pq.ParquetWriter(out_path, writer_schema)
+                elif writer_schema is not None and table.schema != writer_schema:
+                    table = table.cast(writer_schema)
+                writer.write_table(table)
+                runtime_meta["parquet_write_seconds"] = float(runtime_meta.get("parquet_write_seconds", 0.0)) + float(
+                    perf_counter() - write_started_at
+                )
+
+        if writer is not None:
+            writer.close()
+        if out_path is not None and writer is None:
+            save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), out_path, index=False)
+
+        if not return_scores:
+            result = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+        elif not out_rows:
+            result = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
+        else:
+            result = pd.concat(out_rows, ignore_index=True)
+            validate_columns(result, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
+        if return_runtime_meta:
+            return result, runtime_meta
+        return result
+
+    runtime_meta["pair_input_mode"] = "dataframe"
+    score_columns = _build_scored_pair_arrays(
+        pair_id=pairs["pair_id"].astype(str).to_numpy(copy=False),
+        mention_id_1=pairs["mention_id_1"].astype(str).to_numpy(copy=False),
+        mention_id_2=pairs["mention_id_2"].astype(str).to_numpy(copy=False),
+        block_key=pairs["block_key"].astype(str).to_numpy(copy=False),
+        mention_index=mindex,
+        mention_embeddings=embedding_view,
+        mention_norms=norms_view,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        active_runtime_meta=runtime_meta,
+    )
+    if score_callback is not None:
+        score_callback(score_columns)
+    result = _scored_pair_arrays_to_frame(score_columns)
+    if output_path is not None:
+        save_parquet(result, output_path, index=False)
+    if return_runtime_meta:
+        return result, runtime_meta
+    return result
 
 
 def _build_scored_pair_arrays(

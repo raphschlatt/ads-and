@@ -181,6 +181,47 @@ def _apply_pipeline_mocks(monkeypatch, *, text_mock):
         }
         return (out, meta) if _kwargs.get("return_runtime_meta") else out
 
+    def _encode_mentions(chars2vec, source_text_embeddings, mention_source_index, output_path, norms_output_path=None, **_kwargs):
+        del chars2vec, source_text_embeddings
+        mention_index = np.load(mention_source_index)
+        arr = np.ones((len(mention_index), 4), dtype=np.float32)
+        norms = np.linalg.norm(arr, axis=1).astype(np.float32)
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        np.save(output_path, arr)
+        norms_path = Path(norms_output_path) if norms_output_path is not None else Path(output_path).with_name("mention_embeddings_norms.npy")
+        np.save(norms_path, norms)
+        meta = {
+            "requested_device": str(_kwargs.get("device", "cpu")),
+            "resolved_device": str(_kwargs.get("device", "cpu")),
+            "fallback_reason": None,
+            "torch_version": "2.10.0+cpu",
+            "torch_cuda_version": None,
+            "torch_cuda_available": False,
+            "cuda_probe_error": None,
+            "model_to_cuda_error": None,
+            "effective_precision_mode": "fp32",
+            "mention_encode_seconds": 0.01,
+            "mention_embedding_shape": [int(len(arr)), int(arr.shape[1])],
+            "mention_embedding_bytes": int(arr.nbytes),
+            "mention_norm_bytes": int(norms.nbytes),
+            "cuda_oom_fallback_used": False,
+        }
+        return (Path(output_path), meta) if _kwargs.get("return_runtime_meta") else Path(output_path)
+
+    def _score_from_embeddings(mentions, pairs, output_path=None, score_callback=None, **_kwargs):
+        out, meta = _score(mentions=mentions, pairs=pairs, output_path=output_path, **_kwargs)
+        if score_callback is not None:
+            score_callback(
+                {
+                    "pair_id": out["pair_id"].astype(str).to_numpy(copy=False),
+                    "mention_id_1": out["mention_id_1"].astype(str).to_numpy(copy=False),
+                    "mention_id_2": out["mention_id_2"].astype(str).to_numpy(copy=False),
+                    "block_key": out["block_key"].astype(str).to_numpy(copy=False),
+                    "distance": out["distance"].astype(np.float32).to_numpy(copy=False),
+                }
+            )
+        return (out, meta) if _kwargs.get("return_runtime_meta") else out
+
     def _cluster(mentions, pair_scores, output_path=None, **_kwargs):
         del pair_scores
         out = mentions[["mention_id", "block_key"]].copy()
@@ -212,11 +253,59 @@ def _apply_pipeline_mocks(monkeypatch, *, text_mock):
         }
         return (out, meta) if _kwargs.get("return_meta") else out
 
+    class _FakeExactGraphClusterAccumulator:
+        def __init__(self, *, mentions, cluster_config, backend_requested="auto"):
+            del cluster_config
+            self._mentions = mentions
+            self._backend_requested = backend_requested
+            self._pair_rows = 0
+
+        def consume_score_columns(self, score_columns):
+            self._pair_rows += int(len(score_columns.get("block_key", [])))
+
+        def finalize(self):
+            out = self._mentions[["mention_id", "block_key"]].copy()
+            out["author_uid"] = [f"uid.{idx}" for idx in range(len(out))]
+            meta = {
+                "cluster_backend_requested": str(self._backend_requested),
+                "cluster_backend_effective": "connected_components_cpu",
+                "cluster_backend_reason": "test",
+                "cpu_sharding_mode": "off",
+                "cpu_sharding_enabled": False,
+                "cpu_workers_requested": "auto",
+                "cpu_workers_effective": 2,
+                "ram_budget_bytes": None,
+                "total_pairs_est": int(self._pair_rows),
+                "block_p95": 2.0,
+                "block_size_histogram": {"1": 1},
+                "block_count_by_bucket": {"1": 1},
+                "total_seconds_by_bucket": {"1": 0.001},
+                "dbscan_seconds_by_bucket": {"1": 0.001},
+                "distance_matrix_seconds_total": 0.0,
+                "constraints_seconds_total": 0.0,
+                "sanitize_seconds_total": 0.0,
+                "dbscan_seconds_total": 0.0,
+                "gpu_transfer_seconds_total": 0.0,
+                "top_slow_blocks": [],
+                "sanitize_totals": {
+                    "corrected_blocks": 0,
+                    "non_finite_count": 0,
+                    "negative_count": 0,
+                    "above_max_count": 0,
+                    "asymmetry_pairs": 0,
+                    "diag_reset_count": 0,
+                },
+            }
+            return out, meta
+
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_chars2vec_embeddings", _chars)
     monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_specter_embeddings", text_mock)
     monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _pairs)
     monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_with_checkpoint", _score)
     monkeypatch.setattr("author_name_disambiguation.source_inference.cluster_blockwise_dbscan", _cluster)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.encode_mentions_to_memmap", _encode_mentions)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_from_mention_embeddings", _score_from_embeddings)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.ExactGraphClusterAccumulator", _FakeExactGraphClusterAccumulator)
     monkeypatch.setattr(
         "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
         lambda _device: {
