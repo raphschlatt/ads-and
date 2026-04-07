@@ -1223,6 +1223,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     write_json(preflight, preflight_path)
     _best_effort_release_runtime_memory()
 
+    pair_inference_runtime_meta: dict[str, Any] = {}
     pair_inference_started_at = perf_counter()
     _stage_start("pair_inference")
     _stage_info(
@@ -1282,7 +1283,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     pair_sort_started_at = perf_counter()
     sort_parquet_file(pairs_path, order_by=["block_key", "mention_id_1", "mention_id_2", "pair_id"])
     pair_sort_elapsed = perf_counter() - pair_sort_started_at
+    pairs_manifest_write_started_at = perf_counter()
     pairs_manifest = write_parquet_block_manifest(pairs_path, pairs_manifest_path)
+    pairs_manifest_write_elapsed = perf_counter() - pairs_manifest_write_started_at
     pairs_count = int(pairs_manifest["row_count"])
     pair_meta["pairs_written"] = int(pairs_count)
     pair_meta["output_path"] = str(pairs_path)
@@ -1293,6 +1296,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     empty_mentions = pd.DataFrame(columns=["mention_id", "block_key", "orcid", "split"])
     empty_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+    pairs_qc_build_started_at = perf_counter()
     pairs_qc = build_pairs_qc(
         lspo_mentions=empty_mentions,
         lspo_pairs=empty_pairs,
@@ -1302,7 +1306,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         ads_pair_build_meta=pair_meta,
         ads_pairs_count=int(pairs_count),
     )
+    pairs_qc_build_elapsed = perf_counter() - pairs_qc_build_started_at
+    pairs_qc_write_started_at = perf_counter()
     write_json(pairs_qc, pairs_qc_path)
+    pairs_qc_write_elapsed = perf_counter() - pairs_qc_write_started_at
 
     pair_scoring_started_at = perf_counter()
     if pairs_count == 0:
@@ -1389,16 +1396,47 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
     pair_scoring_elapsed = perf_counter() - pair_scoring_started_at
     pair_score_runtime_meta["wall_seconds"] = float(pair_scoring_elapsed)
+    pair_inference_runtime_meta = {
+        "pair_build_wall_seconds": float(pair_build_elapsed),
+        "pair_sort_seconds": float(pair_sort_elapsed),
+        "pairs_manifest_write_seconds": float(pairs_manifest_write_elapsed),
+        "pairs_qc_build_seconds": float(pairs_qc_build_elapsed),
+        "pairs_qc_write_seconds": float(pairs_qc_write_elapsed),
+        "pair_scoring_wall_seconds": float(pair_scoring_elapsed),
+        "preflight_write_seconds": 0.0,
+        "accounted_wall_seconds": float(
+            pair_build_elapsed
+            + pair_sort_elapsed
+            + pairs_manifest_write_elapsed
+            + pairs_qc_build_elapsed
+            + pairs_qc_write_elapsed
+            + pair_scoring_elapsed
+        ),
+        "wall_seconds": 0.0,
+        "unaccounted_wall_seconds": 0.0,
+    }
 
     preflight["runtime"] = {
         "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "pair_inference": pair_inference_runtime_meta,
         "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
     }
+    pair_preflight_write_started_at = perf_counter()
     write_json(preflight, preflight_path)
+    pair_preflight_write_elapsed = perf_counter() - pair_preflight_write_started_at
+    pair_inference_elapsed = perf_counter() - pair_inference_started_at
+    pair_inference_accounted = float(pair_inference_runtime_meta.get("accounted_wall_seconds") or 0.0) + float(
+        pair_preflight_write_elapsed
+    )
+    pair_inference_runtime_meta["preflight_write_seconds"] = float(pair_preflight_write_elapsed)
+    pair_inference_runtime_meta["accounted_wall_seconds"] = float(pair_inference_accounted)
+    pair_inference_runtime_meta["wall_seconds"] = float(pair_inference_elapsed)
+    pair_inference_runtime_meta["unaccounted_wall_seconds"] = float(pair_inference_elapsed - pair_inference_accounted)
+    preflight["runtime"]["pair_inference"] = pair_inference_runtime_meta
     clamping_meta = dict(pair_score_runtime_meta.get("numeric_clamping", {}) or {})
     if bool(clamping_meta.get("clamped")):
         _stage_warn(
@@ -1411,7 +1449,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             f"distance_below_min={int(clamping_meta.get('distance_below_min_count', 0))} | "
             f"distance_above_max={int(clamping_meta.get('distance_above_max_count', 0))}"
         )
-    pair_inference_elapsed = perf_counter() - pair_inference_started_at
     _stage_done(
         f"pair_count={_format_count(pairs_count)} | "
         f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', pairs_count)))} | "
@@ -1423,15 +1460,33 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"in {_format_elapsed(pair_inference_elapsed)}",
         elapsed_seconds=pair_inference_elapsed,
     )
+    _stage_info(
+        "pair_build_timing "
+        f"build={_format_elapsed(float(pair_build_elapsed))} | "
+        f"sort={_format_elapsed(float(pair_sort_elapsed))} | "
+        f"manifest={_format_elapsed(float(pairs_manifest_write_elapsed))} | "
+        f"qc={_format_elapsed(float(pairs_qc_build_elapsed + pairs_qc_write_elapsed))}"
+    )
     if any(
         float(pair_score_runtime_meta.get(key) or 0.0) > 0.0
-        for key in ("parquet_read_seconds", "pandas_conversion_seconds", "pair_score_seconds", "parquet_write_seconds")
+        for key in (
+            "mention_encode_seconds",
+            "parquet_read_seconds",
+            "pandas_conversion_seconds",
+            "arrow_column_extract_seconds",
+            "pair_score_seconds",
+            "parquet_output_table_seconds",
+            "parquet_write_seconds",
+        )
     ):
         _stage_info(
             "pair_score_timing "
+            f"encode={_format_elapsed(float(pair_score_runtime_meta.get('mention_encode_seconds') or 0.0))} | "
             f"read={_format_elapsed(float(pair_score_runtime_meta.get('parquet_read_seconds') or 0.0))} | "
             f"to_pandas={_format_elapsed(float(pair_score_runtime_meta.get('pandas_conversion_seconds') or 0.0))} | "
+            f"arrow_extract={_format_elapsed(float(pair_score_runtime_meta.get('arrow_column_extract_seconds') or 0.0))} | "
             f"score={_format_elapsed(float(pair_score_runtime_meta.get('pair_score_seconds') or 0.0))} | "
+            f"output_table={_format_elapsed(float(pair_score_runtime_meta.get('parquet_output_table_seconds') or 0.0))} | "
             f"write={_format_elapsed(float(pair_score_runtime_meta.get('parquet_write_seconds') or 0.0))}"
         )
 
@@ -1486,6 +1541,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "pair_inference": pair_inference_runtime_meta,
         "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
@@ -1559,6 +1615,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "pair_inference": pair_inference_runtime_meta,
         "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
@@ -1592,6 +1649,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
+            "pair_inference": pair_inference_runtime_meta,
             "mention_encoding": mention_encode_runtime_meta,
             "pair_scoring": pair_score_runtime_meta,
             "clustering": cluster_runtime_meta,
@@ -1606,6 +1664,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
         "pair_building": pair_meta,
+        "pair_inference": pair_inference_runtime_meta,
         "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
@@ -1664,6 +1723,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "chars2vec": dict(chars_meta),
             "specter": text_runtime_meta,
             "pair_building": pair_meta,
+            "pair_inference": pair_inference_runtime_meta,
             "mention_encoding": mention_encode_runtime_meta,
             "pair_scoring": pair_score_runtime_meta,
             "clustering": cluster_runtime_meta,

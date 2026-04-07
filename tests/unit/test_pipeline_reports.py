@@ -310,6 +310,11 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
         runtime={
             "specter": {"tokenize_seconds_total": 12.0, "forward_seconds_total": 4.0},
             "pair_scoring": {"parquet_write_seconds": 6.0},
+            "pair_inference": {
+                "wall_seconds": 25.0,
+                "accounted_wall_seconds": 24.5,
+                "unaccounted_wall_seconds": 0.5,
+            },
         },
         storage_mode="out_of_core_exact",
         scratch_dir="/tmp/scratch",
@@ -367,6 +372,7 @@ def test_build_infer_metrics_and_compare(tmp_path: Path):
     assert round(float(payload["split_high_sim_rate_probe_delta"]), 6) == -0.07
     runtime_compare = payload["runtime_seconds_compare"]
     assert runtime_compare["common_metric_count"] == 3
+    assert "pair_inference.wall_seconds" in runtime_compare["current_only_metrics"]
     assert runtime_compare["metrics"]["specter.tokenize_seconds_total"]["delta"] == -3.0
     assert runtime_compare["metrics"]["specter.tokenize_seconds_total"]["speedup"] == 1.25
     assert runtime_compare["metrics"]["pair_scoring.parquet_write_seconds"]["improvement_seconds"] == 3.0
