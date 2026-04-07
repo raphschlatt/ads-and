@@ -276,12 +276,12 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "distance_below_min_count": 0,
                 "distance_above_max_count": 0,
             },
-            "parquet_read_seconds": 0.02,
+            "parquet_read_seconds": 1e-6,
             "pandas_conversion_seconds": 0.0,
-            "arrow_column_extract_seconds": 0.01,
-            "pair_score_seconds": 0.03,
-            "parquet_output_table_seconds": 0.01,
-            "parquet_write_seconds": 0.02,
+            "arrow_column_extract_seconds": 1e-6,
+            "pair_score_seconds": 1e-6,
+            "parquet_output_table_seconds": 1e-6,
+            "parquet_write_seconds": 1e-6,
         }
         if empty_chunked_score_return and isinstance(pairs, (str, Path)) and not _kwargs.get("return_scores", True):
             empty = pd.DataFrame(columns=out.columns)
@@ -314,7 +314,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "cuda_probe_error": None,
             "model_to_cuda_error": None,
             "effective_precision_mode": str(_kwargs.get("precision_mode", "fp32")),
-            "mention_encode_seconds": 0.01,
+            "mention_encode_seconds": 1e-6,
             "mention_embedding_shape": [int(len(arr)), int(arr.shape[1])],
             "mention_embedding_bytes": int(arr.nbytes),
             "mention_norm_bytes": int(norms.nbytes),
@@ -571,12 +571,16 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["chars2vec"]["tensorflow_cleanup_attempted"] is True
     assert preflight["runtime"]["load_inputs"]["explode_mentions_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["wall_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["exact_graph_accumulator_init_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["pair_stage_setup_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pair_build_wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pair_sort_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pairs_manifest_write_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pairs_qc_build_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pairs_qc_write_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["pair_scoring_runtime_meta_update_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pair_scoring_wall_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["pair_inference_finalize_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["preflight_write_seconds"] >= 0.0
     assert (
         preflight["runtime"]["pair_inference"]["wall_seconds"]
@@ -585,6 +589,11 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_inference"]["unaccounted_wall_seconds"] >= -0.05
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
     assert preflight["runtime"]["pair_scoring"]["wall_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["accounted_wall_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["unaccounted_wall_seconds"] >= -0.05
+    assert preflight["runtime"]["pair_scoring"]["pair_index_resolve_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["batch_loop_overhead_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
     assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["sort_parquet_seconds"] >= 0.0
@@ -609,6 +618,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["pair_inference"]["wall_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_inference"]["accounted_wall_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_inference"]["unaccounted_wall_seconds"] >= -0.05
+    assert stage_metrics["runtime"]["pair_scoring"]["accounted_wall_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["unaccounted_wall_seconds"] >= -0.05
     assert stage_metrics["runtime"]["mention_encoding"]["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["clustering"]["block_count_by_bucket"]
@@ -632,13 +643,19 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "pairs_est=" in captured.err
     assert "workers=4 | sharding=yes | score_count=" in captured.err
     assert captured.err.count("pair_build_timing ") == 1
-    assert "pair_build_timing build=" in captured.err
+    assert "pair_build_timing setup=" in captured.err
+    assert " | exact_graph_init=" in captured.err
+    assert " | build=" in captured.err
     assert " | sort=" in captured.err
     assert " | manifest=" in captured.err
     assert " | qc=" in captured.err
     assert captured.err.count("pair_score_timing ") == 1
     assert "pair_score_timing encode=" in captured.err
+    assert " | index=" in captured.err
     assert " | arrow_extract=" in captured.err
+    assert " | callback=" in captured.err
+    assert " | frame=" in captured.err
+    assert " | overhead=" in captured.err
     assert " | output_table=" in captured.err
     assert "backend=sklearn_cpu | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
     assert "backend=connected_components_cpu | workers=4 | sharding=no" in captured.err

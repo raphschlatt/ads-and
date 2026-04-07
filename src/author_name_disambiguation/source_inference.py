@@ -20,6 +20,7 @@ from author_name_disambiguation.approaches.nand.export import (
 )
 from author_name_disambiguation.approaches.nand.infer_pairs import (
     encode_mentions_to_memmap,
+    finalize_pair_scoring_runtime_meta,
     score_pairs_from_mention_embeddings,
     score_pairs_with_checkpoint,
 )
@@ -1248,6 +1249,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         str(cluster_cfg_used.get("metric", "precomputed")) == "precomputed"
         and int(cluster_cfg_used.get("min_samples", 1)) == 1
     )
+    exact_graph_accumulator_init_started_at = perf_counter()
     cluster_accumulator = (
         ExactGraphClusterAccumulator(
             mentions=mentions,
@@ -1257,7 +1259,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         if use_exact_graph_clustering
         else None
     )
+    exact_graph_accumulator_init_elapsed = (
+        float(perf_counter() - exact_graph_accumulator_init_started_at) if use_exact_graph_clustering else 0.0
+    )
     pair_build_started_at = perf_counter()
+    pair_stage_setup_elapsed = max(
+        0.0,
+        float(pair_build_started_at - pair_inference_started_at) - float(exact_graph_accumulator_init_elapsed),
+    )
     with activate_progress_reporter(reporter):
         _pairs_unused, pair_meta = build_pairs_within_blocks(
             mentions=mentions,
@@ -1312,7 +1321,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     pairs_qc_write_elapsed = perf_counter() - pairs_qc_write_started_at
 
     pair_scoring_started_at = perf_counter()
+    pair_scoring_runtime_meta_update_elapsed = 0.0
     if pairs_count == 0:
+        pair_scoring_runtime_meta_update_started_at = perf_counter()
         save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), pair_scores_path, index=False)
         pair_scores_manifest = write_parquet_block_manifest(pair_scores_path, pair_scores_manifest_path)
         mention_encode_runtime_meta = _normalize_runtime_meta(
@@ -1334,6 +1345,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_score_runtime_meta["storage_mode"] = "out_of_core_exact"
         pair_score_runtime_meta["output_path"] = str(pair_scores_path)
         pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
+        pair_scoring_runtime_meta_update_elapsed = float(perf_counter() - pair_scoring_runtime_meta_update_started_at)
     else:
         with activate_progress_reporter(reporter):
             _mention_embeddings_path, mention_encode_runtime_meta_raw = encode_mentions_to_memmap(
@@ -1373,6 +1385,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
                     None if cluster_accumulator is None else cluster_accumulator.consume_score_columns
                 ),
             )
+        pair_scoring_runtime_meta_update_started_at = perf_counter()
         pair_score_runtime_meta = _normalize_runtime_meta(
             pair_score_runtime_meta_raw,
             requested_device=str(effective_request_device),
@@ -1394,28 +1407,41 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_score_runtime_meta["storage_mode"] = "out_of_core_exact"
         pair_score_runtime_meta["output_path"] = str(pair_scores_path)
         pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
-    pair_scoring_elapsed = perf_counter() - pair_scoring_started_at
-    pair_score_runtime_meta["wall_seconds"] = float(pair_scoring_elapsed)
+        pair_scoring_runtime_meta_update_elapsed = float(perf_counter() - pair_scoring_runtime_meta_update_started_at)
+    pair_scoring_elapsed = float(perf_counter() - pair_scoring_started_at)
+    pair_score_runtime_meta = finalize_pair_scoring_runtime_meta(
+        pair_score_runtime_meta,
+        wall_seconds=pair_scoring_elapsed,
+    )
+    pair_scoring_core_elapsed = max(0.0, pair_scoring_elapsed - pair_scoring_runtime_meta_update_elapsed)
     pair_inference_runtime_meta = {
+        "exact_graph_accumulator_init_seconds": float(exact_graph_accumulator_init_elapsed),
+        "pair_stage_setup_seconds": float(pair_stage_setup_elapsed),
         "pair_build_wall_seconds": float(pair_build_elapsed),
         "pair_sort_seconds": float(pair_sort_elapsed),
         "pairs_manifest_write_seconds": float(pairs_manifest_write_elapsed),
         "pairs_qc_build_seconds": float(pairs_qc_build_elapsed),
         "pairs_qc_write_seconds": float(pairs_qc_write_elapsed),
+        "pair_scoring_runtime_meta_update_seconds": float(pair_scoring_runtime_meta_update_elapsed),
         "pair_scoring_wall_seconds": float(pair_scoring_elapsed),
+        "pair_inference_finalize_seconds": 0.0,
         "preflight_write_seconds": 0.0,
         "accounted_wall_seconds": float(
-            pair_build_elapsed
+            exact_graph_accumulator_init_elapsed
+            + pair_stage_setup_elapsed
+            + pair_build_elapsed
             + pair_sort_elapsed
             + pairs_manifest_write_elapsed
             + pairs_qc_build_elapsed
             + pairs_qc_write_elapsed
-            + pair_scoring_elapsed
+            + pair_scoring_core_elapsed
+            + pair_scoring_runtime_meta_update_elapsed
         ),
         "wall_seconds": 0.0,
         "unaccounted_wall_seconds": 0.0,
     }
 
+    pair_inference_finalize_started_at = perf_counter()
     preflight["runtime"] = {
         "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
@@ -1427,11 +1453,19 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     }
     pair_preflight_write_started_at = perf_counter()
     write_json(preflight, preflight_path)
-    pair_preflight_write_elapsed = perf_counter() - pair_preflight_write_started_at
-    pair_inference_elapsed = perf_counter() - pair_inference_started_at
-    pair_inference_accounted = float(pair_inference_runtime_meta.get("accounted_wall_seconds") or 0.0) + float(
-        pair_preflight_write_elapsed
+    pair_after_preflight_write_at = perf_counter()
+    pair_preflight_write_elapsed = float(pair_after_preflight_write_at - pair_preflight_write_started_at)
+    pair_inference_elapsed = float(pair_after_preflight_write_at - pair_inference_started_at)
+    pair_inference_finalize_elapsed = max(
+        0.0,
+        float(pair_after_preflight_write_at - pair_inference_finalize_started_at) - pair_preflight_write_elapsed,
     )
+    pair_inference_accounted = (
+        float(pair_inference_runtime_meta.get("accounted_wall_seconds") or 0.0)
+        + pair_inference_finalize_elapsed
+        + pair_preflight_write_elapsed
+    )
+    pair_inference_runtime_meta["pair_inference_finalize_seconds"] = float(pair_inference_finalize_elapsed)
     pair_inference_runtime_meta["preflight_write_seconds"] = float(pair_preflight_write_elapsed)
     pair_inference_runtime_meta["accounted_wall_seconds"] = float(pair_inference_accounted)
     pair_inference_runtime_meta["wall_seconds"] = float(pair_inference_elapsed)
@@ -1462,6 +1496,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     _stage_info(
         "pair_build_timing "
+        f"setup={_format_elapsed(float(pair_stage_setup_elapsed))} | "
+        f"exact_graph_init={_format_elapsed(float(exact_graph_accumulator_init_elapsed))} | "
         f"build={_format_elapsed(float(pair_build_elapsed))} | "
         f"sort={_format_elapsed(float(pair_sort_elapsed))} | "
         f"manifest={_format_elapsed(float(pairs_manifest_write_elapsed))} | "
@@ -1474,9 +1510,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "parquet_read_seconds",
             "pandas_conversion_seconds",
             "arrow_column_extract_seconds",
+            "pair_index_resolve_seconds",
             "pair_score_seconds",
+            "score_callback_seconds",
+            "score_frame_materialization_seconds",
+            "batch_loop_overhead_seconds",
             "parquet_output_table_seconds",
             "parquet_write_seconds",
+            "parquet_manifest_write_seconds",
         )
     ):
         _stage_info(
@@ -1485,9 +1526,18 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             f"read={_format_elapsed(float(pair_score_runtime_meta.get('parquet_read_seconds') or 0.0))} | "
             f"to_pandas={_format_elapsed(float(pair_score_runtime_meta.get('pandas_conversion_seconds') or 0.0))} | "
             f"arrow_extract={_format_elapsed(float(pair_score_runtime_meta.get('arrow_column_extract_seconds') or 0.0))} | "
+            f"index={_format_elapsed(float(pair_score_runtime_meta.get('pair_index_resolve_seconds') or 0.0))} | "
             f"score={_format_elapsed(float(pair_score_runtime_meta.get('pair_score_seconds') or 0.0))} | "
+            f"callback={_format_elapsed(float(pair_score_runtime_meta.get('score_callback_seconds') or 0.0))} | "
+            f"frame={_format_elapsed(float(pair_score_runtime_meta.get('score_frame_materialization_seconds') or 0.0))} | "
+            f"overhead={_format_elapsed(float(pair_score_runtime_meta.get('batch_loop_overhead_seconds') or 0.0))} | "
             f"output_table={_format_elapsed(float(pair_score_runtime_meta.get('parquet_output_table_seconds') or 0.0))} | "
             f"write={_format_elapsed(float(pair_score_runtime_meta.get('parquet_write_seconds') or 0.0))}"
+            + (
+                f" | manifest={_format_elapsed(float(pair_score_runtime_meta.get('parquet_manifest_write_seconds') or 0.0))}"
+                if float(pair_score_runtime_meta.get("parquet_manifest_write_seconds") or 0.0) > 0.0
+                else ""
+            )
         )
 
     clustering_started_at = perf_counter()

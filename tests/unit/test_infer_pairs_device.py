@@ -410,6 +410,17 @@ def test_score_pairs_matches_reference_cosine_from_preencoded_mentions(monkeypat
     assert runtime_meta["mention_embedding_shape"] == [3, 4]
     assert runtime_meta["pairs_total_rows"] == 3
     assert runtime_meta["pairs_valid_rows"] == 2
+    assert runtime_meta["pair_index_resolve_seconds"] >= 0.0
+    assert runtime_meta["valid_mask_seconds"] >= 0.0
+    assert runtime_meta["score_concat_seconds"] >= 0.0
+    assert runtime_meta["distance_postprocess_seconds"] >= 0.0
+    assert runtime_meta["score_columns_assemble_seconds"] >= 0.0
+    assert runtime_meta["score_callback_seconds"] >= 0.0
+    assert runtime_meta["score_frame_materialization_seconds"] >= 0.0
+    assert runtime_meta["batch_loop_overhead_seconds"] >= 0.0
+    assert runtime_meta["accounted_wall_seconds"] >= 0.0
+    assert runtime_meta["wall_seconds"] >= runtime_meta["accounted_wall_seconds"] - 0.05
+    assert runtime_meta["unaccounted_wall_seconds"] >= -0.05
 
 
 def test_build_scored_pair_arrays_uses_numeric_helper_indices_without_string_lookup():
@@ -655,5 +666,11 @@ def test_score_pairs_chunked_parity_matches_dataframe_path(monkeypatch, tmp_path
     assert chunked_meta["pandas_conversion_seconds"] == 0.0
     assert chunked_meta["arrow_column_extract_seconds"] >= 0.0
     assert chunked_meta["pair_score_seconds"] >= 0.0
+    assert chunked_meta["pair_index_resolve_seconds"] >= 0.0
+    assert chunked_meta["score_frame_materialization_seconds"] >= 0.0
+    assert chunked_meta["writer_close_seconds"] >= 0.0
+    assert chunked_meta["accounted_wall_seconds"] >= 0.0
+    assert chunked_meta["wall_seconds"] >= chunked_meta["accounted_wall_seconds"] - 0.05
+    assert chunked_meta["unaccounted_wall_seconds"] >= -0.05
     assert chunked_meta["parquet_output_table_seconds"] >= 0.0
     assert chunked_meta["parquet_write_seconds"] >= 0.0

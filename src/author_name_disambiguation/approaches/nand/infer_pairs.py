@@ -20,6 +20,64 @@ from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move
 build_feature_matrix = _legacy_build_feature_matrix
 
 PAIR_NUMERIC_HELPER_COLUMNS = ("mention_idx_1", "mention_idx_2", "block_idx")
+PAIR_SCORING_ENVELOPE_FIELDS = (
+    "feature_build_seconds",
+    "mention_encode_seconds",
+    "parquet_read_seconds",
+    "pandas_conversion_seconds",
+    "arrow_column_extract_seconds",
+    "score_callback_seconds",
+    "score_frame_materialization_seconds",
+    "parquet_output_table_seconds",
+    "parquet_write_seconds",
+    "parquet_manifest_write_seconds",
+    "writer_close_seconds",
+)
+
+
+def _init_pair_scoring_timing_fields() -> dict[str, float]:
+    return {
+        "feature_build_seconds": 0.0,
+        "mention_encode_seconds": 0.0,
+        "parquet_read_seconds": 0.0,
+        "pandas_conversion_seconds": 0.0,
+        "arrow_column_extract_seconds": 0.0,
+        "pair_score_seconds": 0.0,
+        "pair_index_resolve_seconds": 0.0,
+        "valid_mask_seconds": 0.0,
+        "score_concat_seconds": 0.0,
+        "distance_postprocess_seconds": 0.0,
+        "score_columns_assemble_seconds": 0.0,
+        "score_callback_seconds": 0.0,
+        "score_frame_materialization_seconds": 0.0,
+        "batch_loop_overhead_seconds": 0.0,
+        "parquet_output_table_seconds": 0.0,
+        "parquet_write_seconds": 0.0,
+        "parquet_manifest_write_seconds": 0.0,
+        "writer_close_seconds": 0.0,
+        "accounted_wall_seconds": 0.0,
+        "unaccounted_wall_seconds": 0.0,
+    }
+
+
+def finalize_pair_scoring_runtime_meta(
+    runtime_meta: Mapping[str, Any] | None,
+    *,
+    wall_seconds: float | None = None,
+) -> dict[str, Any]:
+    out = dict(runtime_meta or {})
+    for field, value in _init_pair_scoring_timing_fields().items():
+        out.setdefault(field, value)
+    accounted = sum(float(out.get(field) or 0.0) for field in PAIR_SCORING_ENVELOPE_FIELDS)
+    out["accounted_wall_seconds"] = float(accounted)
+    resolved_wall = out.get("wall_seconds") if wall_seconds is None else wall_seconds
+    if resolved_wall is not None:
+        out["wall_seconds"] = float(resolved_wall)
+        out["unaccounted_wall_seconds"] = float(float(resolved_wall) - accounted)
+    else:
+        out.setdefault("wall_seconds", 0.0)
+        out.setdefault("unaccounted_wall_seconds", 0.0)
+    return out
 
 
 def _require_torch():
@@ -507,6 +565,7 @@ def score_pairs_from_mention_embeddings(
     return_runtime_meta: bool = False,
     score_callback: Callable[[dict[str, np.ndarray]], None] | None = None,
 ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
+    scoring_started_at = perf_counter()
     batch_size = max(1, int(batch_size))
     mindex = _build_mention_index(mentions)
     mention_ids_by_index = mentions["mention_id"].astype(str).to_numpy(dtype=object, copy=False)
@@ -527,12 +586,6 @@ def score_pairs_from_mention_embeddings(
         "mention_storage_device": "disk_memmap" if not isinstance(mention_embeddings, np.ndarray) else "cpu",
         "cuda_oom_fallback_used": False,
         "score_batch_size": int(batch_size),
-        "parquet_read_seconds": 0.0,
-        "pandas_conversion_seconds": 0.0,
-        "arrow_column_extract_seconds": 0.0,
-        "pair_score_seconds": 0.0,
-        "parquet_output_table_seconds": 0.0,
-        "parquet_write_seconds": 0.0,
         "pairs_total_rows": 0,
         "pairs_valid_rows": 0,
         "numeric_clamping": _init_numeric_clamp_summary(),
@@ -544,12 +597,21 @@ def score_pairs_from_mention_embeddings(
         "mention_embedding_bytes": int(getattr(embedding_view, "nbytes", 0)),
         "mention_norm_bytes": int(getattr(norms_view, "nbytes", 0)),
     }
+    runtime_meta.update(_init_pair_scoring_timing_fields())
 
     def _score_columns_to_output(score_columns: dict[str, np.ndarray], out_rows: list[pd.DataFrame]) -> None:
         if score_callback is not None:
+            callback_started_at = perf_counter()
             score_callback(score_columns)
+            runtime_meta["score_callback_seconds"] = float(
+                runtime_meta.get("score_callback_seconds", 0.0)
+            ) + float(perf_counter() - callback_started_at)
         if return_scores:
+            frame_started_at = perf_counter()
             out_rows.append(_scored_pair_arrays_to_frame(score_columns))
+            runtime_meta["score_frame_materialization_seconds"] = float(
+                runtime_meta.get("score_frame_materialization_seconds", 0.0)
+            ) + float(perf_counter() - frame_started_at)
 
     if isinstance(pairs, (str, Path)):
         pair_path = Path(pairs)
@@ -623,9 +685,17 @@ def score_pairs_from_mention_embeddings(
                 )
 
         if writer is not None:
+            close_started_at = perf_counter()
             writer.close()
+            runtime_meta["writer_close_seconds"] = float(runtime_meta.get("writer_close_seconds", 0.0)) + float(
+                perf_counter() - close_started_at
+            )
         if out_path is not None and writer is None:
+            close_started_at = perf_counter()
             save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), out_path, index=False)
+            runtime_meta["writer_close_seconds"] = float(runtime_meta.get("writer_close_seconds", 0.0)) + float(
+                perf_counter() - close_started_at
+            )
 
         if not return_scores:
             result = pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS)
@@ -634,6 +704,10 @@ def score_pairs_from_mention_embeddings(
         else:
             result = pd.concat(out_rows, ignore_index=True)
             validate_columns(result, PAIR_SCORE_REQUIRED_COLUMNS, "pair_scores")
+        runtime_meta = finalize_pair_scoring_runtime_meta(
+            runtime_meta,
+            wall_seconds=float(perf_counter() - scoring_started_at),
+        )
         if return_runtime_meta:
             return result, runtime_meta
         return result
@@ -672,6 +746,10 @@ def score_pairs_from_mention_embeddings(
     result = _scored_pair_arrays_to_frame(score_columns)
     if output_path is not None:
         save_parquet(result, output_path, index=False)
+    runtime_meta = finalize_pair_scoring_runtime_meta(
+        runtime_meta,
+        wall_seconds=float(perf_counter() - scoring_started_at),
+    )
     if return_runtime_meta:
         return result, runtime_meta
     return result
@@ -694,6 +772,7 @@ def _build_scored_pair_arrays(
     show_progress: bool,
     active_runtime_meta: dict[str, Any],
 ) -> dict[str, np.ndarray]:
+    index_started_at = perf_counter()
     numeric_idx1 = _numeric_index_array(mention_idx_1)
     numeric_idx2 = _numeric_index_array(mention_idx_2)
     use_numeric_helpers, helper_reason = _resolve_numeric_helper_mode(
@@ -709,10 +788,17 @@ def _build_scored_pair_arrays(
     active_runtime_meta["pair_index_mode"] = "numeric_helper_columns" if use_numeric_helpers else "mention_id_lookup"
     active_runtime_meta["pair_index_fallback_reason"] = None if use_numeric_helpers else helper_reason
     active_runtime_meta["block_index_mode"] = "numeric_helper_columns" if use_numeric_block_helpers else "block_key_only"
+    active_runtime_meta["pair_index_resolve_seconds"] = float(
+        active_runtime_meta.get("pair_index_resolve_seconds", 0.0)
+    ) + float(perf_counter() - index_started_at)
 
+    valid_mask_started_at = perf_counter()
     valid_mask = (idx1 >= 0) & (idx2 >= 0)
     idx1_valid = idx1[valid_mask]
     idx2_valid = idx2[valid_mask]
+    active_runtime_meta["valid_mask_seconds"] = float(active_runtime_meta.get("valid_mask_seconds", 0.0)) + float(
+        perf_counter() - valid_mask_started_at
+    )
     active_runtime_meta["pairs_total_rows"] = int(active_runtime_meta.get("pairs_total_rows", 0)) + int(len(pair_id))
     active_runtime_meta["pairs_valid_rows"] = int(active_runtime_meta.get("pairs_valid_rows", 0)) + int(len(idx1_valid))
 
@@ -728,20 +814,32 @@ def _build_scored_pair_arrays(
         emit_events=False,
     )
     score_started_at = perf_counter()
+    score_compute_seconds = 0.0
     for start in starts:
         end = min(start + batch_size, len(idx1_valid))
         batch_idx1 = idx1_valid[start:end]
         batch_idx2 = idx2_valid[start:end]
         z1 = mention_embeddings[batch_idx1]
         z2 = mention_embeddings[batch_idx2]
+        batch_compute_started_at = perf_counter()
         dot = np.einsum("ij,ij->i", z1, z2, optimize=True)
         denom = np.maximum(mention_norms[batch_idx1] * mention_norms[batch_idx2], 1e-8)
         sims.append((dot / denom).astype(np.float32, copy=False))
+        score_compute_seconds += float(perf_counter() - batch_compute_started_at)
+    batch_loop_elapsed = float(perf_counter() - score_started_at)
     active_runtime_meta["pair_score_seconds"] = float(active_runtime_meta.get("pair_score_seconds", 0.0)) + float(
-        perf_counter() - score_started_at
+        score_compute_seconds
     )
+    active_runtime_meta["batch_loop_overhead_seconds"] = float(
+        active_runtime_meta.get("batch_loop_overhead_seconds", 0.0)
+    ) + float(max(0.0, batch_loop_elapsed - score_compute_seconds))
 
+    concat_started_at = perf_counter()
     sim_arr = np.concatenate(sims, axis=0) if sims else np.array([], dtype=np.float32)
+    active_runtime_meta["score_concat_seconds"] = float(active_runtime_meta.get("score_concat_seconds", 0.0)) + float(
+        perf_counter() - concat_started_at
+    )
+    postprocess_started_at = perf_counter()
     sim_arr, sim_meta = clamp_cosine_sim(sim_arr)
     dist_arr, dist_meta = compute_safe_distance_from_cosine(sim_arr)
     _accumulate_numeric_clamp_summary(
@@ -749,7 +847,11 @@ def _build_scored_pair_arrays(
         sim_meta=sim_meta,
         dist_meta=dist_meta,
     )
+    active_runtime_meta["distance_postprocess_seconds"] = float(
+        active_runtime_meta.get("distance_postprocess_seconds", 0.0)
+    ) + float(perf_counter() - postprocess_started_at)
 
+    assemble_started_at = perf_counter()
     result = {
         "pair_id": np.asarray(pair_id[valid_mask], dtype=object),
         "mention_id_1": np.asarray(mention_id_1[valid_mask], dtype=object),
@@ -763,6 +865,9 @@ def _build_scored_pair_arrays(
         result["mention_idx_2"] = idx2_valid.astype(np.int64, copy=False)
     if use_numeric_block_helpers:
         result["block_idx"] = _numeric_index_array(block_idx[valid_mask]).astype(np.int64, copy=False)
+    active_runtime_meta["score_columns_assemble_seconds"] = float(
+        active_runtime_meta.get("score_columns_assemble_seconds", 0.0)
+    ) + float(perf_counter() - assemble_started_at)
     return result
 
 
@@ -787,6 +892,7 @@ def score_pairs_with_checkpoint(
     return_scores: bool = True,
     return_runtime_meta: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
+    scoring_started_at = perf_counter()
     torch = _require_torch()
     batch_size = max(1, int(batch_size))
     requested_device = device
@@ -813,17 +919,10 @@ def score_pairs_with_checkpoint(
     runtime_meta["mention_storage_device"] = "cpu"
     runtime_meta["cuda_oom_fallback_used"] = False
     runtime_meta["score_batch_size"] = int(batch_size)
-    runtime_meta["feature_build_seconds"] = 0.0
-    runtime_meta["mention_encode_seconds"] = 0.0
-    runtime_meta["parquet_read_seconds"] = 0.0
-    runtime_meta["pandas_conversion_seconds"] = 0.0
-    runtime_meta["arrow_column_extract_seconds"] = 0.0
-    runtime_meta["pair_score_seconds"] = 0.0
-    runtime_meta["parquet_output_table_seconds"] = 0.0
-    runtime_meta["parquet_write_seconds"] = 0.0
     runtime_meta["pairs_total_rows"] = 0
     runtime_meta["pairs_valid_rows"] = 0
     runtime_meta["numeric_clamping"] = _init_numeric_clamp_summary()
+    runtime_meta.update(_init_pair_scoring_timing_fields())
 
     mindex = _build_mention_index(mentions)
     mention_ids_by_index = mentions["mention_id"].astype(str).to_numpy(dtype=object, copy=False)
@@ -868,7 +967,12 @@ def score_pairs_with_checkpoint(
             show_progress=show_progress,
             active_runtime_meta=active_runtime_meta,
         )
-        return _scored_pair_arrays_to_frame(score_columns)
+        frame_started_at = perf_counter()
+        out = _scored_pair_arrays_to_frame(score_columns)
+        active_runtime_meta["score_frame_materialization_seconds"] = float(
+            active_runtime_meta.get("score_frame_materialization_seconds", 0.0)
+        ) + float(perf_counter() - frame_started_at)
+        return out
 
     def _run_scoring(active_device: str, active_runtime_meta: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
         effective_precision_mode = _resolve_effective_precision_mode(
@@ -955,7 +1059,11 @@ def score_pairs_with_checkpoint(
                     show_progress=show_progress,
                 )
                 if return_scores:
+                    frame_started_at = perf_counter()
                     out_rows.append(_scored_pair_arrays_to_frame(score_columns))
+                    active_runtime_meta["score_frame_materialization_seconds"] = float(
+                        active_runtime_meta.get("score_frame_materialization_seconds", 0.0)
+                    ) + float(perf_counter() - frame_started_at)
                 if out_path is not None and len(score_columns["pair_id"]) > 0:
                     table_started_at = perf_counter()
                     table = pa.Table.from_pydict(_public_score_columns(score_columns))
@@ -974,9 +1082,17 @@ def score_pairs_with_checkpoint(
                     ) + float(perf_counter() - write_started_at)
 
             if writer is not None:
+                close_started_at = perf_counter()
                 writer.close()
+                active_runtime_meta["writer_close_seconds"] = float(
+                    active_runtime_meta.get("writer_close_seconds", 0.0)
+                ) + float(perf_counter() - close_started_at)
             if out_path is not None and writer is None:
+                close_started_at = perf_counter()
                 save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), out_path, index=False)
+                active_runtime_meta["writer_close_seconds"] = float(
+                    active_runtime_meta.get("writer_close_seconds", 0.0)
+                ) + float(perf_counter() - close_started_at)
 
             if return_scores:
                 if not out_rows:
@@ -1025,10 +1141,26 @@ def score_pairs_with_checkpoint(
         retry_runtime_meta["parquet_read_seconds"] = 0.0
         retry_runtime_meta["pandas_conversion_seconds"] = 0.0
         retry_runtime_meta["arrow_column_extract_seconds"] = 0.0
+        retry_runtime_meta["pair_index_resolve_seconds"] = 0.0
+        retry_runtime_meta["valid_mask_seconds"] = 0.0
+        retry_runtime_meta["score_concat_seconds"] = 0.0
+        retry_runtime_meta["distance_postprocess_seconds"] = 0.0
+        retry_runtime_meta["score_columns_assemble_seconds"] = 0.0
+        retry_runtime_meta["score_callback_seconds"] = 0.0
+        retry_runtime_meta["score_frame_materialization_seconds"] = 0.0
+        retry_runtime_meta["batch_loop_overhead_seconds"] = 0.0
         retry_runtime_meta["parquet_output_table_seconds"] = 0.0
         retry_runtime_meta["parquet_write_seconds"] = 0.0
+        retry_runtime_meta["parquet_manifest_write_seconds"] = 0.0
+        retry_runtime_meta["writer_close_seconds"] = 0.0
+        retry_runtime_meta["accounted_wall_seconds"] = 0.0
+        retry_runtime_meta["unaccounted_wall_seconds"] = 0.0
         retry_runtime_meta["pairs_total_rows"] = 0
         retry_runtime_meta["pairs_valid_rows"] = 0
         out, runtime_meta = _run_scoring("cpu", retry_runtime_meta)
 
+    runtime_meta = finalize_pair_scoring_runtime_meta(
+        runtime_meta,
+        wall_seconds=float(perf_counter() - scoring_started_at),
+    )
     return (out, runtime_meta) if return_runtime_meta else out
