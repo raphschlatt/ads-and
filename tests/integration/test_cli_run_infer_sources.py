@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +99,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
     seen: dict[str, object] = {}
 
     def _chars(mentions, output_path, force_recompute=False, **_kwargs):
+        seen["chars_kwargs"] = dict(_kwargs)
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and not force_recompute:
@@ -122,6 +124,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "tensorflow_memory_growth_error": None,
                 "tensorflow_cleanup_attempted": False,
                 "tensorflow_cleanup_error": None,
+                "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
             }
             return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 50), dtype=np.float32)
@@ -146,6 +149,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "tensorflow_memory_growth_error": None,
             "tensorflow_cleanup_attempted": True,
             "tensorflow_cleanup_error": None,
+            "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
         }
         return (arr, meta) if _kwargs.get("return_meta") else arr
 
@@ -181,6 +185,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "max_sequence_length_observed": 0,
                 "mean_sequence_length_observed": 0.0,
                 "device_to_host_flushes": 0,
+                "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
                 "column_present": False,
                 "precomputed_embedding_count": 0,
                 "recomputed_embedding_count": len(mentions),
@@ -214,6 +219,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "max_sequence_length_observed": 1,
             "mean_sequence_length_observed": 1.0,
             "device_to_host_flushes": max(0, len(mentions)),
+            "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
             "column_present": False,
             "precomputed_embedding_count": 0,
             "recomputed_embedding_count": len(mentions),
@@ -325,7 +331,10 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                     "pair_id": f"{base['mention_id']}__{other['mention_id']}",
                     "mention_id_1": str(base["mention_id"]),
                     "mention_id_2": str(other["mention_id"]),
+                    "mention_idx_1": int(base.name),
+                    "mention_idx_2": int(other.name),
                     "block_key": str(block_key),
+                    "block_idx": int(pd.Index(pd.unique(mentions["block_key"].astype(str))).get_loc(str(block_key))),
                     "split": str(base.get("split", "inference")),
                     "label": None,
                 }
@@ -533,13 +542,17 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert context["runtime"]["chars2vec"]["wall_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["unique_name_count"] == 5
+    assert context["runtime"]["chars2vec"]["tokenizers_parallelism_setting"] == os.environ.get("TOKENIZERS_PARALLELISM", "<unset>")
     assert context["runtime"]["specter"]["fallback_reason"] == "torch_cuda_unavailable"
     assert context["runtime"]["pair_building"]["cpu_workers_effective"] == 4
     assert context["runtime"]["clustering"]["cpu_workers_effective"] == 4
     assert preflight["runtime"]["chars2vec"]["tensorflow_cleanup_attempted"] is True
     assert preflight["runtime"]["load_inputs"]["explode_mentions_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["resolved_device"] == "cpu"
+    assert preflight["runtime"]["pair_scoring"]["wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
+    assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_building"]["sort_parquet_seconds"] >= 0.0
     assert preflight["runtime"]["clustering"]["cpu_workers_effective"] == 4
     assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_reread"
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
@@ -547,6 +560,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "gpu"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
     assert stage_metrics["runtime"]["specter"]["resolved_device"] == "cpu"
+    assert stage_metrics["runtime"]["specter"]["tokenizers_parallelism_setting"] == os.environ.get(
+        "TOKENIZERS_PARALLELISM",
+        "<unset>",
+    )
     assert stage_metrics["runtime"]["specter"]["source_embedding_count"] == 3
     assert stage_metrics["runtime"]["specter"]["mention_materialization_count"] == 0
     assert "device_to_host_flushes" in stage_metrics["runtime"]["specter"]
@@ -582,6 +599,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     payload_stdout = json.loads(captured.out)
     assert payload_stdout["run_id"] == payload["run_id"]
     assert seen["specter_input_rows"] == 3
+    assert seen["chars_kwargs"]["execution_mode"] == "predict"
+    assert seen["chars_kwargs"]["batch_size"] is None
     assert seen["specter_kwargs"]["reuse_model"] is False
     assert seen["pair_kwargs"]["num_workers"] is None
     assert seen["pair_kwargs"]["sharding_mode"] == "auto"
@@ -647,6 +666,11 @@ def test_run_infer_sources_emits_structured_progress_events(monkeypatch, tmp_pat
 
     pair_progress_units = {event.unit for event in events if event.kind == "stage_progress" and event.stage_key == "pair_inference"}
     assert pair_progress_units == {"pair"}
+    clustering_progress = [
+        event for event in events if event.kind == "stage_progress" and event.stage_key == "clustering"
+    ]
+    assert len(clustering_progress) >= 2
+    assert {event.unit for event in clustering_progress} == {"block"}
 
     assert not any(
         event.kind == "stage_progress"

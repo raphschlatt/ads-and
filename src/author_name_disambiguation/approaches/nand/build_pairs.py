@@ -23,6 +23,22 @@ from author_name_disambiguation.common.cpu_runtime import (
 from author_name_disambiguation.common.io_schema import PAIR_REQUIRED_COLUMNS, save_parquet, validate_columns
 
 
+PAIR_HELPER_COLUMNS = ["mention_idx_1", "mention_idx_2", "block_idx"]
+PAIR_OUTPUT_COLUMNS = [
+    "pair_id",
+    "mention_id_1",
+    "mention_id_2",
+    "mention_idx_1",
+    "mention_idx_2",
+    "block_key",
+    "block_idx",
+    "split",
+    "label",
+]
+_MENTION_IDX_COL = "__pair_mention_idx"
+_BLOCK_IDX_COL = "__pair_block_idx"
+
+
 def _split_sets_from_orcid(
     unique_orcid: list[str],
     seed: int,
@@ -303,7 +319,10 @@ def _new_pair_buffer() -> dict[str, list[Any]]:
         "pair_id": [],
         "mention_id_1": [],
         "mention_id_2": [],
+        "mention_idx_1": [],
+        "mention_idx_2": [],
         "block_key": [],
+        "block_idx": [],
         "split": [],
         "label": [],
     }
@@ -324,7 +343,7 @@ def _buffer_extend(dest: dict[str, list[Any]], src: dict[str, list[Any]]) -> Non
 
 
 def _buffer_to_frame(buffer_rows: dict[str, list[Any]]) -> pd.DataFrame:
-    return pd.DataFrame(buffer_rows, columns=["pair_id", "mention_id_1", "mention_id_2", "block_key", "split", "label"])
+    return pd.DataFrame(buffer_rows, columns=PAIR_OUTPUT_COLUMNS)
 
 
 def _append_pair_row(
@@ -333,14 +352,20 @@ def _append_pair_row(
     pair_id: str,
     mention_id_1: str,
     mention_id_2: str,
+    mention_idx_1: int,
+    mention_idx_2: int,
     block_key: str,
+    block_idx: int,
     split: str,
     label: int | None,
 ) -> None:
     buffer_rows["pair_id"].append(pair_id)
     buffer_rows["mention_id_1"].append(mention_id_1)
     buffer_rows["mention_id_2"].append(mention_id_2)
+    buffer_rows["mention_idx_1"].append(int(mention_idx_1))
+    buffer_rows["mention_idx_2"].append(int(mention_idx_2))
     buffer_rows["block_key"].append(block_key)
+    buffer_rows["block_idx"].append(int(block_idx))
     buffer_rows["split"].append(split)
     buffer_rows["label"].append(label)
 
@@ -348,6 +373,16 @@ def _append_pair_row(
 def _prepare_block_arrays(block: pd.DataFrame) -> dict[str, Any]:
     n = int(len(block))
     mention_ids = block["mention_id"].map(str).to_numpy(dtype=object, copy=False)
+    mention_indices = (
+        block[_MENTION_IDX_COL].to_numpy(dtype=np.int64, copy=False)
+        if _MENTION_IDX_COL in block.columns
+        else np.arange(n, dtype=np.int64)
+    )
+    block_idx = (
+        int(block[_BLOCK_IDX_COL].iloc[0])
+        if _BLOCK_IDX_COL in block.columns and n > 0
+        else 0
+    )
     if "bibcode" in block.columns:
         bibcodes = block["bibcode"].fillna("").astype(str).str.strip().to_numpy(dtype=object, copy=False)
     else:
@@ -359,6 +394,8 @@ def _prepare_block_arrays(block: pd.DataFrame) -> dict[str, Any]:
     orcids = block["orcid"].to_numpy(dtype=object, copy=False) if "orcid" in block.columns else None
     return {
         "mention_ids": mention_ids,
+        "mention_indices": mention_indices,
+        "block_idx": int(block_idx),
         "bibcodes": bibcodes,
         "splits": splits,
         "orcids": orcids,
@@ -451,9 +488,11 @@ def _execute_pair_blocks(
         rng = np.random.default_rng(_seed_for_block(seed, str(block_key)))
         block_arrays = _prepare_block_arrays(block)
         mention_ids = block_arrays["mention_ids"]
+        mention_indices = block_arrays["mention_indices"]
         bibcodes = block_arrays["bibcodes"]
         splits = block_arrays["splits"]
         orcids = block_arrays["orcids"]
+        block_idx = int(block_arrays["block_idx"])
         block_flush_seconds = 0.0
         block_pairs_emitted = 0
         block_same_publication_pairs_skipped = 0
@@ -489,7 +528,10 @@ def _execute_pair_blocks(
                 pair_id=_pair_id(m1, m2),
                 mention_id_1=m1,
                 mention_id_2=m2,
+                mention_idx_1=int(mention_indices[i]),
+                mention_idx_2=int(mention_indices[j]),
                 block_key=str(block_key),
+                block_idx=block_idx,
                 split=split,
                 label=label,
             )
@@ -540,7 +582,7 @@ def _execute_pair_blocks(
     readback_seconds = 0.0
     if output is not None and not return_pairs:
         if pairs_written == 0:
-            empty = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+            empty = pd.DataFrame(columns=PAIR_OUTPUT_COLUMNS)
             save_parquet(empty, output, index=False)
         pairs = None
     elif not return_pairs:
@@ -589,7 +631,7 @@ def _partition_block_entries(
 def _merge_parquet_shards(shard_paths: list[Path], output_path: Path) -> int:
     valid_paths = [p for p in shard_paths if p.exists()]
     if not valid_paths:
-        empty = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+        empty = pd.DataFrame(columns=PAIR_OUTPUT_COLUMNS)
         save_parquet(empty, output_path, index=False)
         return 0
 
@@ -612,7 +654,7 @@ def _merge_parquet_shards(shard_paths: list[Path], output_path: Path) -> int:
         if frames:
             merged = pd.concat(frames, ignore_index=True)
         else:
-            merged = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+            merged = pd.DataFrame(columns=PAIR_OUTPUT_COLUMNS)
         save_parquet(merged, output_path, index=False)
         return int(len(merged))
 
@@ -635,7 +677,7 @@ def _merge_parquet_shards(shard_paths: list[Path], output_path: Path) -> int:
             writer.close()
 
     if total_rows == 0 and not output_path.exists():
-        empty = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+        empty = pd.DataFrame(columns=PAIR_OUTPUT_COLUMNS)
         save_parquet(empty, output_path, index=False)
     return int(total_rows)
 
@@ -682,9 +724,12 @@ def build_pairs_within_blocks(
     ram_budget_bytes: int | None = None,
 ) -> pd.DataFrame | None | tuple[pd.DataFrame | None, Dict[str, Any]]:
     """Build mention pairs inside blocks, optionally with labels (LSPO)."""
+    mentions = mentions.copy()
     if "split" not in mentions.columns:
-        mentions = mentions.copy()
         mentions["split"] = "inference"
+    mentions[_MENTION_IDX_COL] = np.arange(len(mentions), dtype=np.int64)
+    block_codes, _ = pd.factorize(mentions["block_key"].astype(str), sort=False)
+    mentions[_BLOCK_IDX_COL] = np.asarray(block_codes, dtype=np.int64)
 
     group_blocks_started_at = perf_counter()
     grouped = mentions.groupby("block_key", sort=False)
@@ -942,7 +987,7 @@ def build_pairs_within_blocks(
     }
 
     if output is not None and not return_pairs and int(meta["pairs_written"]) == 0:
-        empty = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
+        empty = pd.DataFrame(columns=PAIR_OUTPUT_COLUMNS)
         save_parquet(empty, output, index=False)
 
     if pairs is None:

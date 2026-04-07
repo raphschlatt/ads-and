@@ -1,43 +1,44 @@
-`wave_b_v1` ist als fehlgeschlagener Clustering-Kandidat abgeschlossen.
+# infer_sources speedup wave
 
-Gesicherter Stand:
-- `LSPO` war nur die Vorqualifikation und blieb innerhalb der Toleranz.
-- `ADS Full` war die operative Entscheidungsebene und ist klar regressiv ausgefallen.
-- Fuer `bench_full_wave_b_v1` existiert jetzt eine formale `keep_baseline`-Decision.
-- Der Run wurde auf die dokumentierte JSON-only-Retention reduziert.
-- Die aktive infer-Baseline bleibt `bench_full_v22_fix2`.
+## Current baseline
 
-Was daraus folgt:
-1. `wave_b_v1` wird nicht promotet.
-2. Diese Konfiguration ist nicht mehr der laufende Arbeitszweig.
-3. Der naechste Performance-Schritt wird separat und von der sauberen Baseline aus neu geplant.
+- Produktiver `chars2vec`-Pfad ist wieder auf `execution_mode="predict"` plus `batch_size=32` gesetzt.
+- `CLI`- und `LSPO`-Pfade bleiben ebenfalls auf `predict(32)`.
+- Historische chars2vec-Entscheidung und Messwerte stehen in `docs/experiments/perf_pkg2_chars_v1.md`.
+- `Gate zuerst` bleibt die Regel: schnellere Varianten werden erst nach bestandenem LSPO- und ADS-Gate promoted.
 
-Was wir jetzt bewusst nicht tun:
-- kein Weiteriterieren auf dem entfernten `wave_b_v1`-Configpfad
-- kein gemischtes Paket aus neuen Clustering- und chars2vec-Aenderungen
-- kein neuer Full-Run, bevor der naechste Versuch inhaltlich neu begruendet ist
+## Current regressions / fixes in dieser Welle
 
-Kurz: erst Close-out und Baseline-Hygiene, dann neue Planung aus sauberem Zustand.
+- Exact-Graph-Clustering sendet wieder blockweisen Fortschritt statt nur eines finalen `100%`-Signals.
+- Balanced Progress bleibt bewusst begrenzt:
+  - sichtbar: `chars2vec`, `pair_building`, `exact-graph clustering`
+  - weiter stumm: nested `Encode mentions` und `Score batches`
+- Pair-Runtime-Meta ist bereinigt:
+  - `pair_building.wall_seconds` und `pair_scoring.wall_seconds` sind wieder getrennt
+  - `pair_building.sort_parquet_seconds` weist den globalen Sort-Schritt separat aus
+- Exact-Graph-Meta ist entwirrt:
+  - `mapping_seconds_total`
+  - `constraint_apply_seconds_total`
+  - `connected_components_seconds_total`
+  - `dbscan_seconds_total=0.0` im Exact-Graph-Pfad, damit die Metrik nicht weiter falsch benannt ist
+- SPECTER schreibt die effektiv sichtbare `TOKENIZERS_PARALLELISM`-Einstellung in die Runtime-Meta.
+- Intermediate `pairs.parquet` enthaelt jetzt numerische Helper-Spalten fuer den Hot-Path:
+  - `mention_idx_1`
+  - `mention_idx_2`
+  - `block_idx`
+- NAND-Scoring und Exact-Graph nutzen diese Helper-Spalten bevorzugt und fallen fuer Legacy-Artefakte sauber auf String-Mapping zurueck.
 
-`perf_pkg2_chars_v1` ist als chars2vec-Kandidat jetzt ebenfalls eingeordnet.
+## Next gated experiments
 
-Gesicherter Stand:
-- Der chars2vec-Microbenchmark war stark positiv: `predict+auto` war auf dem ADS-Sample grob `7.6x` schneller als `predict+32`.
-- Der `LSPO Gate Run` ist trotzdem nicht durch das aktuelle No-Drift-Gate gekommen.
-- Ein `ADS Full Candidate Run` fuer `perf_pkg2_chars_v1` wurde deshalb bewusst nicht gestartet.
-- Die Details und Messwerte stehen in `docs/experiments/perf_pkg2_chars_v1.md`.
+1. `chars2vec exact32` CPU vs GPU auf der aktuellen Maschine erneut benchmarken.
+2. SPECTER A/B mit unveraenderter vs nicht erzwungener `TOKENIZERS_PARALLELISM`-Einstellung laufen lassen.
+3. ADS Full Run nach dieser Welle neu messen und gegen die Baseline vergleichen.
+4. Nur bei ausreichendem Netto-Gewinn den naechsten groesseren Refactor anfassen:
+   - Pair-Building auf block spans statt Block-DataFrames
+   - Exact-Graph-Union-Find in kompilierten Pfad schieben
 
-Was daraus folgt:
-1. `perf_pkg2_chars_v1` wird in der jetzigen Form nicht promotet.
-2. Grosze chars2vec-Batches sind fuer dieses Repo nicht automatisch ein reiner Runtime-Gewinn, sondern ein qualitaetsrelevanter Eingriff.
-3. Vor dem naechsten promoteten Inferenz-Experiment sollte der historische chars2vec-Defaultpfad wieder der Referenzzustand sein.
+## Repo hygiene
 
-Was wir als Naechstes sinnvoll tun:
-1. chars2vec auf dem historischen Referenzpfad `predict(32)` halten
-2. `CPU exact32` nicht weiter als Promotionskandidat verfolgen, weil `GPU exact32` im Track-A-Benchmark auf beiden Datenschnitten schneller war
-3. den naechsten chars2vec-Versuch nur noch als Exact-Path-Optimierung rund um `predict(32)` planen
-
-Wichtige Track-A-Erkenntnisse:
-- Der produktive chars2vec-Pfad ist wieder auf dem historischen `predict(32)`-Verhalten.
-- Der Track-A-Control-Run war trotzdem kein perfekter historischer Repro-Check, weil der aktuelle LSPO-Kompatibilitaetspfad `subset_cache_key_computed = ...srcb2c9203fe342` erzeugt, waehrend die historische Baseline auf `...srcd52b159f766e` basiert.
-- Das bedeutet: aktuelle Control-Runs koennen als Sanity-Check dienen, aber nicht automatisch als strenger Beweis fuer bit-identische Reproduktion der historischen LSPO-Baseline.
+- `Infer_MWE.ipynb` bleibt das minimale Package-MWE.
+- `Infer_Integration_MWE.ipynb` bleibt das Integrations-MWE fuer externen `progress_handler`.
+- `Test.ipynb` ist ein alter Scratch-/Lab-Workspace und kein produktives MWE mehr; er soll entfernt bleiben.

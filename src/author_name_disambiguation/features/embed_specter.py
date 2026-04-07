@@ -36,6 +36,11 @@ _SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
 _SPECTER_DIM = TEXT_EMBEDDING_DIM
 
 
+def _tokenizers_parallelism_setting() -> str:
+    value = os.environ.get("TOKENIZERS_PARALLELISM")
+    return "<unset>" if value is None else str(value)
+
+
 def _hash_stub_embedding(text: str, dim: int = 768) -> np.ndarray:
     h = hashlib.sha256(text.encode("utf-8", errors="ignore")).digest()
     seed = int.from_bytes(h[:8], byteorder="little", signed=False)
@@ -214,6 +219,7 @@ def _base_runtime_meta(
         "mean_sequence_length_observed": 0.0,
         "device_to_host_flushes": 0,
         "device_to_host_flush_batch_count": 0,
+        "tokenizers_parallelism_setting": _tokenizers_parallelism_setting(),
     }
 
 
@@ -322,7 +328,6 @@ def _configure_hf_noise(quiet_libraries: bool) -> None:
 
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     logging.getLogger("transformers").setLevel(logging.ERROR)
     logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 

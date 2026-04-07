@@ -19,6 +19,7 @@ def test_pair_builder_with_labels_and_splits():
     assert len(pairs) >= 1
     assert "status" in meta
     assert set(["pair_id", "mention_id_1", "mention_id_2", "block_key", "split"]).issubset(set(pairs.columns))
+    assert {"mention_idx_1", "mention_idx_2", "block_idx"}.issubset(set(pairs.columns))
 
 
 def test_pair_builder_excludes_same_bibcode_pairs_and_reports_meta():

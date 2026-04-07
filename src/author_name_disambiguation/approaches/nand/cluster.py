@@ -757,15 +757,27 @@ class ExactGraphClusterAccumulator:
             "asymmetry_pairs": 0,
             "diag_reset_count": 0,
         }
-        self.scoring_seconds_total = 0.0
+        self.mapping_seconds_total = 0.0
         self.constraint_seconds_total = 0.0
         self.union_seconds_total = 0.0
         self.processed_pair_rows = 0
+        self.numeric_pair_index_rows = 0
+        self.string_pair_index_rows = 0
 
         self.block_states: dict[str, dict[str, Any]] = {}
+        self.block_states_by_idx: dict[int, dict[str, Any]] = {}
         eps_rows: list[dict[str, Any]] = []
-        for block_key, block_mentions in mentions.groupby("block_key", sort=False):
-            block_mentions = block_mentions.reset_index(drop=True)
+        mentions_with_indices = mentions.reset_index(drop=True).copy()
+        mentions_with_indices["__exact_graph_mention_idx"] = np.arange(len(mentions_with_indices), dtype=np.int64)
+        block_codes, _ = pd.factorize(mentions_with_indices["block_key"].astype(str), sort=False)
+        mentions_with_indices["__exact_graph_block_idx"] = np.asarray(block_codes, dtype=np.int64)
+        for block_key, raw_block_mentions in mentions_with_indices.groupby("block_key", sort=False):
+            global_mention_indices = raw_block_mentions["__exact_graph_mention_idx"].to_numpy(dtype=np.int64, copy=False)
+            block_idx = int(raw_block_mentions["__exact_graph_block_idx"].iloc[0]) if len(raw_block_mentions) else 0
+            block_mentions = raw_block_mentions.drop(
+                columns=["__exact_graph_mention_idx", "__exact_graph_block_idx"],
+                errors="ignore",
+            ).reset_index(drop=True)
             n = int(len(block_mentions))
             effective_eps, eps_row = _resolve_block_eps(
                 block_size=n,
@@ -776,10 +788,14 @@ class ExactGraphClusterAccumulator:
             )
             eps_rows.append(eps_row)
             mention_ids = block_mentions["mention_id"].astype(str).tolist()
-            self.block_states[str(block_key)] = {
+            state = {
                 "block_key": str(block_key),
+                "block_idx": int(block_idx),
                 "mentions": block_mentions,
                 "mention_to_local": {mention_id: idx for idx, mention_id in enumerate(mention_ids)},
+                "mention_global_to_local": {
+                    int(global_idx): idx for idx, global_idx in enumerate(global_mention_indices.tolist())
+                },
                 "mention_ids": mention_ids,
                 "uf": _UnionFind(n),
                 "size": n,
@@ -788,6 +804,8 @@ class ExactGraphClusterAccumulator:
                 "eps_bucket": str(eps_row["bucket"]),
                 "constraint_state": _prepare_constraint_state(block_mentions),
             }
+            self.block_states[str(block_key)] = state
+            self.block_states_by_idx[int(block_idx)] = state
         self.eps_block_policy_summary = _summarize_block_eps(
             eps_base=float(self.eps),
             eps_block_policy=self.eps_block_policy,
@@ -800,41 +818,81 @@ class ExactGraphClusterAccumulator:
             return
         mention_id_1 = np.asarray(score_columns["mention_id_1"], dtype=object)
         mention_id_2 = np.asarray(score_columns["mention_id_2"], dtype=object)
+        mention_idx_1 = (
+            np.asarray(score_columns["mention_idx_1"], dtype=np.int64)
+            if "mention_idx_1" in score_columns
+            else None
+        )
+        mention_idx_2 = (
+            np.asarray(score_columns["mention_idx_2"], dtype=np.int64)
+            if "mention_idx_2" in score_columns
+            else None
+        )
+        block_idx = (
+            np.asarray(score_columns["block_idx"], dtype=np.int64)
+            if "block_idx" in score_columns
+            else None
+        )
         distances, sanitize_meta = _sanitize_pair_distance_array(score_columns["distance"])
         for key, value in sanitize_meta.items():
             self.sanitize_totals[key] = int(self.sanitize_totals.get(key, 0)) + int(value)
 
         self.processed_pair_rows += int(len(block_keys))
-        unique_block_keys, starts = np.unique(block_keys, return_index=True)
+        group_source = block_keys if block_idx is None else block_idx
+        unique_block_keys, starts = np.unique(group_source, return_index=True)
         order = np.argsort(starts)
         block_order = unique_block_keys[order]
         block_starts = starts[order]
         block_ends = list(block_starts[1:]) + [len(block_keys)]
 
         for raw_block_key, start, end in zip(block_order.tolist(), block_starts.tolist(), block_ends):
-            block_key = str(raw_block_key)
-            state = self.block_states.get(block_key)
+            if block_idx is None:
+                state = self.block_states.get(str(raw_block_key))
+            else:
+                state = self.block_states_by_idx.get(int(raw_block_key))
             if state is None:
                 continue
             map_started_at = perf_counter()
-            local_index = state["mention_to_local"]
-            idx1 = np.fromiter(
-                (int(local_index[str(value)]) for value in mention_id_1[start:end]),
-                dtype=np.int64,
-                count=int(end - start),
-            )
-            idx2 = np.fromiter(
-                (int(local_index[str(value)]) for value in mention_id_2[start:end]),
-                dtype=np.int64,
-                count=int(end - start),
-            )
-            self.scoring_seconds_total += float(perf_counter() - map_started_at)
+            if mention_idx_1 is not None and mention_idx_2 is not None:
+                local_index = state["mention_global_to_local"]
+                idx1 = np.fromiter(
+                    (int(local_index.get(int(value), -1)) for value in mention_idx_1[start:end]),
+                    dtype=np.int64,
+                    count=int(end - start),
+                )
+                idx2 = np.fromiter(
+                    (int(local_index.get(int(value), -1)) for value in mention_idx_2[start:end]),
+                    dtype=np.int64,
+                    count=int(end - start),
+                )
+                self.numeric_pair_index_rows += int(end - start)
+            else:
+                local_index = state["mention_to_local"]
+                idx1 = np.fromiter(
+                    (int(local_index.get(str(value), -1)) for value in mention_id_1[start:end]),
+                    dtype=np.int64,
+                    count=int(end - start),
+                )
+                idx2 = np.fromiter(
+                    (int(local_index.get(str(value), -1)) for value in mention_id_2[start:end]),
+                    dtype=np.int64,
+                    count=int(end - start),
+                )
+                self.string_pair_index_rows += int(end - start)
+            self.mapping_seconds_total += float(perf_counter() - map_started_at)
+
+            valid_mask = (idx1 >= 0) & (idx2 >= 0)
+            if not bool(valid_mask.any()):
+                continue
+            idx1_valid = idx1[valid_mask]
+            idx2_valid = idx2[valid_mask]
+            distance_block = distances[start:end][valid_mask]
 
             constraint_started_at = perf_counter()
             effective = _apply_constraints_to_pair_distances(
-                distances=distances[start:end],
-                idx1=idx1,
-                idx2=idx2,
+                distances=distance_block,
+                idx1=idx1_valid,
+                idx2=idx2_valid,
                 constraint_state=state["constraint_state"],
                 constraints=self.constraints,
             )
@@ -844,7 +902,7 @@ class ExactGraphClusterAccumulator:
             edge_mask = effective <= float(state["effective_eps"])
             if bool(edge_mask.any()):
                 uf = state["uf"]
-                for i, j in zip(idx1[edge_mask].tolist(), idx2[edge_mask].tolist()):
+                for i, j in zip(idx1_valid[edge_mask].tolist(), idx2_valid[edge_mask].tolist()):
                     uf.union(int(i), int(j))
             self.union_seconds_total += float(perf_counter() - union_started_at)
 
@@ -901,13 +959,18 @@ class ExactGraphClusterAccumulator:
             "build_entries_seconds": 0.0,
             "distance_matrix_seconds_total": 0.0,
             "constraints_seconds_total": float(self.constraint_seconds_total),
+            "constraint_apply_seconds_total": float(self.constraint_seconds_total),
             "sanitize_seconds_total": 0.0,
-            "dbscan_seconds_total": float(self.union_seconds_total),
+            "dbscan_seconds_total": 0.0,
+            "connected_components_seconds_total": float(self.union_seconds_total),
             "gpu_transfer_seconds_total": 0.0,
             "top_slow_blocks": [],
             "sanitize_totals": dict(self.sanitize_totals),
             "processed_pair_rows": int(self.processed_pair_rows),
-            "pair_index_seconds_total": float(self.scoring_seconds_total),
+            "pair_index_seconds_total": float(self.mapping_seconds_total),
+            "mapping_seconds_total": float(self.mapping_seconds_total),
+            "numeric_pair_index_rows": int(self.numeric_pair_index_rows),
+            "string_pair_index_rows": int(self.string_pair_index_rows),
         }
         return out, meta
 

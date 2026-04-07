@@ -22,7 +22,7 @@ from author_name_disambiguation.approaches.nand.infer_pairs import (
     score_pairs_from_mention_embeddings,
     score_pairs_with_checkpoint,
 )
-from author_name_disambiguation.common.cli_ui import CliProgressHandler, get_active_ui
+from author_name_disambiguation.common.cli_ui import CliProgressHandler, get_active_ui, loop_progress
 from author_name_disambiguation.common.cpu_runtime import compute_ram_budget_bytes, normalize_workers_request
 from author_name_disambiguation.common.io_schema import (
     PAIR_REQUIRED_COLUMNS,
@@ -1236,6 +1236,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         if use_exact_graph_clustering
         else None
     )
+    pair_build_started_at = perf_counter()
     with activate_progress_reporter(reporter):
         _pairs_unused, pair_meta = build_pairs_within_blocks(
             mentions=mentions,
@@ -1255,15 +1256,20 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             min_pairs_per_worker=cpu_min_pairs_per_worker,
             ram_budget_bytes=cpu_ram_budget_bytes,
         )
+    pair_build_elapsed = perf_counter() - pair_build_started_at
     if not pairs_path.exists() and isinstance(_pairs_unused, pd.DataFrame):
         save_parquet(_pairs_unused, pairs_path)
+    pair_sort_started_at = perf_counter()
     sort_parquet_file(pairs_path, order_by=["block_key", "mention_id_1", "mention_id_2", "pair_id"])
+    pair_sort_elapsed = perf_counter() - pair_sort_started_at
     pairs_manifest = write_parquet_block_manifest(pairs_path, pairs_manifest_path)
     pairs_count = int(pairs_manifest["row_count"])
     pair_meta["pairs_written"] = int(pairs_count)
     pair_meta["output_path"] = str(pairs_path)
     pair_meta["manifest_path"] = str(pairs_manifest_path)
     pair_meta["storage_mode"] = "out_of_core_exact"
+    pair_meta["wall_seconds"] = float(pair_build_elapsed)
+    pair_meta["sort_parquet_seconds"] = float(pair_sort_elapsed)
 
     empty_mentions = pd.DataFrame(columns=["mention_id", "block_key", "orcid", "split"])
     empty_pairs = pd.DataFrame(columns=PAIR_REQUIRED_COLUMNS + ["label"])
@@ -1278,6 +1284,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     write_json(pairs_qc, pairs_qc_path)
 
+    pair_scoring_started_at = perf_counter()
     if pairs_count == 0:
         save_parquet(pd.DataFrame(columns=PAIR_SCORE_REQUIRED_COLUMNS), pair_scores_path, index=False)
         pair_scores_manifest = write_parquet_block_manifest(pair_scores_path, pair_scores_manifest_path)
@@ -1360,6 +1367,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_score_runtime_meta["storage_mode"] = "out_of_core_exact"
         pair_score_runtime_meta["output_path"] = str(pair_scores_path)
         pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
+    pair_scoring_elapsed = perf_counter() - pair_scoring_started_at
+    pair_score_runtime_meta["wall_seconds"] = float(pair_scoring_elapsed)
 
     preflight["runtime"] = {
         "load_inputs": load_inputs_runtime,
@@ -1383,8 +1392,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             f"distance_above_max={int(clamping_meta.get('distance_above_max_count', 0))}"
         )
     pair_inference_elapsed = perf_counter() - pair_inference_started_at
-    pair_meta["wall_seconds"] = float(pair_inference_elapsed)
-    pair_score_runtime_meta["wall_seconds"] = float(pair_inference_elapsed)
     _stage_done(
         f"pair_count={_format_count(pairs_count)} | "
         f"pairs_est={_format_count(int(pair_meta.get('total_pairs_est', pairs_count)))} | "
@@ -1416,9 +1423,22 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     )
     if cluster_accumulator is not None:
         clusters, cluster_runtime_meta = cluster_accumulator.finalize()
-        if reporter.has_handler():
-            block_total = int(max(1, clusters["block_key"].nunique())) if "block_key" in clusters.columns else 1
-            reporter.progress(current=block_total, total=block_total, unit="block")
+        block_keys = (
+            pd.unique(clusters["block_key"].astype(str)).tolist()
+            if "block_key" in clusters.columns
+            else []
+        )
+        block_progress_units = block_keys if block_keys else [None]
+        with activate_progress_reporter(reporter):
+            with loop_progress(
+                total=len(block_progress_units),
+                label="Cluster blocks",
+                enabled=progress_enabled,
+                unit="block",
+                compact_label="Clustering",
+            ) as tracker:
+                for _ in block_progress_units:
+                    tracker.update(1)
     else:
         with activate_progress_reporter(reporter):
             clusters, cluster_runtime_meta = cluster_blockwise_dbscan(

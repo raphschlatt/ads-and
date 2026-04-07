@@ -117,7 +117,6 @@ def _configure_library_noise(quiet_libraries: bool) -> None:
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     os.environ["ABSL_LOG_LEVEL"] = "3"
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
     warnings.filterwarnings(

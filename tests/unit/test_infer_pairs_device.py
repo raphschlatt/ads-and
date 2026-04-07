@@ -412,6 +412,84 @@ def test_score_pairs_matches_reference_cosine_from_preencoded_mentions(monkeypat
     assert runtime_meta["pairs_valid_rows"] == 2
 
 
+def test_build_scored_pair_arrays_uses_numeric_helper_indices_without_string_lookup():
+    runtime_meta = {}
+    score_columns = infer_pairs._build_scored_pair_arrays(
+        pair_id=np.asarray(["p0", "p1"], dtype=object),
+        mention_id_1=np.asarray(["idx0", "idx1"], dtype=object),
+        mention_id_2=np.asarray(["idx1", "idx2"], dtype=object),
+        block_key=np.asarray(["blk.a", "blk.a"], dtype=object),
+        mention_idx_1=np.asarray([0, 1], dtype=np.int64),
+        mention_idx_2=np.asarray([1, 2], dtype=np.int64),
+        block_idx=np.asarray([7, 7], dtype=np.int64),
+        mention_index={},
+        mention_ids_by_index=np.asarray(["idx0", "idx1", "idx2"], dtype=object),
+        mention_embeddings=np.asarray(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        mention_norms=np.asarray([1.0, 1.0, np.sqrt(2.0)], dtype=np.float32),
+        batch_size=2,
+        show_progress=False,
+        active_runtime_meta=runtime_meta,
+    )
+
+    assert list(score_columns["pair_id"]) == ["p0", "p1"]
+    assert score_columns["mention_idx_1"].tolist() == [0, 1]
+    assert score_columns["mention_idx_2"].tolist() == [1, 2]
+    assert score_columns["block_idx"].tolist() == [7, 7]
+    assert runtime_meta["pair_index_mode"] == "numeric_helper_columns"
+    assert runtime_meta["pair_index_fallback_reason"] is None
+    np.testing.assert_allclose(
+        score_columns["cosine_sim"],
+        np.asarray([0.0, 1.0 / np.sqrt(2.0)], dtype=np.float32),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_score_pairs_falls_back_to_mention_id_lookup_when_numeric_helpers_do_not_match_subset(monkeypatch):
+    monkeypatch.setattr(infer_pairs, "load_checkpoint", lambda **_kwargs: {"model_config": {}, "state_dict": {}})
+    monkeypatch.setattr(infer_pairs, "create_encoder", lambda _config: _NormalizeModel())
+
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2"]})
+    pairs = pd.DataFrame(
+        [
+            {
+                "pair_id": "m1__m2",
+                "mention_id_1": "m1",
+                "mention_id_2": "m2",
+                "mention_idx_1": 4,
+                "mention_idx_2": 5,
+                "block_key": "blk.a",
+                "block_idx": 9,
+            }
+        ]
+    )
+    chars = np.array([[1.0, 0.0], [0.2, 0.8]], dtype=np.float32)
+    text = np.array([[0.1, 0.9], [0.3, 0.7]], dtype=np.float32)
+
+    out, runtime_meta = infer_pairs.score_pairs_with_checkpoint(
+        mentions=mentions,
+        pairs=pairs,
+        chars2vec=chars,
+        text_emb=text,
+        checkpoint_path="checkpoint.pt",
+        device="cpu",
+        return_runtime_meta=True,
+        show_progress=False,
+    )
+
+    assert list(out["pair_id"]) == ["m1__m2"]
+    assert runtime_meta["pair_index_mode"] == "mention_id_lookup"
+    assert runtime_meta["pair_index_fallback_reason"] == "out_of_range"
+    assert runtime_meta["block_index_mode"] == "block_key_only"
+
+
 def test_score_pairs_auto_retries_on_cpu_after_cuda_oom_during_mention_encoding(monkeypatch):
     model = _RecordToModel()
 

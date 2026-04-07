@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import os
 import sys
 from types import SimpleNamespace
 
@@ -134,6 +135,7 @@ class _LengthSortingModel:
 def test_generate_specter_embeddings_length_batches_and_cpu_auto_precision(monkeypatch: pytest.MonkeyPatch):
     tokenizer = _LengthSortingTokenizer()
     model = _LengthSortingModel()
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "true")
     monkeypatch.setattr(
         embed_specter,
         "_load_specter_components",
@@ -167,6 +169,17 @@ def test_generate_specter_embeddings_length_batches_and_cpu_auto_precision(monke
     assert meta["mean_sequence_length_observed"] == 1.0
     assert meta["device_to_host_flush_batch_count"] == 1
     assert meta["device_to_host_flushes"] == 2
+    assert meta["tokenizers_parallelism_setting"] == "true"
+
+
+def test_configure_hf_noise_preserves_tokenizers_parallelism(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TOKENIZERS_PARALLELISM", raising=False)
+    embed_specter._configure_hf_noise(True)
+    assert "TOKENIZERS_PARALLELISM" not in os.environ
+
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "true")
+    embed_specter._configure_hf_noise(True)
+    assert os.environ["TOKENIZERS_PARALLELISM"] == "true"
 
 
 def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.MonkeyPatch):

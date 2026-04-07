@@ -19,6 +19,8 @@ from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move
 # Backward-compatible export for tests/legacy monkeypatch points.
 build_feature_matrix = _legacy_build_feature_matrix
 
+PAIR_NUMERIC_HELPER_COLUMNS = ("mention_idx_1", "mention_idx_2", "block_idx")
+
 
 def _require_torch():
     try:
@@ -216,6 +218,86 @@ def _encode_mentions(
 
 def _pair_index_array(values: np.ndarray, mention_index: Dict[str, int]) -> np.ndarray:
     return np.fromiter((int(mention_index.get(str(value), -1)) for value in values), dtype=np.int64, count=len(values))
+
+
+def _numeric_index_array(values: np.ndarray | None) -> np.ndarray | None:
+    if values is None:
+        return None
+    arr = np.asarray(values)
+    if arr.size == 0:
+        return np.asarray(arr, dtype=np.int64)
+    return np.asarray(arr, dtype=np.int64)
+
+
+def _resolve_numeric_helper_mode(
+    *,
+    mention_id_1: np.ndarray,
+    mention_id_2: np.ndarray,
+    mention_idx_1: np.ndarray | None,
+    mention_idx_2: np.ndarray | None,
+    mention_ids_by_index: np.ndarray | None,
+) -> tuple[bool, str]:
+    numeric_idx1 = _numeric_index_array(mention_idx_1)
+    numeric_idx2 = _numeric_index_array(mention_idx_2)
+    if numeric_idx1 is None or numeric_idx2 is None:
+        return False, "missing_helper_columns"
+    if mention_ids_by_index is None:
+        return False, "missing_mention_id_order"
+    if len(numeric_idx1) != len(mention_id_1) or len(numeric_idx2) != len(mention_id_2):
+        return False, "length_mismatch"
+    if len(numeric_idx1) == 0:
+        return True, "validated_empty"
+
+    mention_ids = np.asarray(mention_ids_by_index, dtype=object)
+    n_mentions = int(len(mention_ids))
+    if n_mentions == 0:
+        return False, "empty_mentions"
+
+    in_range_1 = (numeric_idx1 >= 0) & (numeric_idx1 < n_mentions)
+    in_range_2 = (numeric_idx2 >= 0) & (numeric_idx2 < n_mentions)
+    if not bool(np.all(in_range_1)) or not bool(np.all(in_range_2)):
+        return False, "out_of_range"
+
+    if not np.array_equal(np.asarray(mention_ids[numeric_idx1], dtype=object), np.asarray(mention_id_1, dtype=object)):
+        return False, "mention_id_mismatch"
+    if not np.array_equal(np.asarray(mention_ids[numeric_idx2], dtype=object), np.asarray(mention_id_2, dtype=object)):
+        return False, "mention_id_mismatch"
+    return True, "validated"
+
+
+def _arrow_string_column(batch, column_name: str) -> np.ndarray:
+    field_index = batch.schema.get_field_index(column_name)
+    if field_index < 0:
+        raise KeyError(column_name)
+    return np.asarray(batch.column(field_index).to_pylist(), dtype=object)
+
+
+def _arrow_numeric_column(batch, column_name: str) -> np.ndarray | None:
+    field_index = batch.schema.get_field_index(column_name)
+    if field_index < 0:
+        return None
+    return np.asarray(batch.column(field_index).to_numpy(zero_copy_only=False), dtype=np.int64)
+
+
+def _extract_pair_batch_columns(batch) -> dict[str, np.ndarray]:
+    columns = {
+        "pair_id": _arrow_string_column(batch, "pair_id"),
+        "mention_id_1": _arrow_string_column(batch, "mention_id_1"),
+        "mention_id_2": _arrow_string_column(batch, "mention_id_2"),
+        "block_key": _arrow_string_column(batch, "block_key"),
+    }
+    for column_name in PAIR_NUMERIC_HELPER_COLUMNS:
+        values = _arrow_numeric_column(batch, column_name)
+        if values is not None:
+            columns[column_name] = values
+    return columns
+
+
+def _public_score_columns(score_columns: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    return {
+        column: score_columns[column]
+        for column in PAIR_SCORE_REQUIRED_COLUMNS
+    }
 
 
 def _build_feature_batch(
@@ -427,6 +509,7 @@ def score_pairs_from_mention_embeddings(
 ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, Any]]:
     batch_size = max(1, int(batch_size))
     mindex = _build_mention_index(mentions)
+    mention_ids_by_index = mentions["mention_id"].astype(str).to_numpy(dtype=object, copy=False)
     embedding_view = _open_array_view(mention_embeddings)
     if mention_norms is None:
         norms_view = (
@@ -501,12 +584,17 @@ def score_pairs_from_mention_embeddings(
                 perf_counter() - read_started_at
             )
             extract_started_at = perf_counter()
+            pair_columns = _extract_pair_batch_columns(batch)
             score_columns = _build_scored_pair_arrays(
-                pair_id=np.asarray(batch.column(batch.schema.get_field_index("pair_id")).to_pylist(), dtype=object),
-                mention_id_1=np.asarray(batch.column(batch.schema.get_field_index("mention_id_1")).to_pylist(), dtype=object),
-                mention_id_2=np.asarray(batch.column(batch.schema.get_field_index("mention_id_2")).to_pylist(), dtype=object),
-                block_key=np.asarray(batch.column(batch.schema.get_field_index("block_key")).to_pylist(), dtype=object),
+                pair_id=pair_columns["pair_id"],
+                mention_id_1=pair_columns["mention_id_1"],
+                mention_id_2=pair_columns["mention_id_2"],
+                block_key=pair_columns["block_key"],
+                mention_idx_1=pair_columns.get("mention_idx_1"),
+                mention_idx_2=pair_columns.get("mention_idx_2"),
+                block_idx=pair_columns.get("block_idx"),
                 mention_index=mindex,
+                mention_ids_by_index=mention_ids_by_index,
                 mention_embeddings=embedding_view,
                 mention_norms=norms_view,
                 batch_size=batch_size,
@@ -519,7 +607,7 @@ def score_pairs_from_mention_embeddings(
             _score_columns_to_output(score_columns, out_rows)
             if out_path is not None and len(score_columns["pair_id"]) > 0:
                 table_started_at = perf_counter()
-                table = pa.Table.from_pydict(score_columns)
+                table = pa.Table.from_pydict(_public_score_columns(score_columns))
                 runtime_meta["parquet_output_table_seconds"] = float(
                     runtime_meta.get("parquet_output_table_seconds", 0.0)
                 ) + float(perf_counter() - table_started_at)
@@ -556,7 +644,23 @@ def score_pairs_from_mention_embeddings(
         mention_id_1=pairs["mention_id_1"].astype(str).to_numpy(copy=False),
         mention_id_2=pairs["mention_id_2"].astype(str).to_numpy(copy=False),
         block_key=pairs["block_key"].astype(str).to_numpy(copy=False),
+        mention_idx_1=(
+            pairs["mention_idx_1"].to_numpy(copy=False)
+            if "mention_idx_1" in pairs.columns
+            else None
+        ),
+        mention_idx_2=(
+            pairs["mention_idx_2"].to_numpy(copy=False)
+            if "mention_idx_2" in pairs.columns
+            else None
+        ),
+        block_idx=(
+            pairs["block_idx"].to_numpy(copy=False)
+            if "block_idx" in pairs.columns
+            else None
+        ),
         mention_index=mindex,
+        mention_ids_by_index=mention_ids_by_index,
         mention_embeddings=embedding_view,
         mention_norms=norms_view,
         batch_size=batch_size,
@@ -579,15 +683,32 @@ def _build_scored_pair_arrays(
     mention_id_1: np.ndarray,
     mention_id_2: np.ndarray,
     block_key: np.ndarray,
+    mention_idx_1: np.ndarray | None,
+    mention_idx_2: np.ndarray | None,
+    block_idx: np.ndarray | None,
     mention_index: Dict[str, int],
+    mention_ids_by_index: np.ndarray | None,
     mention_embeddings: np.ndarray,
     mention_norms: np.ndarray,
     batch_size: int,
     show_progress: bool,
     active_runtime_meta: dict[str, Any],
 ) -> dict[str, np.ndarray]:
-    idx1 = _pair_index_array(mention_id_1, mention_index)
-    idx2 = _pair_index_array(mention_id_2, mention_index)
+    numeric_idx1 = _numeric_index_array(mention_idx_1)
+    numeric_idx2 = _numeric_index_array(mention_idx_2)
+    use_numeric_helpers, helper_reason = _resolve_numeric_helper_mode(
+        mention_id_1=mention_id_1,
+        mention_id_2=mention_id_2,
+        mention_idx_1=numeric_idx1,
+        mention_idx_2=numeric_idx2,
+        mention_ids_by_index=mention_ids_by_index,
+    )
+    idx1 = numeric_idx1 if use_numeric_helpers else _pair_index_array(mention_id_1, mention_index)
+    idx2 = numeric_idx2 if use_numeric_helpers else _pair_index_array(mention_id_2, mention_index)
+    use_numeric_block_helpers = use_numeric_helpers and block_idx is not None
+    active_runtime_meta["pair_index_mode"] = "numeric_helper_columns" if use_numeric_helpers else "mention_id_lookup"
+    active_runtime_meta["pair_index_fallback_reason"] = None if use_numeric_helpers else helper_reason
+    active_runtime_meta["block_index_mode"] = "numeric_helper_columns" if use_numeric_block_helpers else "block_key_only"
 
     valid_mask = (idx1 >= 0) & (idx2 >= 0)
     idx1_valid = idx1[valid_mask]
@@ -629,7 +750,7 @@ def _build_scored_pair_arrays(
         dist_meta=dist_meta,
     )
 
-    return {
+    result = {
         "pair_id": np.asarray(pair_id[valid_mask], dtype=object),
         "mention_id_1": np.asarray(mention_id_1[valid_mask], dtype=object),
         "mention_id_2": np.asarray(mention_id_2[valid_mask], dtype=object),
@@ -637,6 +758,12 @@ def _build_scored_pair_arrays(
         "cosine_sim": sim_arr.astype(np.float32, copy=False),
         "distance": dist_arr.astype(np.float32, copy=False),
     }
+    if use_numeric_helpers:
+        result["mention_idx_1"] = idx1_valid.astype(np.int64, copy=False)
+        result["mention_idx_2"] = idx2_valid.astype(np.int64, copy=False)
+    if use_numeric_block_helpers:
+        result["block_idx"] = _numeric_index_array(block_idx[valid_mask]).astype(np.int64, copy=False)
+    return result
 
 
 def _scored_pair_arrays_to_frame(score_columns: dict[str, np.ndarray]) -> pd.DataFrame:
@@ -699,6 +826,7 @@ def score_pairs_with_checkpoint(
     runtime_meta["numeric_clamping"] = _init_numeric_clamp_summary()
 
     mindex = _build_mention_index(mentions)
+    mention_ids_by_index = mentions["mention_id"].astype(str).to_numpy(dtype=object, copy=False)
     feature_started_at = perf_counter()
     features = build_feature_matrix(chars2vec=chars2vec, text_emb=text_emb)
     runtime_meta["feature_build_seconds"] = float(perf_counter() - feature_started_at)
@@ -717,7 +845,23 @@ def score_pairs_with_checkpoint(
             mention_id_1=pairs_df["mention_id_1"].astype(str).to_numpy(copy=False),
             mention_id_2=pairs_df["mention_id_2"].astype(str).to_numpy(copy=False),
             block_key=pairs_df["block_key"].astype(str).to_numpy(copy=False),
+            mention_idx_1=(
+                pairs_df["mention_idx_1"].to_numpy(copy=False)
+                if "mention_idx_1" in pairs_df.columns
+                else None
+            ),
+            mention_idx_2=(
+                pairs_df["mention_idx_2"].to_numpy(copy=False)
+                if "mention_idx_2" in pairs_df.columns
+                else None
+            ),
+            block_idx=(
+                pairs_df["block_idx"].to_numpy(copy=False)
+                if "block_idx" in pairs_df.columns
+                else None
+            ),
             mention_index=mindex,
+            mention_ids_by_index=mention_ids_by_index,
             mention_embeddings=mention_embeddings,
             mention_norms=mention_norms,
             batch_size=batch_size,
@@ -790,18 +934,7 @@ def score_pairs_with_checkpoint(
                     active_runtime_meta.get("parquet_read_seconds", 0.0)
                 ) + float(perf_counter() - read_started_at)
                 extract_started_at = perf_counter()
-                pair_columns = {
-                    "pair_id": np.asarray(batch.column(batch.schema.get_field_index("pair_id")).to_pylist(), dtype=object),
-                    "mention_id_1": np.asarray(
-                        batch.column(batch.schema.get_field_index("mention_id_1")).to_pylist(),
-                        dtype=object,
-                    ),
-                    "mention_id_2": np.asarray(
-                        batch.column(batch.schema.get_field_index("mention_id_2")).to_pylist(),
-                        dtype=object,
-                    ),
-                    "block_key": np.asarray(batch.column(batch.schema.get_field_index("block_key")).to_pylist(), dtype=object),
-                }
+                pair_columns = _extract_pair_batch_columns(batch)
                 active_runtime_meta["arrow_column_extract_seconds"] = float(
                     active_runtime_meta.get("arrow_column_extract_seconds", 0.0)
                 ) + float(perf_counter() - extract_started_at)
@@ -810,7 +943,11 @@ def score_pairs_with_checkpoint(
                     mention_id_1=pair_columns["mention_id_1"],
                     mention_id_2=pair_columns["mention_id_2"],
                     block_key=pair_columns["block_key"],
+                    mention_idx_1=pair_columns.get("mention_idx_1"),
+                    mention_idx_2=pair_columns.get("mention_idx_2"),
+                    block_idx=pair_columns.get("block_idx"),
                     mention_index=mindex,
+                    mention_ids_by_index=mention_ids_by_index,
                     mention_embeddings=mention_embeddings,
                     mention_norms=mention_norms,
                     active_runtime_meta=active_runtime_meta,
@@ -821,7 +958,7 @@ def score_pairs_with_checkpoint(
                     out_rows.append(_scored_pair_arrays_to_frame(score_columns))
                 if out_path is not None and len(score_columns["pair_id"]) > 0:
                     table_started_at = perf_counter()
-                    table = pa.Table.from_pydict(score_columns)
+                    table = pa.Table.from_pydict(_public_score_columns(score_columns))
                     active_runtime_meta["parquet_output_table_seconds"] = float(
                         active_runtime_meta.get("parquet_output_table_seconds", 0.0)
                     ) + float(perf_counter() - table_started_at)

@@ -5,6 +5,7 @@ import pytest
 from author_name_disambiguation.approaches.nand.cluster import (
     _apply_constraints,
     _name_conflict,
+    ExactGraphClusterAccumulator,
     cluster_blockwise_dbscan,
     resolve_dbscan_eps,
 )
@@ -275,6 +276,49 @@ def test_cluster_eps_block_policy_disabled_uses_base_eps(monkeypatch):
     assert meta["eps_base"] == 0.35
     assert meta["eps_block_policy_enabled"] is False
     assert meta["eps_block_policy_summary"]["bucket_counts"] == {"default": 2}
+
+
+def test_exact_graph_accumulator_uses_numeric_pair_helpers_and_reports_connected_components_meta():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "b1", "block_key": "blk.b", "author_raw": "B, B", "year": 2002},
+            {"mention_id": "b2", "block_key": "blk.b", "author_raw": "B, B", "year": 2003},
+        ]
+    )
+    accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={
+            "eps": 0.2,
+            "min_samples": 1,
+            "metric": "precomputed",
+            "constraints": {"enabled": False},
+        },
+        backend_requested="connected_components_cpu",
+    )
+
+    accumulator.consume_score_columns(
+        {
+            "mention_id_1": np.asarray(["missing-a", "missing-b"], dtype=object),
+            "mention_id_2": np.asarray(["missing-c", "missing-d"], dtype=object),
+            "mention_idx_1": np.asarray([0, 2], dtype=np.int64),
+            "mention_idx_2": np.asarray([1, 3], dtype=np.int64),
+            "block_key": np.asarray(["blk.a", "blk.b"], dtype=object),
+            "block_idx": np.asarray([0, 1], dtype=np.int64),
+            "distance": np.asarray([0.05, 0.05], dtype=np.float32),
+        }
+    )
+
+    out, meta = accumulator.finalize()
+
+    assert len(out["author_uid"].unique()) == 2
+    assert meta["numeric_pair_index_rows"] == 2
+    assert meta["string_pair_index_rows"] == 0
+    assert meta["dbscan_seconds_total"] == 0.0
+    assert meta["connected_components_seconds_total"] >= 0.0
+    assert meta["mapping_seconds_total"] >= 0.0
+    assert meta["constraint_apply_seconds_total"] >= 0.0
 
 
 def test_cluster_eps_block_policy_applies_buckets_and_clamp(monkeypatch):
