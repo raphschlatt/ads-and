@@ -103,6 +103,7 @@ def test_summarize_cluster_test_rows_and_markdown():
         "model_run_id": "full_2026abc",
         "run_stage": "full",
         "generated_utc": "2026-02-25T00:00:00+00:00",
+        "wall_seconds": 12.34,
         "selected_eps": 0.35,
         "min_samples": 1,
         "metric": "precomputed",
@@ -119,6 +120,7 @@ def test_summarize_cluster_test_rows_and_markdown():
     }
     md = cli._build_cluster_test_report_markdown(report)
     assert "# Final Clustering Test Report" in md
+    assert "wall_seconds" in md
     assert "dbscan_no_constraints" in md
     assert "dbscan_with_constraints" in md
     assert "## Per Seed" in md

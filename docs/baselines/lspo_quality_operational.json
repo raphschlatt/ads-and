@@ -1,0 +1,42 @@
+{
+  "manifest_scope": "lspo_quality_operational",
+  "manifest_version": 1,
+  "generated_utc": "2026-04-07T00:00:00Z",
+  "baseline_run_id": "full_20260218T111506Z_cli02681429",
+  "report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json",
+  "compare_report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/99_compare_cluster_report_to_baseline__chars_cpu_20260407_v1.json",
+  "expected_seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "expected_source_fingerprint": "b2c9203fe342",
+  "expected_subset_cache_key": "full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342",
+  "expected_subset_verification_mode": "legacy_compat",
+  "required_paths": [
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/99_compare_cluster_report_to_baseline__chars_cpu_20260407_v1.json",
+    "data/interim/lspo_mentions.parquet",
+    "data/cache/_shared/subsets/lspo_mentions_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.parquet",
+    "data/cache/_shared/subsets/subset_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.meta.json",
+    "data/cache/_shared/embeddings/lspo_chars2vec_cpu_4b7bfbd51bb9.npy",
+    "data/cache/_shared/embeddings/lspo_specter_4b7bfbd51bb9.npy",
+    "data/cache/_shared/pairs/lspo_mentions_split_266b4f62be53.parquet",
+    "data/cache/_shared/pairs/lspo_pairs_266b4f62be53.parquet",
+    "data/cache/_shared/pairs/split_balance_266b4f62be53.json",
+    "data/cache/_shared/pairs/pairs_qc_train_266b4f62be53.json"
+  ],
+  "shared_keep_paths": [
+    "data/cache/_shared/subsets/lspo_mentions_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.parquet",
+    "data/cache/_shared/subsets/subset_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.meta.json",
+    "data/cache/_shared/embeddings/lspo_chars2vec_cpu_4b7bfbd51bb9.npy",
+    "data/cache/_shared/embeddings/lspo_specter_4b7bfbd51bb9.npy",
+    "data/cache/_shared/pairs/lspo_mentions_split_266b4f62be53.parquet",
+    "data/cache/_shared/pairs/lspo_pairs_266b4f62be53.parquet",
+    "data/cache/_shared/pairs/split_balance_266b4f62be53.json",
+    "data/cache/_shared/pairs/pairs_qc_train_266b4f62be53.json"
+  ],
+  "historical_note": "The original srcd52... LSPO/train baseline is kept as historical/advisory only. The currently available and reproducible operational reference is the srcb2... compat state documented here."
+}

@@ -435,6 +435,7 @@ def test_cli_run_cluster_test_report_writes_outputs(monkeypatch, tmp_path: Path)
     payload = json.loads((metrics_dir / "06_clustering_test_report.json").read_text(encoding="utf-8"))
     assert payload["status"] == "ok"
     assert payload["model_run_id"] == model_run_id
+    assert payload["wall_seconds"] >= 0.0
     assert payload["pipeline_scope"] == "train"
     assert payload["cluster_config_source_mode"] == "train_only"
     assert payload["cluster_config_override_path"] is None

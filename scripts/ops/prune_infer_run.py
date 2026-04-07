@@ -2,16 +2,37 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Final
 
 
-DEFAULT_KEEP_FILES = (
+DEFAULT_MODE: Final[str] = "json-only"
+METADATA_KEEP_EXACT: Final[set[str]] = {
     "00_context.json",
-    "05_stage_metrics_infer_sources.json",
-    "05_go_no_go_infer_sources.json",
+    "01_input_summary.json",
+    "02_preflight_infer.json",
+    "03_pairs_qc.json",
+    "summary.json",
+}
+METADATA_KEEP_PATTERNS: Final[tuple[str, ...]] = (
+    "04_*",
+    "05_*",
+    "98_*",
+    "99_compare_infer_*.json",
+    "*_run_consistency.json",
+)
+PRODUCT_KEEP_FILES: Final[set[str]] = {
+    "publications_disambiguated.parquet",
+    "references_disambiguated.parquet",
+    "source_author_assignments.parquet",
+    "author_entities.parquet",
+    "mention_clusters.parquet",
+}
+REQUIRED_RESOLUTION_FILES: Final[tuple[str, ...]] = (
     "98_infer_baseline_decision.json",
     "98_infer_baseline_decision.md",
     "99_compare_infer_to_baseline.json",
@@ -20,29 +41,67 @@ DEFAULT_KEEP_FILES = (
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Prune an ADS infer candidate down to the JSON-only retention set."
+        description=(
+            "Prune a resolved infer run directory while keeping comparison/decision metadata. "
+            "This command only touches the selected run directory and never deletes training data."
+        )
     )
-    parser.add_argument("--run-dir", required=True, help="Path to artifacts/exports/<run_id> directory.")
+    parser.add_argument("--run-dir", required=True, help="Run directory under artifacts/exports.")
     parser.add_argument(
-        "--keep-file",
-        action="append",
-        default=[],
-        help="Additional file name inside the run directory to keep. Can be repeated.",
+        "--mode",
+        choices=("json-only", "product-only"),
+        default=DEFAULT_MODE,
+        help=(
+            "Retention mode. 'json-only' keeps only small top-level metadata. "
+            "'product-only' also keeps the final top-level product parquets."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be removed without changing files.",
     )
     return parser
 
 
-def _size_bytes(path: Path) -> int:
-    if path.is_symlink() or path.is_file():
-        return int(path.stat().st_size)
-    total = 0
-    for child in path.rglob("*"):
-        if child.is_file() and not child.is_symlink():
-            total += int(child.stat().st_size)
-    return total
+def _resolve_run_dir(raw: str) -> Path:
+    run_dir = Path(str(raw)).expanduser()
+    if not run_dir.is_absolute():
+        run_dir = Path.cwd() / run_dir
+    return run_dir.resolve()
 
 
-def _remove_path(path: Path) -> None:
+def _should_keep(name: str, *, mode: str) -> bool:
+    if name in METADATA_KEEP_EXACT:
+        return True
+    if any(fnmatch.fnmatch(name, pattern) for pattern in METADATA_KEEP_PATTERNS):
+        return True
+    if mode == "product-only" and name in PRODUCT_KEEP_FILES:
+        return True
+    return False
+
+
+def _validate_resolved_candidate(run_dir: Path, *, mode: str) -> None:
+    missing = [name for name in REQUIRED_RESOLUTION_FILES if not (run_dir / name).exists()]
+    if missing:
+        missing_text = ", ".join(missing)
+        raise SystemExit(
+            "Refusing to prune an unresolved candidate. "
+            "Create compare/decision artifacts first: "
+            f"{missing_text}"
+        )
+    if mode == "product-only":
+        kept_products = [name for name in PRODUCT_KEEP_FILES if (run_dir / name).exists()]
+        if not kept_products:
+            raise SystemExit(
+                "product-only mode requires at least one final top-level product parquet "
+                f"in {run_dir}."
+            )
+
+
+def _remove_path(path: Path, *, dry_run: bool) -> None:
+    if dry_run:
+        return
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
     else:
@@ -51,32 +110,34 @@ def _remove_path(path: Path) -> None:
 
 def main() -> int:
     args = _build_parser().parse_args()
-    run_dir = Path(args.run_dir).expanduser().resolve()
+    run_dir = _resolve_run_dir(str(args.run_dir))
     if not run_dir.exists() or not run_dir.is_dir():
-        raise FileNotFoundError(f"Run directory does not exist: {run_dir}")
+        raise SystemExit(f"Run directory does not exist: {run_dir}")
 
-    keep_names = set(DEFAULT_KEEP_FILES)
-    keep_names.update(str(name).strip() for name in args.keep_file if str(name).strip())
-    missing_keep = sorted(name for name in keep_names if not (run_dir / name).exists())
-    if missing_keep:
-        raise FileNotFoundError(
-            f"Cannot prune {run_dir}: missing required keep files: {', '.join(missing_keep)}"
-        )
+    mode = str(args.mode)
+    _validate_resolved_candidate(run_dir, mode=mode)
 
     removed_files: list[str] = []
-    removed_bytes = 0
-    for child in sorted(run_dir.iterdir(), key=lambda p: p.name):
-        if child.name in keep_names:
+    removed_dirs: list[str] = []
+    kept_entries: list[str] = []
+
+    for path in sorted(run_dir.iterdir(), key=lambda p: p.name):
+        if _should_keep(path.name, mode=mode):
+            kept_entries.append(path.name)
             continue
-        removed_bytes += _size_bytes(child)
-        removed_files.append(child.name)
-        _remove_path(child)
+        if path.is_dir() and not path.is_symlink():
+            removed_dirs.append(path.name)
+        else:
+            removed_files.append(path.name)
+        _remove_path(path, dry_run=bool(args.dry_run))
 
     payload = {
         "run_dir": str(run_dir),
-        "kept_files": sorted(keep_names),
+        "mode": mode,
+        "dry_run": bool(args.dry_run),
+        "kept_entries": kept_entries,
         "removed_files": removed_files,
-        "removed_bytes": int(removed_bytes),
+        "removed_dirs": removed_dirs,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

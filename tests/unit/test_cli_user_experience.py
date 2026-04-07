@@ -152,6 +152,7 @@ def test_quality_and_train_cli_print_human_summaries(monkeypatch, tmp_path: Path
     quality_report.write_text(
         json.dumps(
             {
+                "wall_seconds": 17.5,
                 "variants": {
                     "dbscan_with_constraints": {"f1_mean": 0.97},
                     "dbscan_no_constraints": {"f1_mean": 0.96},
@@ -171,6 +172,7 @@ def test_quality_and_train_cli_print_human_summaries(monkeypatch, tmp_path: Path
             summary_csv_path=tmp_path / "summary.csv",
             per_seed_csv_path=tmp_path / "per_seed.csv",
             report_markdown_path=tmp_path / "report.md",
+            wall_seconds=17.5,
         ),
     )
     monkeypatch.setattr(
@@ -195,6 +197,7 @@ def test_quality_and_train_cli_print_human_summaries(monkeypatch, tmp_path: Path
     quality_args.func(quality_args)
     quality_out = capsys.readouterr().out
     assert "LSPO Quality Run complete" in quality_out
+    assert "Wall time: 17.5s" in quality_out
 
     train_args = parser.parse_args(["train-lspo", "--no-progress"])
     train_args.func(train_args)

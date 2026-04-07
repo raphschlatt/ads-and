@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ class LspoQualityResult:
     summary_csv_path: Path
     per_seed_csv_path: Path
     report_markdown_path: Path
+    wall_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -177,6 +179,7 @@ def evaluate_lspo_quality(
     _load_cli_module().cmd_run_cluster_test_report(args)
     metrics_dir = Path(args.artifacts_root).expanduser().resolve() / "metrics" / resolved_model_run_id
     report_paths = resolve_report_paths(metrics_dir, report_tag=sanitize_report_tag(report_tag))
+    report_payload = json.loads(report_paths["json"].read_text(encoding="utf-8"))
     return LspoQualityResult(
         model_run_id=resolved_model_run_id,
         metrics_dir=metrics_dir,
@@ -184,6 +187,7 @@ def evaluate_lspo_quality(
         summary_csv_path=report_paths["summary_csv"],
         per_seed_csv_path=report_paths["per_seed_csv"],
         report_markdown_path=report_paths["markdown"],
+        wall_seconds=None if report_payload.get("wall_seconds") is None else float(report_payload["wall_seconds"]),
     )
 
 

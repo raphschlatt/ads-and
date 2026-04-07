@@ -88,6 +88,22 @@ Repair from the repo commands above; do not manually patch single CUDA or Tensor
 `scripts/benchmarks/cuml_e2e_smoke.py` is now an optional check for a dedicated RAPIDS/cuML environment.
 It is not part of the standard `infer_sources` repo venv health gate, because the current RAPIDS pip overlay does not coexist cleanly with the Torch `cu126` vendor wheel set in the same `.venv`.
 
+## Retention And Cleanup
+
+Cleanup in this repo is intentionally **repo-only**:
+
+- `artifacts/exports` candidates may be pruned after they have compare and decision records
+- the active ADS baseline stays full
+- the current operational CPU reference run stays in compact `product-only` form
+- `data/raw` is not part of cleanup and is not deleted by the retention workflow
+
+The canonical cleanup and retention policy lives in [docs/inference_workflow.md](/home/ubuntu/Author_Name_Disambiguation/docs/inference_workflow.md). Use that document for:
+
+- active ADS baseline vs operational LSPO quality reference
+- compare/freeze/prune commands
+- current keep-set
+- current disk footprint and cleanup expectations
+
 ## Public CLI
 
 Normal package usage first:

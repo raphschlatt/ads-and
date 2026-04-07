@@ -158,18 +158,85 @@ The source-mirrored outputs preserve all input fields and add:
 - `AuthorUID`
 - `AuthorDisplayName`
 
-## Baseline And Compare
+## Baseline, Quality Reference, And Cleanup
 
-The current promoted ADS inference baseline is tracked in:
+There are now two deliberately separate references:
 
-- `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
-- `docs/baselines/infer_ads_active.json`
+- Active ADS infer baseline:
+  - `docs/baselines/infer_ads_active.json`
+  - `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
+  - full artifact keep-set: `artifacts/exports/bench_full_v22_fix2`
+- Operational LSPO quality reference:
+  - `docs/baselines/lspo_quality_operational.json`
+  - current reproducible compat state: `srcb2c9203fe342`
+  - current operational report: `06_clustering_test_report__chars_cpu_20260407_v1.json`
 
-Current keep-set for large inference artifacts:
+Important distinction:
+
+- `srcd52...` is historical/advisory only
+- `srcb2...` is the currently available and reproducible LSPO comparison state
+
+Default integrity checks now validate the operational LSPO reference:
+
+```bash
+source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
+python scripts/ops/check_baseline_integrity.py
+```
+
+Use the historical check only when you explicitly want to audit the old train baseline assumptions:
+
+```bash
+source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
+python scripts/ops/check_baseline_integrity.py --mode historical
+```
+
+### Current Retention Policy
+
+This cleanup policy is intentionally **repo-only**. It does not delete `data/raw`, so raw training/source inputs stay intact.
+
+Keep full:
 
 - `artifacts/exports/bench_full_v22_fix2`
 
-New comparisons should use the current baseline:
+Keep in `product-only` form:
+
+- `artifacts/exports/ads_full_chars2vec_cpu_ab_20260407`
+
+Keep in `json-only` form:
+
+- `artifacts/exports/ads_full_speedup_wave_20260407_v1`
+- `artifacts/exports/ads_full_chars2vec_gpu_repaired_20260407`
+- `artifacts/exports/ads_full_package_auto_20260407`
+- `artifacts/exports/full_gpu_canonical_fastchars_cpucluster_20260402`
+
+Already-small runs such as `bench_full_perf_pkg1`, `bench_full_perf_pkg1_fix1`, and `bench_full_wave_b_v1` are left untouched.
+
+### Current Size Snapshot
+
+Measured on `2026-04-07`:
+
+- before cleanup:
+  - repo total: `51G`
+  - `artifacts`: `35G`
+  - `artifacts/exports`: `35G`
+  - `data`: `4.9G`
+  - `data/cache/_shared`: `2.6G`
+  - `data/raw`: `1.2G`
+  - `.venv`: `11G`
+- after applying the current retention policy:
+  - repo total: `24G`
+  - `artifacts`: `7.8G`
+  - `artifacts/exports`: `7.6G`
+  - `data`: `4.8G`
+  - `data/cache/_shared`: `2.5G`
+  - `data/raw`: `1.2G`
+  - `.venv`: `11G`
+
+The main reclaimed space came from pruning large ADS candidate run directories while keeping one full baseline and one compact current CPU reference.
+
+### Compare, Freeze, And Prune
+
+Compare new ADS candidates against the active ADS baseline:
 
 ```bash
 author-name-disambiguation compare-infer-baseline \
@@ -188,14 +255,13 @@ The compare report includes:
 - coverage/go-no-go deltas
 - partition-aware `mention_clusters` drift, not just raw UID-string diffs
 
-After the compare report exists, freeze the candidate into a formal promote-or-keep-baseline decision:
+After the compare report exists, freeze the candidate into a formal decision record:
 
 ```bash
 python scripts/ops/freeze_infer_baseline.py \
   --baseline-run-id bench_full_v22_fix2 \
   --candidate-run-id <new_run_dir_name> \
-  --metrics-root artifacts/exports \
-  --runtime-metric-max-delta clustering.dbscan_seconds_total=0
+  --metrics-root artifacts/exports
 ```
 
 This writes inside the candidate run dir:
@@ -203,31 +269,58 @@ This writes inside the candidate run dir:
 - `98_infer_baseline_decision.json`
 - `98_infer_baseline_decision.md`
 
-Use additional `--runtime-metric-max-delta <metric>=<max_delta_seconds>` gates to reflect the focus of the wave under test.
+Use `--runtime-metric-max-delta <metric>=<max_delta_seconds>` only when you want additional speed gates for a specific wave.
 
-If a candidate is not promoted, keep the compare JSONs and prune the heavy parquet outputs:
+After a candidate is resolved, prune it explicitly:
 
 ```bash
-python scripts/ops/prune_infer_run.py --run-dir artifacts/exports/<failed_run_dir>
+python scripts/ops/prune_infer_run.py \
+  --run-dir artifacts/exports/<failed_run_dir> \
+  --mode json-only
 ```
 
-The JSON-only retention set now preserves:
+For the current operational CPU reference, keep final products plus small metadata:
+
+```bash
+python scripts/ops/prune_infer_run.py \
+  --run-dir artifacts/exports/ads_full_chars2vec_cpu_ab_20260407 \
+  --mode product-only
+```
+
+`json-only` preserves small top-level metadata such as:
 
 - `00_context.json`
-- `05_stage_metrics_infer_sources.json`
-- `05_go_no_go_infer_sources.json`
+- `01_input_summary.json`
+- `02_preflight_infer.json`
+- `03_pairs_qc.json`
+- `04_*`
+- `05_*`
+- `98_*`
+- `99_compare_infer_*.json`
+- `summary.json`
+- `*_run_consistency.json`
+
+`product-only` keeps the same metadata plus the final top-level product parquets:
+
+- `publications_disambiguated.parquet`
+- `references_disambiguated.parquet`
+- `source_author_assignments.parquet`
+- `author_entities.parquet`
+- `mention_clusters.parquet`
+
+The prune tool refuses unresolved candidates; a run must already have:
+
+- `99_compare_infer_to_baseline.json`
 - `98_infer_baseline_decision.json`
 - `98_infer_baseline_decision.md`
-- `99_compare_infer_to_baseline.json`
 
-If a candidate is promoted, write a new versioned baseline manifest:
+If a candidate is promoted, write a new versioned ADS baseline manifest:
 
 ```bash
 python scripts/ops/freeze_infer_baseline.py \
   --baseline-run-id bench_full_v22_fix2 \
   --candidate-run-id <promoted_run_dir> \
   --metrics-root artifacts/exports \
-  --runtime-metric-max-delta clustering.dbscan_seconds_total=0 \
   --promote-manifest-path docs/baselines/infer_ads_full_run_20260305_<tag>.json \
   --active-baseline-path docs/baselines/infer_ads_active.json
 ```
@@ -241,6 +334,21 @@ python scripts/ops/write_infer_baseline_manifest.py \
   --compare-report artifacts/exports/<promoted_run_dir>/99_compare_infer_to_baseline.json
 ```
 
+### Shared Cache Policy
+
+The current shared keep-set is the real operational `srcb2...` compat set:
+
+- `data/cache/_shared/subsets/lspo_mentions_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.parquet`
+- `data/cache/_shared/subsets/subset_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.meta.json`
+- `data/cache/_shared/embeddings/lspo_chars2vec_cpu_4b7bfbd51bb9.npy`
+- `data/cache/_shared/embeddings/lspo_specter_4b7bfbd51bb9.npy`
+- `data/cache/_shared/pairs/lspo_mentions_split_266b4f62be53.parquet`
+- `data/cache/_shared/pairs/lspo_pairs_266b4f62be53.parquet`
+- `data/cache/_shared/pairs/split_balance_266b4f62be53.json`
+- `data/cache/_shared/pairs/pairs_qc_train_266b4f62be53.json`
+
+The duplicate generic `lspo_chars2vec_4b7bfbd51bb9.npy` is not part of the keep-set and has been removed.
+
 ## Notes
 
 - The public inference path does not accept `model_run_id`.
@@ -250,3 +358,4 @@ python scripts/ops/write_infer_baseline_manifest.py \
 - Large historical inference artifacts outside the documented keep-set are expected to be removed after baseline freeze.
 - A candidate run is not considered resolved until it has both a compare report and a `98_infer_baseline_decision.{json,md}` record.
 - `docs/baselines/infer_ads_active.json` is the machine-readable pointer to the currently active ADS baseline.
+- `docs/baselines/lspo_quality_operational.json` is the machine-readable pointer for the current reproducible LSPO quality reference.

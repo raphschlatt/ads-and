@@ -539,6 +539,7 @@ def _build_cluster_test_report_markdown(report: dict[str, Any]) -> str:
     lines.append(f"- model_run_id: `{report.get('model_run_id')}`")
     lines.append(f"- run_stage: `{report.get('run_stage')}`")
     lines.append(f"- generated_utc: `{report.get('generated_utc')}`")
+    lines.append(f"- wall_seconds: `{_fmt(report.get('wall_seconds'))}`")
     lines.append(f"- selected_eps: `{_fmt(report.get('selected_eps'))}`")
     lines.append(f"- min_samples: `{_fmt(report.get('min_samples'))}`")
     lines.append(f"- metric: `{report.get('metric')}`")
@@ -1798,6 +1799,9 @@ def _build_quality_payload(result) -> dict[str, Any]:
         "summary_csv_path": str(result.summary_csv_path),
         "per_seed_csv_path": str(result.per_seed_csv_path),
         "report_markdown_path": str(result.report_markdown_path),
+        "wall_seconds": result.wall_seconds
+        if getattr(result, "wall_seconds", None) is not None
+        else report_payload.get("wall_seconds"),
         "with_constraints_f1_mean": with_constraints.get("f1_mean"),
         "without_constraints_f1_mean": without_constraints.get("f1_mean"),
         "delta_f1": delta.get("f1"),
@@ -1808,6 +1812,7 @@ def _build_quality_human_summary(payload: dict[str, Any]) -> str:
     lines = [
         "LSPO Quality Run complete",
         f"Model: {payload.get('model_run_id', 'n/a')}",
+        f"Wall time: {_format_human_seconds(payload.get('wall_seconds'))}",
         f"F1 with constraints: {payload.get('with_constraints_f1_mean', 'n/a')}",
         f"F1 without constraints: {payload.get('without_constraints_f1_mean', 'n/a')}",
         f"Delta F1: {payload.get('delta_f1', 'n/a')}",
@@ -2083,6 +2088,7 @@ def cmd_run_cluster_test_report(args):
     if ui is None:
         created_ui = CliUI(total_steps=6, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
         ui = created_ui
+    command_started_at = perf_counter()
     try:
         ui.start("Initialize clustering test report context")
         _configure_library_noise(args.quiet_libs)
@@ -2495,6 +2501,7 @@ def cmd_run_cluster_test_report(args):
             "model_run_id": model_run_id,
             "run_stage": run_stage,
             "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "wall_seconds": None,
             "pipeline_scope": "train",
             "source_context_path": str(context_path),
             "train_manifest_path": str(train_manifest_path),
@@ -2528,18 +2535,18 @@ def cmd_run_cluster_test_report(args):
             "delta_with_constraints_minus_no_constraints": delta,
             "status": "ok",
         }
-        report_md = _build_cluster_test_report_markdown(report_payload)
-
         report_paths = _resolve_report_paths(metrics_dir, report_tag=report_tag)
         report_json_path = report_paths["json"]
         report_summary_csv_path = report_paths["summary_csv"]
         report_per_seed_csv_path = report_paths["per_seed_csv"]
         report_md_path = report_paths["markdown"]
 
-        write_json(report_payload, report_json_path)
         summary_df.to_csv(report_summary_csv_path, index=False)
         per_seed_df.to_csv(report_per_seed_csv_path, index=False)
+        report_payload["wall_seconds"] = float(perf_counter() - command_started_at)
+        report_md = _build_cluster_test_report_markdown(report_payload)
         report_md_path.write_text(report_md, encoding="utf-8")
+        write_json(report_payload, report_json_path)
         ui.done("Wrote 06_clustering_test_report.{json,csv,md} artifacts.")
 
         ui.start("Finalize")
