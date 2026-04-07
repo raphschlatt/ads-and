@@ -95,6 +95,7 @@ def _install_fake_tensorflow(
     *,
     growth_raises: bool = False,
     clear_raises: bool = False,
+    visible_gpus: bool = True,
 ):
     state = {"memory_growth_calls": [], "clear_calls": 0}
 
@@ -109,7 +110,9 @@ def _install_fake_tensorflow(
 
         @staticmethod
         def list_physical_devices(kind):
-            return ["GPU:0"] if kind == "GPU" else []
+            if kind != "GPU":
+                return []
+            return ["GPU:0"] if visible_gpus else []
 
     class _Backend:
         @staticmethod
@@ -118,8 +121,19 @@ def _install_fake_tensorflow(
             if clear_raises:
                 raise RuntimeError("cleanup boom")
 
+    class _SysConfig:
+        @staticmethod
+        def get_build_info():
+            return {
+                "is_cuda_build": True,
+                "cuda_version": "12.6.1",
+                "cudnn_version": "9",
+            }
+
     fake_tf = SimpleNamespace(
+        __version__="2.20.0",
         config=_Config(),
+        sysconfig=_SysConfig(),
         keras=SimpleNamespace(backend=_Backend()),
     )
     monkeypatch.setitem(sys.modules, "tensorflow", fake_tf)
@@ -300,6 +314,8 @@ def test_generate_chars2vec_embeddings_auto_batches_on_gpu_with_callbacks(monkey
     assert meta["effective_batch_size"] == 512
     assert meta["predict_batch_count"] == 2
     assert meta["oom_retry_count"] == 0
+    assert meta["runtime_backend"] == "tensorflow-gpu"
+    assert meta["tensorflow_runtime"]["status"] == "ok"
     assert len(state["predict_calls"]) == 1
     assert state["predict_calls"][0]["batch_size"] == 512
     assert state["predict_calls"][0]["verbose"] == 0
@@ -309,7 +325,16 @@ def test_generate_chars2vec_embeddings_auto_batches_on_gpu_with_callbacks(monkey
 
 def test_generate_chars2vec_embeddings_auto_batches_on_cpu(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(embed_chars2vec, "_configure_tensorflow_memory_growth", lambda: (None, None))
-    monkeypatch.setattr(embed_chars2vec, "_tensorflow_gpu_available", lambda: False)
+    monkeypatch.setattr(
+        embed_chars2vec,
+        "probe_tensorflow_runtime",
+        lambda: {
+            "status": "cpu_fallback",
+            "reason": "torch_cuda_unavailable",
+            "torch_cuda_available": False,
+            "runtime_backend": "tensorflow-cpu",
+        },
+    )
     state = _install_fake_chars2vec_backend(monkeypatch)
 
     names = [f"name_{idx:03d}" for idx in range(140)]
@@ -327,6 +352,8 @@ def test_generate_chars2vec_embeddings_auto_batches_on_cpu(monkeypatch: pytest.M
     assert meta["effective_batch_size"] == 128
     assert meta["predict_batch_count"] == 2
     assert meta["oom_retry_count"] == 0
+    assert meta["runtime_backend"] == "tensorflow-cpu"
+    assert meta["tensorflow_runtime"]["status"] == "cpu_fallback"
     assert len(state["predict_calls"]) == 1
     assert state["predict_calls"][0]["batch_size"] == 128
 
@@ -528,6 +555,8 @@ def test_generate_chars2vec_embeddings_enables_tensorflow_memory_growth_and_clea
     assert meta["tensorflow_memory_growth_error"] is None
     assert meta["tensorflow_cleanup_attempted"] is True
     assert meta["tensorflow_cleanup_error"] is None
+    assert meta["runtime_backend"] == "tensorflow-gpu"
+    assert meta["tensorflow_runtime"]["status"] == "ok"
     assert meta["wall_seconds"] >= meta["generation_seconds"] >= 0.0
     assert tf_state["memory_growth_calls"] == [("GPU:0", True)]
     assert tf_state["clear_calls"] == 1
@@ -573,6 +602,17 @@ def test_generate_chars2vec_embeddings_filters_known_tensorflow_startup_noise_fo
         call_states["cleanup_filter_active"] = bool(filter_state["active"])
         return None
 
+    monkeypatch.setattr(
+        embed_chars2vec,
+        "probe_tensorflow_runtime",
+        lambda: {
+            "status": "ok",
+            "reason": None,
+            "torch_cuda_available": True,
+            "runtime_backend": "tensorflow-gpu",
+        },
+    )
+
     monkeypatch.setattr(embed_chars2vec, "_filter_known_library_stderr", _fake_filter_known_library_stderr)
     monkeypatch.setattr(embed_chars2vec, "_configure_tensorflow_memory_growth", _configure_tensorflow_memory_growth)
     monkeypatch.setattr(embed_chars2vec, "_cleanup_tensorflow_runtime", _cleanup_tensorflow_runtime)
@@ -602,8 +642,8 @@ def test_generate_chars2vec_embeddings_filters_known_tensorflow_startup_noise_fo
     assert meta["tensorflow_memory_growth_error"] is None
     assert call_states["memory_growth_filter_active"] is True
     assert call_states["load_filter_active"] is True
-    assert call_states["predict_filter_active"] is True
-    assert call_states["cleanup_filter_active"] is True
+    assert call_states["predict_filter_active"] is False
+    assert call_states["cleanup_filter_active"] is False
 
 
 def test_generate_chars2vec_embeddings_tolerates_tensorflow_memory_growth_and_cleanup_errors(

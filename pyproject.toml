@@ -41,7 +41,7 @@ dependencies = [
   "chars2vec==0.1.7",
   "keras==3.13.2",
   "tensorflow==2.20.0",
-  "torch>=2.1",
+  "torch>=2.10,<2.11",
   "requests>=2.31",
   "huggingface_hub>=0.23",
   "transformers>=4.38",

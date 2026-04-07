@@ -120,8 +120,10 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "materialize_seconds": 0.0,
                 "cache_load_seconds": 0.01,
                 "cache_write_seconds": 0.0,
+                "runtime_backend": "tensorflow-cache",
                 "tensorflow_memory_growth_enabled": None,
                 "tensorflow_memory_growth_error": None,
+                "tensorflow_runtime": None,
                 "tensorflow_cleanup_attempted": False,
                 "tensorflow_cleanup_error": None,
                 "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
@@ -145,8 +147,17 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "materialize_seconds": 0.001,
             "cache_load_seconds": 0.0,
             "cache_write_seconds": 0.01,
+            "runtime_backend": "tensorflow-gpu",
             "tensorflow_memory_growth_enabled": True,
             "tensorflow_memory_growth_error": None,
+            "tensorflow_runtime": {
+                "status": "ok",
+                "reason": None,
+                "runtime_backend": "tensorflow-gpu",
+                "torch_cuda_available": True,
+                "tensorflow_visible_gpu_count": 1,
+                "detected_vendor_cuda_tags": ["12"],
+            },
             "tensorflow_cleanup_attempted": True,
             "tensorflow_cleanup_error": None,
             "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
@@ -540,6 +551,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
     assert context["runtime"]["load_inputs"]["read_publications_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
+    assert context["runtime"]["chars2vec"]["runtime_backend"] == "tensorflow-gpu"
     assert context["runtime"]["chars2vec"]["wall_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["unique_name_count"] == 5
     assert context["runtime"]["chars2vec"]["tokenizers_parallelism_setting"] == os.environ.get("TOKENIZERS_PARALLELISM", "<unset>")
@@ -584,7 +596,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "START Load inputs" in captured.err
     assert "START Preflight" in captured.err
     assert "START Name embeddings" in captured.err
+    assert "backend=chars2vec/tensorflow-auto | mode=predict | batch_size=auto" in captured.err
     assert "DONE 5 names embedded in " in captured.err
+    assert "backend=chars2vec/tensorflow-gpu" in captured.err
     assert "START Text embeddings" in captured.err
     assert "DONE 3 source texts prepared for 5 mentions in " in captured.err
     assert "cpu_stage=pair_building | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
@@ -686,6 +700,67 @@ def test_run_infer_sources_emits_structured_progress_events(monkeypatch, tmp_pat
     assert run_done_event.payload["counts"]["publications"] == 2
     assert run_done_event.payload["counts"]["references"] == 1
     assert run_done_event.payload["counts"]["mentions"] == 5
+
+
+def test_run_infer_sources_warns_on_chars2vec_tensorflow_gpu_mismatch(monkeypatch, tmp_path: Path, capsys):
+    publications_path, references_path = _write_dataset(tmp_path, with_references=True)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    original_chars = source_inference.get_or_create_chars2vec_embeddings
+
+    def _chars_with_mismatch(*args, **kwargs):
+        result = original_chars(*args, **kwargs)
+        arr, meta = result
+        meta = dict(meta)
+        meta["runtime_backend"] = "tensorflow-cpu"
+        meta["tensorflow_runtime"] = {
+            "status": "mismatch",
+            "reason": "tensorflow_expected_cu12_but_detected_cu13_stack",
+            "runtime_backend": "tensorflow-cpu",
+            "torch_cuda_available": True,
+            "tensorflow_cuda_version": "12.5.1",
+            "detected_vendor_cuda_tags": ["13"],
+            "virtual_env": "/home/ubuntu/Author_Name_Disambiguation/.venv",
+        }
+        return (arr, meta)
+
+    monkeypatch.setattr("author_name_disambiguation.source_inference.get_or_create_chars2vec_embeddings", _chars_with_mismatch)
+    monkeypatch.setattr(
+        "author_name_disambiguation.source_inference._probe_bootstrap_runtime",
+        lambda _device: {
+            "requested_device": "auto",
+            "resolved_device": "cuda:0",
+            "gpu_name": "Mock GPU",
+            "torch_version": "2.10.0+cu126",
+            "torch_cuda_version": "12.6",
+            "torch_cuda_available": True,
+            "fallback_reason": None,
+            "cuda_probe_error": None,
+        },
+    )
+
+    output_root = tmp_path / "out_warn"
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-infer-sources",
+            "--publications-path",
+            str(publications_path),
+            "--references-path",
+            str(references_path),
+            "--output-root",
+            str(output_root),
+            "--dataset-id",
+            "my_ads_warn_2026",
+            "--model-bundle",
+            str(bundle_dir),
+        ]
+    )
+    args.func(args)
+    captured = capsys.readouterr()
+
+    assert "WARN chars2vec TensorFlow GPU unavailable; falling back to CPU" in captured.err
+    assert "reason=tensorflow_expected_cu12_but_detected_cu13_stack" in captured.err
 
 
 def test_cli_run_infer_sources_passes_specter_overrides(monkeypatch, tmp_path: Path):

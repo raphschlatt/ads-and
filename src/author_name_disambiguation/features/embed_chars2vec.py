@@ -16,6 +16,10 @@ import pandas as pd
 
 from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
+from author_name_disambiguation.common.tensorflow_runtime import (
+    probe_tensorflow_runtime,
+    tensorflow_runtime_backend_label,
+)
 
 _CHARS2VEC_DIM = 50
 _CHARS2VEC_HISTORICAL_BATCH_SIZE = 32
@@ -160,19 +164,6 @@ def _configure_tensorflow_memory_growth() -> tuple[bool | None, str | None]:
         return False, repr(exc)
 
 
-def _tensorflow_gpu_available() -> bool:
-    try:
-        import tensorflow as tf  # type: ignore
-    except Exception:
-        return False
-
-    try:
-        gpus = list(getattr(tf.config, "list_physical_devices")("GPU"))
-    except Exception:
-        return False
-    return len(gpus) > 0
-
-
 def _normalize_execution_mode(execution_mode: str) -> Literal["predict", "direct_call"]:
     if execution_mode not in {"predict", "direct_call"}:
         raise ValueError("execution_mode must be 'predict' or 'direct_call'")
@@ -310,6 +301,7 @@ def _vectorize_words_silently(
     *,
     batch_size: int | None,
     execution_mode: Literal["predict", "direct_call"],
+    tensorflow_runtime: dict[str, object] | None,
     show_progress: bool,
 ) -> tuple[np.ndarray, dict[str, object]]:
     normalize_started_at = perf_counter()
@@ -334,7 +326,7 @@ def _vectorize_words_silently(
 
         predict_started_at = perf_counter()
         if execution_mode == "predict":
-            tensorflow_gpu_available = _tensorflow_gpu_available()
+            tensorflow_gpu_available = bool((tensorflow_runtime or {}).get("status") == "ok")
             requested_batch_size, resolved_batch_size = _resolve_predict_batch_size(
                 requested_batch_size,
                 tensorflow_gpu_available=tensorflow_gpu_available,
@@ -404,8 +396,10 @@ def generate_chars2vec_embeddings(
             "materialize_seconds": 0.0,
             "cache_load_seconds": 0.0,
             "cache_write_seconds": 0.0,
+            "runtime_backend": None,
             "tensorflow_memory_growth_enabled": None,
             "tensorflow_memory_growth_error": None,
+            "tensorflow_runtime": None,
             "tensorflow_cleanup_attempted": False,
             "tensorflow_cleanup_error": None,
             "execution_mode": execution_mode,
@@ -416,13 +410,16 @@ def generate_chars2vec_embeddings(
         }
         return (empty, meta) if return_meta else empty
 
-    if quiet_libraries:
-        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-        os.environ["ABSL_LOG_LEVEL"] = "3"
-        os.environ["KERAS_BACKEND"] = "tensorflow"
-
     generation_started_at = perf_counter()
+    tf_memory_growth_enabled: bool | None = None
+    tf_memory_growth_error: str | None = None
+    tensorflow_runtime: dict[str, object] | None = None
     try:
+        if quiet_libraries:
+            os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+            os.environ["ABSL_LOG_LEVEL"] = "3"
+            os.environ["KERAS_BACKEND"] = "tensorflow"
+
         with _filter_known_library_stderr(enabled=quiet_libraries):
             tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
             import chars2vec  # type: ignore
@@ -431,17 +428,19 @@ def generate_chars2vec_embeddings(
             model = chars2vec.load_model(model_name)
             model_load_seconds = float(perf_counter() - model_load_started_at)
             setattr(model, "keras", chars2vec.keras)
-            cleanup_error = None
-            try:
-                emb, vectorize_meta = _vectorize_words_silently(
-                    model,
-                    names,
-                    batch_size=batch_size,
-                    execution_mode=execution_mode,
-                    show_progress=show_progress if execution_mode == "predict" else False,
-                )
-            finally:
-                cleanup_error = _cleanup_tensorflow_runtime(model)
+            tensorflow_runtime = probe_tensorflow_runtime()
+        cleanup_error = None
+        try:
+            emb, vectorize_meta = _vectorize_words_silently(
+                model,
+                names,
+                batch_size=batch_size,
+                execution_mode=execution_mode,
+                tensorflow_runtime=tensorflow_runtime,
+                show_progress=show_progress if execution_mode == "predict" else False,
+            )
+        finally:
+            cleanup_error = _cleanup_tensorflow_runtime(model)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:
             raise ValueError(f"Unexpected chars2vec output shape: {emb.shape}")
@@ -461,8 +460,10 @@ def generate_chars2vec_embeddings(
             "materialize_seconds": float(vectorize_meta.get("materialize_seconds", 0.0)),
             "cache_load_seconds": 0.0,
             "cache_write_seconds": 0.0,
+            "runtime_backend": tensorflow_runtime_backend_label(tensorflow_runtime),
             "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
             "tensorflow_memory_growth_error": tf_memory_growth_error,
+            "tensorflow_runtime": dict(tensorflow_runtime or {}),
             "tensorflow_cleanup_attempted": True,
             "tensorflow_cleanup_error": cleanup_error,
             "execution_mode": str(vectorize_meta.get("execution_mode", execution_mode)),
@@ -495,8 +496,10 @@ def generate_chars2vec_embeddings(
         "materialize_seconds": 0.0,
         "cache_load_seconds": 0.0,
         "cache_write_seconds": 0.0,
+        "runtime_backend": tensorflow_runtime_backend_label(tensorflow_runtime),
         "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
         "tensorflow_memory_growth_error": tf_memory_growth_error,
+        "tensorflow_runtime": dict(tensorflow_runtime or {}),
         "tensorflow_cleanup_attempted": False,
         "tensorflow_cleanup_error": None,
         "execution_mode": execution_mode,
@@ -547,8 +550,10 @@ def get_or_create_chars2vec_embeddings(
                 "materialize_seconds": 0.0,
                 "cache_load_seconds": float(perf_counter() - cache_load_started_at),
                 "cache_write_seconds": 0.0,
+                "runtime_backend": "tensorflow-cache",
                 "tensorflow_memory_growth_enabled": None,
                 "tensorflow_memory_growth_error": None,
+                "tensorflow_runtime": None,
                 "tensorflow_cleanup_attempted": False,
                 "tensorflow_cleanup_error": None,
                 "execution_mode": execution_mode,

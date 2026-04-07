@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import gc
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Mapping
+from typing import Any
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -43,6 +44,11 @@ from author_name_disambiguation.common.pipeline_reports import (
 )
 from author_name_disambiguation.common.run_report import evaluate_go_no_go, write_go_no_go_report
 from author_name_disambiguation.common.subset_builder import build_stage_subset
+from author_name_disambiguation.common.tensorflow_runtime import (
+    format_tensorflow_runtime_warning,
+    tensorflow_runtime_backend_label,
+    tensorflow_runtime_needs_warning,
+)
 from author_name_disambiguation.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
 from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
@@ -1054,7 +1060,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     chars_batch_size = None
     _stage_info(
         f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | "
-        f"backend=chars2vec/tensorflow | mode={chars_execution_mode} | "
+        f"backend=chars2vec/tensorflow-auto | mode={chars_execution_mode} | "
         f"batch_size={'auto' if chars_batch_size is None else _format_count(chars_batch_size)}"
     )
     with activate_progress_reporter(reporter):
@@ -1076,12 +1082,24 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         chars_meta = {"cache_hit": False, "generation_mode": "unknown"}
     if not isinstance(chars, np.ndarray):
         chars = np.load(chars_path, mmap_mode="r")
+    chars_runtime = chars_meta.get("tensorflow_runtime")
+    chars_backend = str(
+        chars_meta.get("runtime_backend")
+        or ("tensorflow-cache" if chars_meta.get("cache_hit") else None)
+        or tensorflow_runtime_backend_label(chars_runtime if isinstance(chars_runtime, Mapping) else None)
+    )
+    chars_meta["runtime_backend"] = chars_backend
     chars_elapsed = perf_counter() - name_embeddings_started_at
     chars_meta["wall_seconds"] = float(chars_elapsed)
+    if isinstance(chars_runtime, Mapping) and tensorflow_runtime_needs_warning(chars_runtime):
+        _stage_warn(
+            format_tensorflow_runtime_warning(chars_runtime),
+            payload={"tensorflow_runtime": dict(chars_runtime)},
+        )
     _stage_done(
         f"{_format_count(len(mentions))} names embedded in {_format_elapsed(chars_elapsed)} "
         f"({_format_rate(len(mentions), chars_elapsed)}) | "
-        f"cache={'hit' if chars_meta.get('cache_hit') else 'miss'} | backend=chars2vec/tensorflow",
+        f"cache={'hit' if chars_meta.get('cache_hit') else 'miss'} | backend=chars2vec/{chars_backend}",
         elapsed_seconds=chars_elapsed,
     )
 

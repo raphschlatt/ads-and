@@ -37,22 +37,23 @@ The public Python API is intentionally small:
 ## Install
 
 ```bash
-source /home/ubuntu/.venv/bin/activate
+source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
 uv pip install \
-  --python /home/ubuntu/.venv/bin/python \
+  --python /home/ubuntu/Author_Name_Disambiguation/.venv/bin/python \
   --editable ".[dev]" \
   --torch-backend cu126
 ```
 
-In this repo, prefer `uv pip` against the existing project venv instead of introducing a separate conda env or mixing `pip` and `uv`.
+In this repo, treat `/home/ubuntu/Author_Name_Disambiguation/.venv` as the canonical GPU venv.
+Prefer `uv pip` against that repo venv instead of introducing a second conda env or patching CUDA packages ad hoc.
 Treat `python -m pip check` as a diagnostic only, not as an installation path.
 
-Repair the shared-host GPU overlay in that same venv with the repo pins:
+Repair the repo GPU overlay in that same venv with the repo pins:
 
 ```bash
-source /home/ubuntu/.venv/bin/activate
+source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
 uv pip install \
-  --python /home/ubuntu/.venv/bin/python \
+  --python /home/ubuntu/Author_Name_Disambiguation/.venv/bin/python \
   --reinstall \
   --no-deps \
   -r requirements-gpu-cu126.txt
@@ -61,9 +62,9 @@ uv pip install \
 For optional local research tooling:
 
 ```bash
-source /home/ubuntu/.venv/bin/activate
+source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
 uv pip install \
-  --python /home/ubuntu/.venv/bin/python \
+  --python /home/ubuntu/Author_Name_Disambiguation/.venv/bin/python \
   --editable ".[dev,research]" \
   --torch-backend cu126
 ```
@@ -73,27 +74,17 @@ uv pip install \
 Do not start a large infer run unless all of these succeed:
 
 ```bash
-source /home/ubuntu/.venv/bin/activate
+source /home/ubuntu/Author_Name_Disambiguation/.venv/bin/activate
 python -m pip check
-python -c "import cupy, cuml"
+python scripts/ops/gpu_env_doctor.py --json
 python scripts/benchmarks/cuml_e2e_smoke.py --require-gpu-backend
 ```
 
-The March 10, 2026 incident was caused by mixed installers and missing repo pins. The concrete drift was:
+The active repair target is the repo-managed `cu126/cu12` stack in [requirements-gpu-cu126.txt](/home/ubuntu/Author_Name_Disambiguation/requirements-gpu-cu126.txt).
+That file now pins the `torch 2.10.x + cu126` vendor wheels and the extra `cu12` TensorFlow GPU runtime packages so `chars2vec` and the PyTorch stages land on the same CUDA major.
 
-- `cupy-cuda12x 14.0.1` with `cuda-pathfinder 1.2.2` even though CuPy requires `>=1.3.3`
-- `cuda-python 12.9.5` with `cuda-bindings 12.9.4` even though CUDA Python requires `~=12.9.5`
-
-The compatible intersection for the shared host is now pinned in [requirements-gpu-cu126.txt](/home/ubuntu/Author_Name_Disambiguation/requirements-gpu-cu126.txt):
-
-- `torch 2.10.0+cu126` requires `cuda-bindings==12.9.4`
-- `cuml-cu12 26.2.0` accepts `cuda-python>=12.9.2,<13`
-- `cupy-cuda12x 14.0.1` requires `cuda-pathfinder>=1.3.3`
-
-That is why the repair target is `cuda-python==12.9.4`, `cuda-bindings==12.9.4`, and `cuda-pathfinder==1.3.3`.
-The GPU requirements file is intentionally an overlay repair spec for the existing venv, not a one-shot exact reprovision of torch plus RAPIDS.
-The repair command uses `--no-deps` on purpose so `uv` does not replace Torch's working CUDA vendor wheels with a second transitive solve from RAPIDS.
-If that class of error returns, repair the venv with the `uv pip` command above. Do not manually patch single CUDA or RAPIDS packages with `pip install ...`.
+If `scripts/ops/gpu_env_doctor.py` reports a mismatch like `tensorflow_expected_cu12_but_detected_cu13_stack`, the venv has drifted and `chars2vec` will fall back to CPU even if PyTorch still sees CUDA.
+Repair from the repo commands above; do not manually patch single CUDA, TensorFlow, or RAPIDS packages with `pip install ...`.
 
 ## Public CLI
 
