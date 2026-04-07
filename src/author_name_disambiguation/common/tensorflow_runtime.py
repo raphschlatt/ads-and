@@ -122,16 +122,19 @@ def _probe_torch_runtime() -> dict[str, Any]:
     return payload
 
 
-def _probe_tensorflow_runtime() -> dict[str, Any]:
+def _probe_tensorflow_runtime(*, force_cpu: bool = False) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "tensorflow_version": None,
         "tensorflow_built_with_cuda": None,
         "tensorflow_cuda_version": None,
         "tensorflow_cudnn_version": None,
+        "tensorflow_physical_gpu_count": 0,
+        "tensorflow_physical_gpus": [],
         "tensorflow_visible_gpu_count": 0,
         "tensorflow_visible_gpus": [],
         "tensorflow_import_error": None,
         "tensorflow_gpu_probe_error": None,
+        "tensorflow_force_cpu_requested": bool(force_cpu),
     }
     try:
         import tensorflow as tf  # type: ignore
@@ -155,11 +158,21 @@ def _probe_tensorflow_runtime() -> dict[str, Any]:
         payload["tensorflow_cudnn_version"] = build_info.get("cudnn_version")
 
     try:
-        visible_gpus = list(getattr(tf.config, "list_physical_devices")("GPU"))
+        physical_gpus = list(getattr(tf.config, "list_physical_devices")("GPU"))
     except Exception as exc:
         payload["tensorflow_gpu_probe_error"] = repr(exc)
         return payload
+    payload["tensorflow_physical_gpu_count"] = int(len(physical_gpus))
+    payload["tensorflow_physical_gpus"] = [str(gpu) for gpu in physical_gpus]
 
+    visible_gpus = physical_gpus
+    get_visible_devices = getattr(tf.config, "get_visible_devices", None)
+    if callable(get_visible_devices):
+        try:
+            visible_gpus = list(get_visible_devices("GPU"))
+        except Exception as exc:
+            payload["tensorflow_gpu_probe_error"] = repr(exc)
+            return payload
     payload["tensorflow_visible_gpu_count"] = int(len(visible_gpus))
     payload["tensorflow_visible_gpus"] = [str(gpu) for gpu in visible_gpus]
     return payload
@@ -171,6 +184,11 @@ def _classify_runtime(report: Mapping[str, Any]) -> tuple[str, str | None]:
         return "unavailable", "tensorflow_import_failed"
 
     visible_gpu_count = int(report.get("tensorflow_visible_gpu_count") or 0)
+    if report.get("tensorflow_force_cpu_requested") is True:
+        if visible_gpu_count > 0:
+            return "mismatch", "force_cpu_requested_but_tensorflow_gpu_still_visible"
+        return "cpu_fallback", "forced_cpu"
+
     if visible_gpu_count > 0:
         return "ok", None
 
@@ -202,7 +220,7 @@ def tensorflow_runtime_backend_label(runtime: Mapping[str, Any] | None) -> str:
     return "tensorflow-cpu"
 
 
-def probe_tensorflow_runtime() -> dict[str, Any]:
+def probe_tensorflow_runtime(*, force_cpu: bool = False) -> dict[str, Any]:
     python_executable, virtual_env = _python_environment()
     vendor_package_versions = _collect_vendor_package_versions()
     report: dict[str, Any] = {
@@ -213,7 +231,7 @@ def probe_tensorflow_runtime() -> dict[str, Any]:
         "supported_cuda_tag": _SUPPORTED_TF_CUDA_TAG,
     }
     report.update(_probe_torch_runtime())
-    report.update(_probe_tensorflow_runtime())
+    report.update(_probe_tensorflow_runtime(force_cpu=force_cpu))
     status, reason = _classify_runtime(report)
     report["status"] = status
     report["reason"] = reason
@@ -223,6 +241,8 @@ def probe_tensorflow_runtime() -> dict[str, Any]:
 
 def tensorflow_runtime_needs_warning(runtime: Mapping[str, Any] | None) -> bool:
     if not runtime:
+        return False
+    if runtime.get("tensorflow_force_cpu_requested") is True or str(runtime.get("reason") or "") == "forced_cpu":
         return False
     return runtime.get("torch_cuda_available") is True and str(runtime.get("status")) != "ok"
 

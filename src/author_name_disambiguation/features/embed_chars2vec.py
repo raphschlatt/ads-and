@@ -164,6 +164,32 @@ def _configure_tensorflow_memory_growth() -> tuple[bool | None, str | None]:
         return False, repr(exc)
 
 
+def _force_tensorflow_cpu() -> str | None:
+    try:
+        import tensorflow as tf  # type: ignore
+    except Exception:
+        return None
+
+    set_visible_devices = getattr(tf.config, "set_visible_devices", None)
+    if not callable(set_visible_devices):
+        return "tensorflow.config.set_visible_devices is unavailable"
+
+    try:
+        set_visible_devices([], "GPU")
+    except Exception as exc:
+        return repr(exc)
+
+    get_visible_devices = getattr(tf.config, "get_visible_devices", None)
+    if callable(get_visible_devices):
+        try:
+            visible_gpus = list(get_visible_devices("GPU"))
+        except Exception as exc:
+            return repr(exc)
+        if len(visible_gpus) > 0:
+            return f"TensorFlow still reports visible GPUs after force_cpu: {visible_gpus!r}"
+    return None
+
+
 def _normalize_execution_mode(execution_mode: str) -> Literal["predict", "direct_call"]:
     if execution_mode not in {"predict", "direct_call"}:
         raise ValueError("execution_mode must be 'predict' or 'direct_call'")
@@ -373,6 +399,7 @@ def generate_chars2vec_embeddings(
     model_name: str = "eng_50",
     batch_size: int | None = _CHARS2VEC_HISTORICAL_BATCH_SIZE,
     execution_mode: Literal["predict", "direct_call"] = "predict",
+    force_cpu: bool = False,
     use_stub_if_missing: bool = False,
     quiet_libraries: bool = False,
     show_progress: bool = False,
@@ -399,6 +426,8 @@ def generate_chars2vec_embeddings(
             "runtime_backend": None,
             "tensorflow_memory_growth_enabled": None,
             "tensorflow_memory_growth_error": None,
+            "force_cpu_requested": bool(force_cpu),
+            "tensorflow_force_cpu_error": None,
             "tensorflow_runtime": None,
             "tensorflow_cleanup_attempted": False,
             "tensorflow_cleanup_error": None,
@@ -413,6 +442,7 @@ def generate_chars2vec_embeddings(
     generation_started_at = perf_counter()
     tf_memory_growth_enabled: bool | None = None
     tf_memory_growth_error: str | None = None
+    tensorflow_force_cpu_error: str | None = None
     tensorflow_runtime: dict[str, object] | None = None
     try:
         if quiet_libraries:
@@ -421,14 +451,19 @@ def generate_chars2vec_embeddings(
             os.environ["KERAS_BACKEND"] = "tensorflow"
 
         with _filter_known_library_stderr(enabled=quiet_libraries):
-            tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
+            if force_cpu:
+                tensorflow_force_cpu_error = _force_tensorflow_cpu()
+            else:
+                tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
             import chars2vec  # type: ignore
 
             model_load_started_at = perf_counter()
             model = chars2vec.load_model(model_name)
             model_load_seconds = float(perf_counter() - model_load_started_at)
             setattr(model, "keras", chars2vec.keras)
-            tensorflow_runtime = probe_tensorflow_runtime()
+            tensorflow_runtime = probe_tensorflow_runtime(force_cpu=force_cpu)
+        if force_cpu and int((tensorflow_runtime or {}).get("tensorflow_visible_gpu_count") or 0) > 0:
+            raise RuntimeError("force_cpu requested for chars2vec but TensorFlow still reports visible GPUs.")
         cleanup_error = None
         try:
             emb, vectorize_meta = _vectorize_words_silently(
@@ -463,6 +498,8 @@ def generate_chars2vec_embeddings(
             "runtime_backend": tensorflow_runtime_backend_label(tensorflow_runtime),
             "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
             "tensorflow_memory_growth_error": tf_memory_growth_error,
+            "force_cpu_requested": bool(force_cpu),
+            "tensorflow_force_cpu_error": tensorflow_force_cpu_error,
             "tensorflow_runtime": dict(tensorflow_runtime or {}),
             "tensorflow_cleanup_attempted": True,
             "tensorflow_cleanup_error": cleanup_error,
@@ -499,6 +536,8 @@ def generate_chars2vec_embeddings(
         "runtime_backend": tensorflow_runtime_backend_label(tensorflow_runtime),
         "tensorflow_memory_growth_enabled": tf_memory_growth_enabled,
         "tensorflow_memory_growth_error": tf_memory_growth_error,
+        "force_cpu_requested": bool(force_cpu),
+        "tensorflow_force_cpu_error": tensorflow_force_cpu_error,
         "tensorflow_runtime": dict(tensorflow_runtime or {}),
         "tensorflow_cleanup_attempted": False,
         "tensorflow_cleanup_error": None,
@@ -518,6 +557,7 @@ def get_or_create_chars2vec_embeddings(
     model_name: str = "eng_50",
     batch_size: int | None = _CHARS2VEC_HISTORICAL_BATCH_SIZE,
     execution_mode: Literal["predict", "direct_call"] = "predict",
+    force_cpu: bool = False,
     use_stub_if_missing: bool = False,
     quiet_libraries: bool = False,
     show_progress: bool = False,
@@ -553,6 +593,8 @@ def get_or_create_chars2vec_embeddings(
                 "runtime_backend": "tensorflow-cache",
                 "tensorflow_memory_growth_enabled": None,
                 "tensorflow_memory_growth_error": None,
+                "force_cpu_requested": bool(force_cpu),
+                "tensorflow_force_cpu_error": None,
                 "tensorflow_runtime": None,
                 "tensorflow_cleanup_attempted": False,
                 "tensorflow_cleanup_error": None,
@@ -569,6 +611,7 @@ def get_or_create_chars2vec_embeddings(
         model_name=model_name,
         batch_size=batch_size,
         execution_mode=execution_mode,
+        force_cpu=force_cpu,
         use_stub_if_missing=use_stub_if_missing,
         quiet_libraries=quiet_libraries,
         show_progress=show_progress,

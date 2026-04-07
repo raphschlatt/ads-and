@@ -132,6 +132,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
         arr = np.ones((len(mentions), 50), dtype=np.float32)
         np.save(path, arr)
         emit_stage_progress(current=len(mentions), total=len(mentions), unit="name")
+        force_cpu = bool(_kwargs.get("force_cpu"))
         meta = {
             "cache_hit": False,
             "generation_mode": "chars2vec",
@@ -147,17 +148,20 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "materialize_seconds": 0.001,
             "cache_load_seconds": 0.0,
             "cache_write_seconds": 0.01,
-            "runtime_backend": "tensorflow-gpu",
-            "tensorflow_memory_growth_enabled": True,
+            "runtime_backend": "tensorflow-cpu" if force_cpu else "tensorflow-gpu",
+            "tensorflow_memory_growth_enabled": None if force_cpu else True,
             "tensorflow_memory_growth_error": None,
             "tensorflow_runtime": {
-                "status": "ok",
-                "reason": None,
-                "runtime_backend": "tensorflow-gpu",
+                "status": "cpu_fallback" if force_cpu else "ok",
+                "reason": "forced_cpu" if force_cpu else None,
+                "runtime_backend": "tensorflow-cpu" if force_cpu else "tensorflow-gpu",
                 "torch_cuda_available": True,
-                "tensorflow_visible_gpu_count": 1,
+                "tensorflow_visible_gpu_count": 0 if force_cpu else 1,
                 "detected_vendor_cuda_tags": ["12"],
+                "tensorflow_force_cpu_requested": force_cpu,
             },
+            "force_cpu_requested": force_cpu,
+            "tensorflow_force_cpu_error": None,
             "tensorflow_cleanup_attempted": True,
             "tensorflow_cleanup_error": None,
             "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
@@ -551,7 +555,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
     assert context["runtime"]["load_inputs"]["read_publications_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
-    assert context["runtime"]["chars2vec"]["runtime_backend"] == "tensorflow-gpu"
+    assert context["runtime"]["chars2vec"]["runtime_backend"] == "tensorflow-cpu"
     assert context["runtime"]["chars2vec"]["wall_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["unique_name_count"] == 5
     assert context["runtime"]["chars2vec"]["tokenizers_parallelism_setting"] == os.environ.get("TOKENIZERS_PARALLELISM", "<unset>")
@@ -596,9 +600,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "START Load inputs" in captured.err
     assert "START Preflight" in captured.err
     assert "START Name embeddings" in captured.err
-    assert "backend=chars2vec/tensorflow-auto | mode=predict | batch_size=auto" in captured.err
+    assert "backend=chars2vec/tensorflow-cpu | mode=predict | batch_size=auto" in captured.err
     assert "DONE 5 names embedded in " in captured.err
-    assert "backend=chars2vec/tensorflow-gpu" in captured.err
+    assert "backend=chars2vec/tensorflow-cpu" in captured.err
     assert "START Text embeddings" in captured.err
     assert "DONE 3 source texts prepared for 5 mentions in " in captured.err
     assert "cpu_stage=pair_building | cpu_workers=auto | sharding=auto | ram_budget=" in captured.err
@@ -615,6 +619,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert seen["specter_input_rows"] == 3
     assert seen["chars_kwargs"]["execution_mode"] == "predict"
     assert seen["chars_kwargs"]["batch_size"] is None
+    assert seen["chars_kwargs"]["force_cpu"] is True
     assert seen["specter_kwargs"]["reuse_model"] is False
     assert seen["pair_kwargs"]["num_workers"] is None
     assert seen["pair_kwargs"]["sharding_mode"] == "auto"

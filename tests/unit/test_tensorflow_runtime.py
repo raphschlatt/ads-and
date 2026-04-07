@@ -34,12 +34,21 @@ def _install_fake_tensorflow(
     monkeypatch: pytest.MonkeyPatch,
     *,
     visible_gpu_count: int,
+    physical_gpu_count: int | None = None,
     built_with_cuda: bool = True,
     cuda_version: str = "12.5.1",
 ) -> None:
+    resolved_physical_gpu_count = visible_gpu_count if physical_gpu_count is None else int(physical_gpu_count)
+
     class _Config:
         @staticmethod
         def list_physical_devices(kind):
+            if kind != "GPU":
+                return []
+            return [f"GPU:{idx}" for idx in range(resolved_physical_gpu_count)]
+
+        @staticmethod
+        def get_visible_devices(kind):
             if kind != "GPU":
                 return []
             return [f"GPU:{idx}" for idx in range(visible_gpu_count)]
@@ -94,3 +103,23 @@ def test_probe_tensorflow_runtime_marks_ok_when_tensorflow_sees_gpu(monkeypatch:
     assert report["reason"] is None
     assert report["runtime_backend"] == "tensorflow-gpu"
     assert report["tensorflow_visible_gpu_count"] == 1
+
+
+def test_probe_tensorflow_runtime_classifies_forced_cpu_without_warning(monkeypatch: pytest.MonkeyPatch):
+    _install_fake_torch(monkeypatch, cuda_available=True)
+    _install_fake_tensorflow(monkeypatch, visible_gpu_count=0, physical_gpu_count=1)
+    monkeypatch.setattr(
+        tensorflow_runtime,
+        "_collect_vendor_package_versions",
+        lambda: {"nvidia-cudnn-cu12": "9.10.2.21"},
+    )
+
+    report = tensorflow_runtime.probe_tensorflow_runtime(force_cpu=True)
+
+    assert report["status"] == "cpu_fallback"
+    assert report["reason"] == "forced_cpu"
+    assert report["runtime_backend"] == "tensorflow-cpu"
+    assert report["tensorflow_force_cpu_requested"] is True
+    assert report["tensorflow_physical_gpu_count"] == 1
+    assert report["tensorflow_visible_gpu_count"] == 0
+    assert tensorflow_runtime.tensorflow_runtime_needs_warning(report) is False

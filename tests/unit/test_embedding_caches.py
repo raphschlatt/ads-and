@@ -97,7 +97,7 @@ def _install_fake_tensorflow(
     clear_raises: bool = False,
     visible_gpus: bool = True,
 ):
-    state = {"memory_growth_calls": [], "clear_calls": 0}
+    state = {"memory_growth_calls": [], "clear_calls": 0, "visible_gpus": ["GPU:0"] if visible_gpus else []}
 
     class _Experimental:
         def set_memory_growth(self, gpu, enabled):
@@ -113,6 +113,18 @@ def _install_fake_tensorflow(
             if kind != "GPU":
                 return []
             return ["GPU:0"] if visible_gpus else []
+
+        @staticmethod
+        def get_visible_devices(kind):
+            if kind != "GPU":
+                return []
+            return list(state["visible_gpus"])
+
+        @staticmethod
+        def set_visible_devices(devices, kind):
+            if kind != "GPU":
+                return
+            state["visible_gpus"] = list(devices)
 
     class _Backend:
         @staticmethod
@@ -328,11 +340,13 @@ def test_generate_chars2vec_embeddings_auto_batches_on_cpu(monkeypatch: pytest.M
     monkeypatch.setattr(
         embed_chars2vec,
         "probe_tensorflow_runtime",
-        lambda: {
+        lambda force_cpu=False: {
             "status": "cpu_fallback",
-            "reason": "torch_cuda_unavailable",
+            "reason": "forced_cpu" if force_cpu else "torch_cuda_unavailable",
             "torch_cuda_available": False,
             "runtime_backend": "tensorflow-cpu",
+            "tensorflow_force_cpu_requested": bool(force_cpu),
+            "tensorflow_visible_gpu_count": 0,
         },
     )
     state = _install_fake_chars2vec_backend(monkeypatch)
@@ -356,6 +370,30 @@ def test_generate_chars2vec_embeddings_auto_batches_on_cpu(monkeypatch: pytest.M
     assert meta["tensorflow_runtime"]["status"] == "cpu_fallback"
     assert len(state["predict_calls"]) == 1
     assert state["predict_calls"][0]["batch_size"] == 128
+
+
+def test_generate_chars2vec_embeddings_force_cpu_hides_tensorflow_gpus(monkeypatch: pytest.MonkeyPatch):
+    tf_state = _install_fake_tensorflow(monkeypatch)
+    _install_fake_chars2vec_backend(monkeypatch)
+
+    out, meta = embed_chars2vec.generate_chars2vec_embeddings(
+        names=["Doe J", "Roe A"],
+        batch_size=None,
+        force_cpu=True,
+        show_progress=False,
+        quiet_libraries=False,
+        return_meta=True,
+    )
+
+    assert out.shape == (2, 50)
+    assert meta["runtime_backend"] == "tensorflow-cpu"
+    assert meta["force_cpu_requested"] is True
+    assert meta["tensorflow_force_cpu_error"] is None
+    assert meta["tensorflow_memory_growth_enabled"] is None
+    assert meta["tensorflow_runtime"]["status"] == "cpu_fallback"
+    assert meta["tensorflow_runtime"]["reason"] == "forced_cpu"
+    assert meta["tensorflow_runtime"]["tensorflow_visible_gpu_count"] == 0
+    assert tf_state["memory_growth_calls"] == []
 
 
 def test_generate_chars2vec_embeddings_passes_manual_batch_size_through(monkeypatch: pytest.MonkeyPatch):
@@ -605,11 +643,13 @@ def test_generate_chars2vec_embeddings_filters_known_tensorflow_startup_noise_fo
     monkeypatch.setattr(
         embed_chars2vec,
         "probe_tensorflow_runtime",
-        lambda: {
+        lambda force_cpu=False: {
             "status": "ok",
             "reason": None,
             "torch_cuda_available": True,
-            "runtime_backend": "tensorflow-gpu",
+            "runtime_backend": "tensorflow-cpu" if force_cpu else "tensorflow-gpu",
+            "tensorflow_visible_gpu_count": 0 if force_cpu else 1,
+            "tensorflow_force_cpu_requested": bool(force_cpu),
         },
     )
 

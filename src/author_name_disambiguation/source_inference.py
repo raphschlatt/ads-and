@@ -1054,13 +1054,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
 
     name_embeddings_started_at = perf_counter()
     _stage_start("name_embeddings")
-    chars_path = dirs["embeddings"] / "chars2vec.npy"
+    chars_force_cpu = True
+    chars_path = dirs["embeddings"] / "chars2vec_cpu.npy"
     chars_cache_requested = chars_path.exists() and not bool(request.force)
     chars_execution_mode = "predict"
     chars_batch_size = None
     _stage_info(
         f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | "
-        f"backend=chars2vec/tensorflow-auto | mode={chars_execution_mode} | "
+        f"backend=chars2vec/{'tensorflow-cpu' if chars_force_cpu else 'tensorflow-auto'} | mode={chars_execution_mode} | "
         f"batch_size={'auto' if chars_batch_size is None else _format_count(chars_batch_size)}"
     )
     with activate_progress_reporter(reporter):
@@ -1070,6 +1071,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             force_recompute=bool(request.force),
             batch_size=chars_batch_size,
             execution_mode=chars_execution_mode,
+            force_cpu=chars_force_cpu,
             use_stub_if_missing=False,
             quiet_libraries=True,
             show_progress=progress_enabled,

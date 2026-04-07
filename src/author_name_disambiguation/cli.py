@@ -1162,7 +1162,7 @@ def cmd_run_train_stage(args):
         lspo_subset_run_path = subset_dir / f"lspo_mentions_{stage}.parquet"
         lspo_split_run_path = subset_dir / f"lspo_mentions_split_{stage}.parquet"
         lspo_pairs_path = subset_dir / f"lspo_pairs_{stage}.parquet"
-        lspo_chars_path = emb_dir / f"lspo_chars2vec_{stage}.npy"
+        lspo_chars_path = emb_dir / f"lspo_chars2vec_cpu_{stage}.npy"
         lspo_text_path = emb_dir / f"lspo_specter_{stage}.npy"
 
         train_manifest_path = metrics_dir / "03_train_manifest.json"
@@ -1337,7 +1337,7 @@ def cmd_run_train_stage(args):
                 "pipeline_scope": "train",
             }
         )
-        lspo_chars_shared_path = shared_embeddings_dir / f"lspo_chars2vec_{embedding_id}.npy"
+        lspo_chars_shared_path = shared_embeddings_dir / f"lspo_chars2vec_cpu_{embedding_id}.npy"
         lspo_text_shared_path = shared_embeddings_dir / f"lspo_specter_{embedding_id}.npy"
         emb_cache_hit = lspo_chars_shared_path.exists() and lspo_text_shared_path.exists() and not args.force
 
@@ -1347,6 +1347,7 @@ def cmd_run_train_stage(args):
             force_recompute=args.force,
             batch_size=32,
             execution_mode="predict",
+            force_cpu=True,
             use_stub_if_missing=args.use_stub_embeddings,
             quiet_libraries=args.quiet_libs,
             show_progress=bool(args.progress),
@@ -2368,7 +2369,7 @@ def cmd_run_cluster_test_report(args):
         )
         shared_embeddings_dir = Path(run_dirs["shared_embeddings"])
         shared_embeddings_dir.mkdir(parents=True, exist_ok=True)
-        lspo_chars_path = shared_embeddings_dir / f"lspo_chars2vec_{embedding_id}.npy"
+        lspo_chars_path = shared_embeddings_dir / f"lspo_chars2vec_cpu_{embedding_id}.npy"
         lspo_text_path = shared_embeddings_dir / f"lspo_specter_{embedding_id}.npy"
 
         lspo_chars = get_or_create_chars2vec_embeddings(
@@ -2377,6 +2378,7 @@ def cmd_run_cluster_test_report(args):
             force_recompute=bool(args.force),
             batch_size=32,
             execution_mode="predict",
+            force_cpu=True,
             use_stub_if_missing=False,
             quiet_libraries=bool(args.quiet_libs),
             show_progress=bool(args.progress),
