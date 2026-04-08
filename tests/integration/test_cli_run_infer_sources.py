@@ -516,6 +516,9 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "finalize_component_solve_seconds": 0.008,
                 "finalize_sparse_components_seconds": 0.008,
                 "finalize_union_fallback_seconds": 0.0,
+                "finalize_label_materialization_seconds": 0.009,
+                "finalize_output_frame_seconds": 0.01,
+                "finalize_total_seconds": 0.027,
                 "accepted_edges_total": 3,
                 "accepted_edges_deduped_total": 2,
                 "component_solver_impl": "sparse",
@@ -692,8 +695,16 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["clustering"]["finalize_component_solve_seconds"] >= 0.0
     assert stage_metrics["runtime"]["clustering"]["finalize_sparse_components_seconds"] >= 0.0
     assert stage_metrics["runtime"]["clustering"]["finalize_union_fallback_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["finalize_label_materialization_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["finalize_output_frame_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["finalize_total_seconds"] >= 0.0
     assert stage_metrics["runtime"]["clustering"]["accepted_edges_total"] >= 0
     assert stage_metrics["runtime"]["clustering"]["accepted_edges_deduped_total"] >= 0
+    assert stage_metrics["runtime"]["clustering"]["progress_emit_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["uid_mode_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["preflight_write_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["accounted_wall_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["unaccounted_wall_seconds"] >= -0.05
     assert stage_metrics["runtime"]["clustering"]["component_solver_impl"] in {
         "singleton_only",
         "python_union",

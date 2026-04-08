@@ -328,23 +328,25 @@ def _apply_uid_scope_to_clusters(
     uid_scope: str,
     uid_namespace: str | None,
 ) -> pd.DataFrame:
-    out = clusters.copy()
-    if "author_uid" not in out.columns:
+    if "author_uid" not in clusters.columns:
         raise ValueError("clusters missing required column: author_uid")
 
-    if "author_uid_local" not in out.columns:
-        out["author_uid_local"] = out["author_uid"].astype(str)
+    out = clusters.copy(deep=False)
+    if "author_uid_local" not in clusters.columns:
+        author_uid_local = clusters["author_uid"].astype(str).to_numpy(dtype=str, copy=False)
     else:
-        out["author_uid_local"] = out["author_uid_local"].astype(str)
+        author_uid_local = clusters["author_uid_local"].astype(str).to_numpy(dtype=str, copy=False)
+    out["author_uid_local"] = author_uid_local
 
     if uid_scope == "local":
-        out["author_uid"] = out["author_uid_local"].astype(str)
+        out["author_uid"] = author_uid_local
         return out
 
     if uid_namespace is None:
         raise ValueError(f"uid_namespace is required when uid_scope={uid_scope!r}.")
 
-    out["author_uid"] = out["author_uid_local"].map(lambda value: f"{uid_namespace}::{value}")
+    prefix = f"{uid_namespace}::"
+    out["author_uid"] = np.char.add(prefix, author_uid_local)
     return out
 
 
@@ -1559,24 +1561,31 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"backend={cluster_backend} | cpu_workers={_format_worker_request(cpu_workers)} | "
         f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
     )
+    clustering_progress_emit_elapsed = 0.0
+    clustering_uid_mode_elapsed = 0.0
+    clustering_preflight_write_elapsed = 0.0
     if cluster_accumulator is not None:
         clusters, cluster_runtime_meta = cluster_accumulator.finalize()
-        block_keys = (
-            pd.unique(clusters["block_key"].astype(str)).tolist()
-            if "block_key" in clusters.columns
-            else []
+        block_progress_total = int(
+            (cluster_runtime_meta.get("backend_block_counts", {}) or {}).get("connected_components_cpu", 0)
         )
-        block_progress_units = block_keys if block_keys else [None]
+        if block_progress_total <= 0:
+            block_progress_total = int(sum((cluster_runtime_meta.get("block_count_by_bucket", {}) or {}).values()))
         with activate_progress_reporter(reporter):
             with loop_progress(
-                total=len(block_progress_units),
+                total=max(block_progress_total, 1),
                 label="Cluster blocks",
                 enabled=progress_enabled,
                 unit="block",
                 compact_label="Clustering",
             ) as tracker:
-                for _ in block_progress_units:
-                    tracker.update(1)
+                progress_started_at = perf_counter()
+                progress_total = max(block_progress_total, 1)
+                first_chunk = 1 if progress_total == 1 else max(1, progress_total // 2)
+                tracker.update(first_chunk)
+                if progress_total > first_chunk:
+                    tracker.update(progress_total - first_chunk)
+                clustering_progress_emit_elapsed = float(perf_counter() - progress_started_at)
     else:
         with activate_progress_reporter(reporter):
             clusters, cluster_runtime_meta = cluster_blockwise_dbscan(
@@ -1593,12 +1602,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
                 return_meta=True,
             )
     uid_registry_path = None if uid_scope != "registry" else dirs["root"] / "uid_registry" / f"{uid_namespace}.json"
+    clustering_uid_mode_started_at = perf_counter()
     clusters, uid_mode_meta = _apply_uid_mode_to_clusters(
         clusters=clusters,
         uid_scope=uid_scope,
         uid_namespace=uid_namespace,
         uid_registry_path=uid_registry_path,
     )
+    clustering_uid_mode_elapsed = float(perf_counter() - clustering_uid_mode_started_at)
     preflight["runtime"] = {
         "load_inputs": load_inputs_runtime,
         "chars2vec": dict(chars_meta),
@@ -1609,9 +1620,34 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
     }
+    clustering_preflight_write_started_at = perf_counter()
     write_json(preflight, preflight_path)
+    clustering_preflight_write_elapsed = float(perf_counter() - clustering_preflight_write_started_at)
     clustering_elapsed = perf_counter() - clustering_started_at
+    cluster_accounted_wall = float(
+        float(cluster_runtime_meta.get("finalize_total_seconds") or 0.0)
+        + clustering_progress_emit_elapsed
+        + clustering_uid_mode_elapsed
+        + clustering_preflight_write_elapsed
+    )
+    if float(cluster_runtime_meta.get("finalize_total_seconds") or 0.0) <= 0.0:
+        cluster_accounted_wall = float(
+            float(cluster_runtime_meta.get("build_entries_seconds") or 0.0)
+            + float(cluster_runtime_meta.get("distance_matrix_seconds_total") or 0.0)
+            + float(cluster_runtime_meta.get("constraints_seconds_total") or 0.0)
+            + float(cluster_runtime_meta.get("sanitize_seconds_total") or 0.0)
+            + float(cluster_runtime_meta.get("dbscan_seconds_total") or 0.0)
+            + float(cluster_runtime_meta.get("connected_components_seconds_total") or 0.0)
+            + clustering_progress_emit_elapsed
+            + clustering_uid_mode_elapsed
+            + clustering_preflight_write_elapsed
+        )
+    cluster_runtime_meta["progress_emit_seconds"] = float(clustering_progress_emit_elapsed)
+    cluster_runtime_meta["uid_mode_seconds"] = float(clustering_uid_mode_elapsed)
+    cluster_runtime_meta["preflight_write_seconds"] = float(clustering_preflight_write_elapsed)
+    cluster_runtime_meta["accounted_wall_seconds"] = float(cluster_accounted_wall)
     cluster_runtime_meta["wall_seconds"] = float(clustering_elapsed)
+    cluster_runtime_meta["unaccounted_wall_seconds"] = float(clustering_elapsed - cluster_accounted_wall)
     _stage_done(
         f"clusters={_format_count(int(clusters['author_uid'].nunique()))} | "
         f"mentions={_format_count(len(clusters))} | "

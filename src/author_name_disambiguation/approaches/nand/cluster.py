@@ -817,6 +817,16 @@ def _solve_component_ids_with_sparse_graph(n_local: int, left: np.ndarray, right
     return np.asarray(sparse_labels, dtype=np.int64)
 
 
+def _stable_local_component_codes(component_ids: np.ndarray) -> np.ndarray:
+    component_ids = np.asarray(component_ids, dtype=np.int64, copy=False)
+    if len(component_ids) == 0:
+        return np.asarray([], dtype=np.int32)
+    if len(component_ids) == 1:
+        return np.zeros(1, dtype=np.int32)
+    codes, _ = pd.factorize(component_ids, sort=False)
+    return np.asarray(codes, dtype=np.int32)
+
+
 def _build_block_bucket_counts_from_sizes(block_sizes: np.ndarray) -> dict[str, int]:
     counts: dict[str, int] = {}
     for size in np.asarray(block_sizes, dtype=np.int64).tolist():
@@ -933,6 +943,9 @@ class ExactGraphClusterAccumulator:
         self.finalize_component_solve_seconds = 0.0
         self.finalize_sparse_components_seconds = 0.0
         self.finalize_union_fallback_seconds = 0.0
+        self.finalize_label_materialization_seconds = 0.0
+        self.finalize_output_frame_seconds = 0.0
+        self.finalize_total_seconds = 0.0
         self.accepted_edges_total = 0
         self.accepted_edges_deduped_total = 0
 
@@ -984,6 +997,7 @@ class ExactGraphClusterAccumulator:
         state_started_at = perf_counter()
         self._mention_ids_grouped = self._mention_ids_global[self._grouped_order]
         block_keys_grouped = block_keys_global[self._grouped_order]
+        self._block_keys_grouped = np.asarray(block_keys_grouped, dtype=object, copy=False)
         self._block_keys_by_idx = block_keys_grouped[self._block_starts]
         self._given_grouped = given_global[self._grouped_order]
         self._surname_grouped = surname_global[self._grouped_order]
@@ -1184,13 +1198,12 @@ class ExactGraphClusterAccumulator:
                 self.score_callback_edge_buffer_seconds += float(edge_buffer_elapsed)
 
     def finalize(self) -> tuple[pd.DataFrame, dict[str, Any]]:
+        finalize_started_at = perf_counter()
         author_uids = np.empty(int(self._n_mentions), dtype=object)
         sparse_blocks = 0
         union_fallback_blocks = 0
         for block_idx, (start, end) in enumerate(zip(self._block_starts.tolist(), self._block_ends.tolist())):
             block_key = str(self._block_keys_by_idx[block_idx])
-            root_to_label: dict[int, int] = {}
-            next_label = 0
             n_local = int(end - start)
             component_ids = np.arange(n_local, dtype=np.int64)
             left_chunks = self._edge_left_chunks_by_block[block_idx]
@@ -1223,22 +1236,30 @@ class ExactGraphClusterAccumulator:
                     self.finalize_sparse_components_seconds += float(solve_elapsed)
                 else:
                     self.finalize_union_fallback_seconds += float(solve_elapsed)
-            for local_idx in range(n_local):
-                root = int(component_ids[local_idx])
-                if root not in root_to_label:
-                    root_to_label[root] = int(next_label)
-                    next_label += 1
-                author_uids[int(start + local_idx)] = f"{block_key}::{int(root_to_label[root])}"
+            label_started_at = perf_counter()
+            if n_local > 0:
+                stable_codes = _stable_local_component_codes(component_ids)
+                n_labels = int(stable_codes.max()) + 1 if len(stable_codes) else 0
+                if n_labels > 0:
+                    label_vocab = np.asarray(
+                        [f"{block_key}::{label_idx}" for label_idx in range(n_labels)],
+                        dtype=object,
+                    )
+                    author_uids[int(start):int(end)] = label_vocab[stable_codes]
+            self.finalize_label_materialization_seconds += float(perf_counter() - label_started_at)
 
+        output_started_at = perf_counter()
         out = pd.DataFrame(
             {
                 "mention_id": np.asarray(self._mention_ids_grouped, dtype=object),
-                "block_key": np.asarray(self._block_keys_by_idx[self._block_idx_grouped], dtype=object),
+                "block_key": np.asarray(self._block_keys_grouped, dtype=object),
                 "author_uid": np.asarray(author_uids, dtype=object),
             },
             columns=CLUSTER_REQUIRED_COLUMNS,
         )
         validate_columns(out, CLUSTER_REQUIRED_COLUMNS, "clusters")
+        self.finalize_output_frame_seconds = float(perf_counter() - output_started_at)
+        self.finalize_total_seconds = float(perf_counter() - finalize_started_at)
 
         block_sizes = np.asarray(self._block_sizes, dtype=np.int64)
         block_count_by_bucket = _build_block_bucket_counts_from_sizes(block_sizes)
@@ -1288,6 +1309,9 @@ class ExactGraphClusterAccumulator:
             "finalize_component_solve_seconds": float(self.finalize_component_solve_seconds),
             "finalize_sparse_components_seconds": float(self.finalize_sparse_components_seconds),
             "finalize_union_fallback_seconds": float(self.finalize_union_fallback_seconds),
+            "finalize_label_materialization_seconds": float(self.finalize_label_materialization_seconds),
+            "finalize_output_frame_seconds": float(self.finalize_output_frame_seconds),
+            "finalize_total_seconds": float(self.finalize_total_seconds),
             "gpu_transfer_seconds_total": 0.0,
             "top_slow_blocks": [],
             "sanitize_totals": dict(self.sanitize_totals),

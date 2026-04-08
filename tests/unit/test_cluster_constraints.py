@@ -332,6 +332,9 @@ def test_exact_graph_accumulator_uses_numeric_pair_helpers_and_reports_connected
     assert meta["finalize_component_solve_seconds"] >= 0.0
     assert meta["finalize_sparse_components_seconds"] >= 0.0
     assert meta["finalize_union_fallback_seconds"] >= 0.0
+    assert meta["finalize_label_materialization_seconds"] >= 0.0
+    assert meta["finalize_output_frame_seconds"] >= 0.0
+    assert meta["finalize_total_seconds"] >= 0.0
     assert meta["accepted_edges_total"] >= 0
     assert meta["accepted_edges_deduped_total"] >= 0
     assert meta["component_solver_impl"] in {"singleton_only", "python_union", "sparse", "hybrid_sparse_python"}
