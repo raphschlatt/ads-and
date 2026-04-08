@@ -54,3 +54,14 @@ The active ADS baseline is also exposed as a small machine-readable pointer in `
 That file is intended for tooling and should be updated together with every future infer baseline promotion.
 
 Intermediate optimization runs are not part of long-term provenance once the compare report exists and failed ADS candidates have been pruned to the JSON-only retention set.
+
+## Current Optimization Record
+
+The latest accepted cold-run package optimization session is documented separately in:
+
+- `docs/experiments/infer_cold_path_wave_20260408.md`
+
+Important distinction:
+
+- the formal active ADS baseline manifest is still the historical promoted baseline in `docs/baselines/infer_ads_active.json`
+- the 2026-04-08 optimization record documents the currently accepted package-side cold-run improvements that were validated against the operational CPU reference but not yet promoted as a new historical ADS baseline manifest

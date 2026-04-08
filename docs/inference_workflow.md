@@ -175,6 +175,8 @@ Important distinction:
 
 - `srcd52...` is historical/advisory only
 - `srcb2...` is the currently available and reproducible LSPO comparison state
+- the latest accepted cold-run package optimization session is documented in `docs/experiments/infer_cold_path_wave_20260408.md`
+- that experiment record is not the same thing as a formal ADS baseline promotion
 
 Default integrity checks now validate the operational LSPO reference:
 
