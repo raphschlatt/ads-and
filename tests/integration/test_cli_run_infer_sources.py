@@ -642,6 +642,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_scoring"]["score_callback_union_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["score_callback_edge_buffer_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["score_callback_edge_rows"] >= 0
+    assert preflight["runtime"]["pair_scoring"]["arrow_numeric_extract_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["arrow_public_passthrough_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["arrow_output_filter_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["arrow_output_table_build_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["batch_loop_overhead_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
     assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
@@ -678,6 +682,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["pair_scoring"]["score_callback_union_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_scoring"]["score_callback_edge_buffer_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_scoring"]["score_callback_edge_rows"] >= 0
+    assert stage_metrics["runtime"]["pair_scoring"]["arrow_numeric_extract_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["arrow_public_passthrough_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["arrow_output_filter_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["arrow_output_table_build_seconds"] >= 0.0
     assert stage_metrics["runtime"]["mention_encoding"]["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["clustering"]["block_count_by_bucket"]

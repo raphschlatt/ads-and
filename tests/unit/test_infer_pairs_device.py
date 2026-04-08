@@ -674,3 +674,124 @@ def test_score_pairs_chunked_parity_matches_dataframe_path(monkeypatch, tmp_path
     assert chunked_meta["unaccounted_wall_seconds"] >= -0.05
     assert chunked_meta["parquet_output_table_seconds"] >= 0.0
     assert chunked_meta["parquet_write_seconds"] >= 0.0
+
+
+def test_score_pairs_from_mention_embeddings_uses_arrow_fast_path_with_numeric_callback(tmp_path):
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2", "m3"]})
+    pairs = pd.DataFrame(
+        [
+            {
+                "pair_id": "m1__m2",
+                "mention_id_1": "m1",
+                "mention_id_2": "m2",
+                "block_key": "blk.a",
+                "mention_idx_1": 0,
+                "mention_idx_2": 1,
+                "block_idx": 4,
+            },
+            {
+                "pair_id": "m2__m3",
+                "mention_id_1": "m2",
+                "mention_id_2": "m3",
+                "block_key": "blk.a",
+                "mention_idx_1": 1,
+                "mention_idx_2": 2,
+                "block_idx": 4,
+            },
+        ]
+    )
+    pairs_path = tmp_path / "pairs.parquet"
+    output_path = tmp_path / "pair_scores.parquet"
+    pairs.to_parquet(pairs_path, index=False)
+
+    callback_payloads: list[dict[str, np.ndarray]] = []
+
+    def _callback(score_columns):
+        callback_payloads.append({key: np.asarray(value) for key, value in score_columns.items()})
+
+    mention_embeddings = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    mention_norms = np.linalg.norm(mention_embeddings, axis=1).astype(np.float32)
+
+    out, runtime_meta = infer_pairs.score_pairs_from_mention_embeddings(
+        mentions=mentions,
+        pairs=pairs_path,
+        mention_embeddings=mention_embeddings,
+        mention_norms=mention_norms,
+        output_path=output_path,
+        batch_size=2,
+        show_progress=False,
+        return_scores=False,
+        return_runtime_meta=True,
+        score_callback=_callback,
+    )
+
+    assert list(out.columns) == ["pair_id", "mention_id_1", "mention_id_2", "block_key", "cosine_sim", "distance"]
+    assert len(out) == 0
+    written = pd.read_parquet(output_path)
+    assert list(written["pair_id"]) == ["m1__m2", "m2__m3"]
+    assert list(callback_payloads[0].keys()) == ["mention_idx_1", "mention_idx_2", "distance", "block_idx"]
+    assert callback_payloads[0]["mention_idx_1"].tolist() == [0, 1]
+    assert callback_payloads[0]["mention_idx_2"].tolist() == [1, 2]
+    assert callback_payloads[0]["block_idx"].tolist() == [4, 4]
+    assert runtime_meta["pair_index_mode"] == "numeric_helper_columns"
+    assert runtime_meta["pair_index_fallback_reason"] is None
+    assert runtime_meta["arrow_numeric_extract_seconds"] >= 0.0
+    assert runtime_meta["arrow_public_passthrough_seconds"] >= 0.0
+    assert runtime_meta["arrow_output_filter_seconds"] >= 0.0
+    assert runtime_meta["arrow_output_table_build_seconds"] >= 0.0
+    assert runtime_meta["arrow_column_extract_seconds"] >= runtime_meta["arrow_numeric_extract_seconds"]
+
+
+def test_score_pairs_from_mention_embeddings_falls_back_when_numeric_helpers_invalid(tmp_path):
+    mentions = pd.DataFrame({"mention_id": ["m1", "m2"]})
+    pairs = pd.DataFrame(
+        [
+            {
+                "pair_id": "m1__m2",
+                "mention_id_1": "m1",
+                "mention_id_2": "m2",
+                "block_key": "blk.a",
+                "mention_idx_1": 7,
+                "mention_idx_2": 8,
+                "block_idx": 4,
+            }
+        ]
+    )
+    pairs_path = tmp_path / "pairs_bad.parquet"
+    output_path = tmp_path / "pair_scores_bad.parquet"
+    pairs.to_parquet(pairs_path, index=False)
+
+    callback_payloads: list[dict[str, np.ndarray]] = []
+
+    def _callback(score_columns):
+        callback_payloads.append({key: np.asarray(value) for key, value in score_columns.items()})
+
+    mention_embeddings = np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    mention_norms = np.linalg.norm(mention_embeddings, axis=1).astype(np.float32)
+
+    _, runtime_meta = infer_pairs.score_pairs_from_mention_embeddings(
+        mentions=mentions,
+        pairs=pairs_path,
+        mention_embeddings=mention_embeddings,
+        mention_norms=mention_norms,
+        output_path=output_path,
+        batch_size=2,
+        show_progress=False,
+        return_scores=False,
+        return_runtime_meta=True,
+        score_callback=_callback,
+    )
+
+    written = pd.read_parquet(output_path)
+    assert list(written["pair_id"]) == ["m1__m2"]
+    assert runtime_meta["pair_index_mode"] == "mention_id_lookup"
+    assert runtime_meta["pair_index_fallback_reason"] == "out_of_range"
+    assert "mention_id_1" in callback_payloads[0]
+    assert "block_key" in callback_payloads[0]

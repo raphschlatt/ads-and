@@ -1081,11 +1081,17 @@ class ExactGraphClusterAccumulator:
         return out
 
     def consume_score_columns(self, score_columns: dict[str, np.ndarray]) -> None:
-        block_keys = np.asarray(score_columns.get("block_key", []), dtype=object)
-        if len(block_keys) == 0:
+        block_idx = (
+            np.asarray(score_columns["block_idx"], dtype=np.int64)
+            if "block_idx" in score_columns
+            else None
+        )
+        block_keys = None if block_idx is not None else np.asarray(score_columns.get("block_key", []), dtype=object)
+        row_count = int(len(block_idx)) if block_idx is not None else int(len(block_keys))
+        if row_count == 0:
             return
-        mention_id_1 = np.asarray(score_columns["mention_id_1"], dtype=object)
-        mention_id_2 = np.asarray(score_columns["mention_id_2"], dtype=object)
+        mention_id_1 = None
+        mention_id_2 = None
         mention_idx_1 = (
             np.asarray(score_columns["mention_idx_1"], dtype=np.int64)
             if "mention_idx_1" in score_columns
@@ -1096,18 +1102,13 @@ class ExactGraphClusterAccumulator:
             if "mention_idx_2" in score_columns
             else None
         )
-        block_idx = (
-            np.asarray(score_columns["block_idx"], dtype=np.int64)
-            if "block_idx" in score_columns
-            else None
-        )
         distances, sanitize_meta = _sanitize_pair_distance_array(score_columns["distance"])
         for key, value in sanitize_meta.items():
             self.sanitize_totals[key] = int(self.sanitize_totals.get(key, 0)) + int(value)
 
-        self.processed_pair_rows += int(len(block_keys))
+        self.processed_pair_rows += int(row_count)
         group_started_at = perf_counter()
-        group_source = block_keys if block_idx is None else block_idx
+        group_source = block_idx if block_idx is not None else block_keys
         group_starts, group_ends = _run_length_segments(group_source)
         self.score_callback_group_seconds += float(perf_counter() - group_started_at)
 
@@ -1125,6 +1126,9 @@ class ExactGraphClusterAccumulator:
                 idx2 = self._resolve_local_indices_for_block(mention_idx_2[start:end], block_idx=current_block_idx)
                 self.numeric_pair_index_rows += int(end - start)
             else:
+                if mention_id_1 is None or mention_id_2 is None:
+                    mention_id_1 = np.asarray(score_columns["mention_id_1"], dtype=object)
+                    mention_id_2 = np.asarray(score_columns["mention_id_2"], dtype=object)
                 mention_index = self._ensure_mention_index()
                 global_idx1 = np.fromiter(
                     (int(mention_index.get(str(value), -1)) for value in mention_id_1[start:end]),
