@@ -1699,6 +1699,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         references_path=request.references_path,
         publications_output_path=result_paths["publications_disambiguated"],
         references_output_path=result_paths["references_disambiguated"],
+        publications_frame=publications,
+        references_frame=references,
         return_runtime_meta=True,
     )
     if isinstance(source_export_result, tuple) and len(source_export_result) == 2:

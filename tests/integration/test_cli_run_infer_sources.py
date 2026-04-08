@@ -651,7 +651,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["sort_parquet_seconds"] >= 0.0
     assert preflight["runtime"]["clustering"]["cpu_workers_effective"] == 4
-    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_reread"
+    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_frame_reuse"
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert stage_metrics["runtime"]["load_inputs"]["deduplicate_seconds"] >= 0.0
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "gpu"

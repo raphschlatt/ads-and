@@ -389,17 +389,16 @@ def _export_source_file_parquet(
     stats = _source_export_stats()
     reread_started_at = perf_counter()
     if source_frame is None:
-        frame = pd.read_parquet(input_path)
+        out = pd.read_parquet(input_path).reset_index(drop=True)
         source_reread_seconds = perf_counter() - reread_started_at
         mirror_mode = "parquet_reread"
     else:
-        frame = source_frame.copy()
+        out = source_frame.reset_index(drop=True).copy()
         source_reread_seconds = 0.0
         mirror_mode = "parquet_frame_reuse"
 
     mirror_started_at = perf_counter()
     assignments_agg = _aggregate_assignments_for_source(assignments, source_type)
-    out = frame.reset_index(drop=True).copy()
     existing_export_columns = [
         column
         for column in ["AuthorUID", "AuthorDisplayName", "mapped_count", "authors_fallback"]
