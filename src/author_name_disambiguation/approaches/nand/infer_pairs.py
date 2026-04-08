@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from pathlib import Path
 from time import perf_counter
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Mapping
 import warnings
 
 import numpy as np
@@ -121,6 +121,11 @@ def _init_encoder_runtime_meta(device: str) -> dict[str, Any]:
         "mention_embedding_bytes": 0,
         "mention_norm_bytes": 0,
         "cuda_oom_fallback_used": False,
+        "requested_batch_size": None,
+        "effective_batch_size": None,
+        "oom_retry_count": 0,
+        "oom_retry_batch_sizes": [],
+        "oom_retry_floor_batch_size": 1024,
     }
 
 
@@ -182,6 +187,17 @@ def _best_effort_clear_cuda_cache(torch) -> None:
             cuda_module.empty_cache()
     except Exception:
         return
+
+
+def _next_cuda_oom_batch_size(current_batch_size: int, *, floor: int) -> int | None:
+    current = int(max(1, current_batch_size))
+    floor_size = int(max(1, floor))
+    if current <= floor_size:
+        return None
+    next_size = max(floor_size, current // 2)
+    if next_size >= current:
+        return None
+    return int(next_size)
 
 
 def _init_numeric_clamp_summary() -> dict[str, int | bool]:
@@ -660,6 +676,7 @@ def encode_mentions_to_memmap(
 ) -> Path | tuple[Path, dict[str, Any]]:
     torch = _require_torch()
     batch_size = max(1, int(batch_size))
+    min_retry_batch_size = 1024
     requested_device = str(device)
     chars = _open_array_view(chars2vec)
     source_emb = _open_array_view(source_text_embeddings)
@@ -670,6 +687,9 @@ def encode_mentions_to_memmap(
     norms_output.parent.mkdir(parents=True, exist_ok=True)
 
     runtime_meta = _init_encoder_runtime_meta(requested_device)
+    runtime_meta["requested_batch_size"] = int(batch_size)
+    runtime_meta["effective_batch_size"] = int(batch_size)
+    runtime_meta["oom_retry_floor_batch_size"] = int(min_retry_batch_size)
 
     if len(chars) == 0:
         _write_empty_npy(output, np.zeros((0, 0), dtype=np.float32))
@@ -685,13 +705,14 @@ def encode_mentions_to_memmap(
     if len(chars) != len(mention_to_source):
         raise ValueError("chars2vec and mention_source_index lengths must match.")
 
-    model, active_device, runtime_meta = _load_encoder_for_inference(
+    model, active_device, encoder_runtime_meta = _load_encoder_for_inference(
         torch=torch,
         checkpoint_path=checkpoint_path,
         requested_device=requested_device,
     )
+    runtime_meta.update(dict(encoder_runtime_meta or {}))
 
-    def _encode(active_device_name: str, active_runtime_meta: dict[str, Any]) -> dict[str, Any]:
+    def _encode(active_device_name: str, active_runtime_meta: dict[str, Any], active_batch_size: int) -> dict[str, Any]:
         effective_precision_mode = _resolve_effective_precision_mode(
             torch=torch,
             precision_mode=precision_mode,
@@ -699,9 +720,10 @@ def encode_mentions_to_memmap(
         )
         active_runtime_meta["resolved_device"] = str(active_device_name)
         active_runtime_meta["effective_precision_mode"] = effective_precision_mode
-        total = (len(chars) + batch_size - 1) // batch_size
+        active_runtime_meta["effective_batch_size"] = int(active_batch_size)
+        total = (len(chars) + int(active_batch_size) - 1) // int(active_batch_size)
         starts = iter_progress(
-            range(0, len(chars), batch_size),
+            range(0, len(chars), int(active_batch_size)),
             total=total,
             label="Encode mentions",
             enabled=show_progress,
@@ -714,7 +736,7 @@ def encode_mentions_to_memmap(
         encode_started_at = perf_counter()
         with torch.no_grad():
             for start in starts:
-                end = min(start + batch_size, len(chars))
+                end = min(start + int(active_batch_size), len(chars))
                 feature_batch = _build_feature_batch(
                     chars2vec=chars,
                     source_text_embeddings=source_emb,
@@ -751,31 +773,44 @@ def encode_mentions_to_memmap(
         norms_mm.flush()
         return active_runtime_meta
 
-    try:
-        runtime_meta = _encode(active_device, runtime_meta)
-    except Exception as exc:
-        can_retry_on_cpu = (
-            str(requested_device).strip().lower() == "auto"
-            and str(active_device).startswith("cuda")
-            and _is_cuda_oom_error(torch, exc)
-        )
-        if not can_retry_on_cpu:
-            raise
-        warnings.warn(
-            "Mention encoding hit CUDA OOM; retrying on CPU for this run.",
-            RuntimeWarning,
-        )
+    active_batch_size = int(batch_size)
+    while True:
         try:
-            model.to("cpu")
-        except Exception:
-            pass
-        _best_effort_clear_cuda_cache(torch)
-        retry_meta = dict(runtime_meta)
-        retry_meta["resolved_device"] = "cpu"
-        retry_meta["fallback_reason"] = "pair_scoring_cuda_oom_retry_cpu"
-        retry_meta["cuda_oom_fallback_used"] = True
-        retry_meta = _encode("cpu", retry_meta)
-        runtime_meta = retry_meta
+            runtime_meta = _encode(active_device, runtime_meta, active_batch_size)
+            break
+        except Exception as exc:
+            can_retry_on_cpu = (
+                str(requested_device).strip().lower() == "auto"
+                and str(active_device).startswith("cuda")
+                and _is_cuda_oom_error(torch, exc)
+            )
+            if not can_retry_on_cpu:
+                raise
+            _best_effort_clear_cuda_cache(torch)
+            next_batch_size = _next_cuda_oom_batch_size(active_batch_size, floor=min_retry_batch_size)
+            if next_batch_size is not None:
+                runtime_meta["oom_retry_count"] = int(runtime_meta.get("oom_retry_count", 0)) + 1
+                runtime_meta.setdefault("oom_retry_batch_sizes", []).append(int(next_batch_size))
+                active_batch_size = int(next_batch_size)
+                runtime_meta["effective_batch_size"] = int(active_batch_size)
+                continue
+            warnings.warn(
+                "Mention encoding hit CUDA OOM; retrying on CPU for this run.",
+                RuntimeWarning,
+            )
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+            _best_effort_clear_cuda_cache(torch)
+            retry_meta = dict(runtime_meta)
+            retry_meta["resolved_device"] = "cpu"
+            retry_meta["fallback_reason"] = "pair_scoring_cuda_oom_retry_cpu"
+            retry_meta["cuda_oom_fallback_used"] = True
+            retry_meta["oom_retry_count"] = int(retry_meta.get("oom_retry_count", 0)) + 1
+            active_device = "cpu"
+            runtime_meta = _encode("cpu", retry_meta, active_batch_size)
+            break
 
     if return_runtime_meta:
         return output, runtime_meta
@@ -1142,6 +1177,7 @@ def score_pairs_with_checkpoint(
     scoring_started_at = perf_counter()
     torch = _require_torch()
     batch_size = max(1, int(batch_size))
+    min_retry_batch_size = 1024
     requested_device = device
     device, runtime_meta = resolve_torch_device(torch, device, runtime_label="Pair scoring")
 
@@ -1166,6 +1202,11 @@ def score_pairs_with_checkpoint(
     runtime_meta["mention_storage_device"] = "cpu"
     runtime_meta["cuda_oom_fallback_used"] = False
     runtime_meta["score_batch_size"] = int(batch_size)
+    runtime_meta["requested_batch_size"] = int(batch_size)
+    runtime_meta["effective_batch_size"] = int(batch_size)
+    runtime_meta["oom_retry_count"] = 0
+    runtime_meta["oom_retry_batch_sizes"] = []
+    runtime_meta["oom_retry_floor_batch_size"] = int(min_retry_batch_size)
     runtime_meta["pairs_total_rows"] = 0
     runtime_meta["pairs_valid_rows"] = 0
     runtime_meta["numeric_clamping"] = _init_numeric_clamp_summary()
@@ -1184,6 +1225,7 @@ def score_pairs_with_checkpoint(
         *,
         mention_embeddings: np.ndarray,
         mention_norms: np.ndarray,
+        active_batch_size: int,
         active_runtime_meta: dict[str, Any],
     ) -> pd.DataFrame:
         score_columns = _build_scored_pair_arrays(
@@ -1210,7 +1252,7 @@ def score_pairs_with_checkpoint(
             mention_ids_by_index=mention_ids_by_index,
             mention_embeddings=mention_embeddings,
             mention_norms=mention_norms,
-            batch_size=batch_size,
+            batch_size=active_batch_size,
             show_progress=show_progress,
             active_runtime_meta=active_runtime_meta,
         )
@@ -1221,7 +1263,12 @@ def score_pairs_with_checkpoint(
         ) + float(perf_counter() - frame_started_at)
         return out
 
-    def _run_scoring(active_device: str, active_runtime_meta: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    def _run_scoring(
+        active_device: str,
+        active_runtime_meta: dict[str, Any],
+        *,
+        active_batch_size: int,
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
         effective_precision_mode = _resolve_effective_precision_mode(
             torch=torch,
             precision_mode=precision_mode,
@@ -1229,12 +1276,13 @@ def score_pairs_with_checkpoint(
         )
         active_runtime_meta["resolved_device"] = str(active_device)
         active_runtime_meta["effective_precision_mode"] = effective_precision_mode
+        active_runtime_meta["effective_batch_size"] = int(active_batch_size)
         encode_started_at = perf_counter()
         mention_embeddings, mention_norms = _encode_mentions(
             torch=torch,
             model=model,
             features=features,
-            batch_size=batch_size,
+            batch_size=active_batch_size,
             device=active_device,
             precision_mode=effective_precision_mode,
             show_progress=show_progress,
@@ -1254,7 +1302,7 @@ def score_pairs_with_checkpoint(
             active_runtime_meta["pair_input_mode"] = "parquet_chunked"
             active_chunk_rows = chunk_rows
             if active_chunk_rows is None:
-                active_chunk_rows = max(10_000, int(batch_size) * 4)
+                active_chunk_rows = max(10_000, int(active_batch_size) * 4)
 
             out_rows: list[pd.DataFrame] = []
             writer = None
@@ -1302,7 +1350,7 @@ def score_pairs_with_checkpoint(
                     mention_embeddings=mention_embeddings,
                     mention_norms=mention_norms,
                     active_runtime_meta=active_runtime_meta,
-                    batch_size=batch_size,
+                    batch_size=active_batch_size,
                     show_progress=show_progress,
                 )
                 if return_scores:
@@ -1354,57 +1402,72 @@ def score_pairs_with_checkpoint(
             pairs,
             mention_embeddings=mention_embeddings,
             mention_norms=mention_norms,
+            active_batch_size=active_batch_size,
             active_runtime_meta=active_runtime_meta,
         )
         if output_path is not None:
             save_parquet(out, output_path, index=False)
         return out, active_runtime_meta
 
-    try:
-        out, runtime_meta = _run_scoring(device, runtime_meta)
-    except Exception as exc:
-        can_retry_on_cpu = (
-            str(requested_device).strip().lower() == "auto"
-            and str(device).startswith("cuda")
-            and _is_cuda_oom_error(torch, exc)
-        )
-        if not can_retry_on_cpu:
-            raise
-        warnings.warn(
-            "Pair scoring hit CUDA OOM; retrying on CPU for this run.",
-            RuntimeWarning,
-        )
+    active_batch_size = int(batch_size)
+    while True:
         try:
-            model.to("cpu")
-        except Exception:
-            pass
-        _best_effort_clear_cuda_cache(torch)
-        retry_runtime_meta = dict(runtime_meta)
-        retry_runtime_meta["resolved_device"] = "cpu"
-        retry_runtime_meta["fallback_reason"] = "pair_scoring_cuda_oom_retry_cpu"
-        retry_runtime_meta["cuda_oom_fallback_used"] = True
-        retry_runtime_meta["mention_encode_seconds"] = 0.0
-        retry_runtime_meta["pair_score_seconds"] = 0.0
-        retry_runtime_meta["parquet_read_seconds"] = 0.0
-        retry_runtime_meta["pandas_conversion_seconds"] = 0.0
-        retry_runtime_meta["arrow_column_extract_seconds"] = 0.0
-        retry_runtime_meta["pair_index_resolve_seconds"] = 0.0
-        retry_runtime_meta["valid_mask_seconds"] = 0.0
-        retry_runtime_meta["score_concat_seconds"] = 0.0
-        retry_runtime_meta["distance_postprocess_seconds"] = 0.0
-        retry_runtime_meta["score_columns_assemble_seconds"] = 0.0
-        retry_runtime_meta["score_callback_seconds"] = 0.0
-        retry_runtime_meta["score_frame_materialization_seconds"] = 0.0
-        retry_runtime_meta["batch_loop_overhead_seconds"] = 0.0
-        retry_runtime_meta["parquet_output_table_seconds"] = 0.0
-        retry_runtime_meta["parquet_write_seconds"] = 0.0
-        retry_runtime_meta["parquet_manifest_write_seconds"] = 0.0
-        retry_runtime_meta["writer_close_seconds"] = 0.0
-        retry_runtime_meta["accounted_wall_seconds"] = 0.0
-        retry_runtime_meta["unaccounted_wall_seconds"] = 0.0
-        retry_runtime_meta["pairs_total_rows"] = 0
-        retry_runtime_meta["pairs_valid_rows"] = 0
-        out, runtime_meta = _run_scoring("cpu", retry_runtime_meta)
+            out, runtime_meta = _run_scoring(device, runtime_meta, active_batch_size=active_batch_size)
+            break
+        except Exception as exc:
+            can_retry_on_cpu = (
+                str(requested_device).strip().lower() == "auto"
+                and str(device).startswith("cuda")
+                and _is_cuda_oom_error(torch, exc)
+            )
+            if not can_retry_on_cpu:
+                raise
+            _best_effort_clear_cuda_cache(torch)
+            next_batch_size = _next_cuda_oom_batch_size(active_batch_size, floor=min_retry_batch_size)
+            if next_batch_size is not None:
+                runtime_meta["oom_retry_count"] = int(runtime_meta.get("oom_retry_count", 0)) + 1
+                runtime_meta.setdefault("oom_retry_batch_sizes", []).append(int(next_batch_size))
+                active_batch_size = int(next_batch_size)
+                runtime_meta["effective_batch_size"] = int(active_batch_size)
+                continue
+            warnings.warn(
+                "Pair scoring hit CUDA OOM; retrying on CPU for this run.",
+                RuntimeWarning,
+            )
+            try:
+                model.to("cpu")
+            except Exception:
+                pass
+            _best_effort_clear_cuda_cache(torch)
+            retry_runtime_meta = dict(runtime_meta)
+            retry_runtime_meta["resolved_device"] = "cpu"
+            retry_runtime_meta["fallback_reason"] = "pair_scoring_cuda_oom_retry_cpu"
+            retry_runtime_meta["cuda_oom_fallback_used"] = True
+            retry_runtime_meta["oom_retry_count"] = int(retry_runtime_meta.get("oom_retry_count", 0)) + 1
+            retry_runtime_meta["mention_encode_seconds"] = 0.0
+            retry_runtime_meta["pair_score_seconds"] = 0.0
+            retry_runtime_meta["parquet_read_seconds"] = 0.0
+            retry_runtime_meta["pandas_conversion_seconds"] = 0.0
+            retry_runtime_meta["arrow_column_extract_seconds"] = 0.0
+            retry_runtime_meta["pair_index_resolve_seconds"] = 0.0
+            retry_runtime_meta["valid_mask_seconds"] = 0.0
+            retry_runtime_meta["score_concat_seconds"] = 0.0
+            retry_runtime_meta["distance_postprocess_seconds"] = 0.0
+            retry_runtime_meta["score_columns_assemble_seconds"] = 0.0
+            retry_runtime_meta["score_callback_seconds"] = 0.0
+            retry_runtime_meta["score_frame_materialization_seconds"] = 0.0
+            retry_runtime_meta["batch_loop_overhead_seconds"] = 0.0
+            retry_runtime_meta["parquet_output_table_seconds"] = 0.0
+            retry_runtime_meta["parquet_write_seconds"] = 0.0
+            retry_runtime_meta["parquet_manifest_write_seconds"] = 0.0
+            retry_runtime_meta["writer_close_seconds"] = 0.0
+            retry_runtime_meta["accounted_wall_seconds"] = 0.0
+            retry_runtime_meta["unaccounted_wall_seconds"] = 0.0
+            retry_runtime_meta["pairs_total_rows"] = 0
+            retry_runtime_meta["pairs_valid_rows"] = 0
+            device = "cpu"
+            out, runtime_meta = _run_scoring("cpu", retry_runtime_meta, active_batch_size=active_batch_size)
+            break
 
     runtime_meta = finalize_pair_scoring_runtime_meta(
         runtime_meta,

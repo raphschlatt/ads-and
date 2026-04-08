@@ -65,3 +65,18 @@ Important distinction:
 
 - the formal active ADS baseline manifest is still the historical promoted baseline in `docs/baselines/infer_ads_active.json`
 - the 2026-04-08 optimization record documents the currently accepted package-side cold-run improvements that were validated against the operational CPU reference but not yet promoted as a new historical ADS baseline manifest
+
+## Current Product Decisions
+
+The current product/runtime stance is intentionally narrower than the full set of experimental paths still present in the codebase.
+
+- `chars2vec` GPU is not a production `infer_sources` path; product inference uses CPU-only `chars2vec`
+- `numba` remains optional and is not part of the standard runtime contract
+- `cuml_gpu` remains special/explicit and is not the standard `auto` clustering path
+- the historical ADS baseline manifest remains unchanged; the faster 2026-04-08 package state is documented operationally rather than promoted here as a new historical provenance anchor
+
+That split is deliberate:
+
+- provenance stays stable and historically readable
+- the operational package can still improve and document accepted runtime policy changes
+- special hardware paths remain available without redefining the standard install/runtime expectations for all users

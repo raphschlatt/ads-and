@@ -6,6 +6,7 @@ from importlib.util import find_spec
 from author_name_disambiguation.approaches.nand.cluster import (
     _apply_constraints,
     _name_conflict,
+    _resolve_cluster_backend,
     ExactGraphClusterAccumulator,
     cluster_blockwise_dbscan,
     resolve_dbscan_eps,
@@ -386,6 +387,22 @@ def test_exact_graph_accumulator_string_fallback_matches_numeric_fast_path():
         numeric_out.sort_values(["block_key", "mention_id"]).reset_index(drop=True),
         string_out.sort_values(["block_key", "mention_id"]).reset_index(drop=True),
     )
+
+
+def test_exact_graph_accumulator_defaults_to_python_union_impl():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+        ]
+    )
+
+    accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+    )
+
+    assert accumulator.union_impl == "python"
 
 
 def test_exact_graph_accumulator_lazy_union_keeps_edge_free_blocks_as_singletons():
@@ -878,6 +895,14 @@ def test_cluster_backend_auto_prefers_cpu_for_small_workloads(monkeypatch):
     assert meta["cluster_backend_effective"] == "sklearn_cpu"
     assert meta["cluster_backend_reason"] == "auto_small_workload_cpu"
     assert seen["gpu_called"] is False
+
+
+def test_resolve_cluster_backend_auto_is_cpu_only_even_when_cuml_is_available(monkeypatch):
+    meta = _resolve_cluster_backend("auto", "precomputed")
+
+    assert meta["requested"] == "auto"
+    assert meta["effective"] == "sklearn_cpu"
+    assert meta["reason"] == "auto_cpu_default"
 
 
 def test_cluster_backend_gpu_failure_falls_back_to_cpu(monkeypatch):

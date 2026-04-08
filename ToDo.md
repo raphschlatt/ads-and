@@ -1,10 +1,16 @@
 # ToDo
 
-Note: `runtime.pair_inference.wall_seconds` is now the authoritative pair-stage total. The 2026-04-08 ADS Exact-Graph callback and `finalize()` waves stayed output-identical to the current CPU reference. The 2026-04-08 Arrow fast-path wave then removed the remaining large pair-input bottleneck and reduced `pair_inference.wall_seconds` further to about `192.7s`, with `pair_scoring.arrow_column_extract_seconds` effectively eliminated (`~81.3s -> ~0.03s`). A follow-up 2026-04-08 SPECTER auto-batch trial on the A6000 was rejected: SPECTER itself improved only slightly, the full ADS run got slower overall, and output drifted (`27` changed mentions across `9` blocks) relative to the current CPU reference. The reverted baseline therefore remains the Arrow fast-path state. A final 2026-04-08 export frame-reuse wave was kept: the full validation run stayed output-identical to the CPU reference, a real export-only A/B on ADS data reduced export wall time from `35.8s` to `25.1s`, and the run artifact was pruned back to `json-only`.
+Note: `runtime.pair_inference.wall_seconds` is now the authoritative pair-stage total. The 2026-04-08 ADS optimization session kept the current CPU reference output stable while reducing cold-run time materially, culminating in the Arrow fast-path state plus the kept export frame-reuse improvement. The 2026-04-08 hardware-adaptive runtime hardening wave then fixed the product stance and default runtime policy around that faster path.
 
-- Freeze the current cold-run package reference in documentation and treat new performance work as opt-in only when a genuinely new lever with plausible `>=20s` gain is identified first.
-- Decide whether to promote a new formal ADS baseline manifest for the current package state or to keep `bench_full_v22_fix2` only as a historical regression anchor while the current cold-run package state stays documented as an optimization record.
-- Decide whether to install and benchmark optional `numba` bulk-union support in the repo `.venv`; correctness is already preserved without it, but the current validated callback run still used `union_impl = "python"`.
-- Keep `chars2vec` GPU as an experiment only until the CPU/GPU block-level drift is understood well enough for a real quality gate.
-- Decide whether the historical `srcd52...` LSPO/train baseline should be reconstructed or formally retired as historical-only.
-- Decide whether `cuml_gpu` gets a separate supported environment/workflow instead of sharing the standard repo `.venv`.
+Closed decisions now reflected in docs/code:
+
+- `chars2vec` GPU is out as a product path for `infer_sources`; product inference uses CPU-only `chars2vec`
+- `numba` remains optional and is not prioritized or auto-selected
+- `cuml_gpu` remains optional/special and is not the standard `auto` path
+- the historical ADS baseline manifest stays in place; the faster 2026-04-08 package state is documented operationally instead of being promoted here as a new historical baseline
+
+Remaining work is now mostly product/ops, not performance chasing:
+
+- Run and retain one explicit real CPU-only acceptance smoke for the hardware-adaptive auto policy, so the docs are backed by a non-mocked end-to-end artifact as well.
+- Decide whether the historical `srcd52...` LSPO/train baseline should be formally retired as historical-only or reconstructed on purpose.
+- If `cuml_gpu` is ever supported beyond experimental use, define it as a separate documented environment/workflow instead of broadening the standard repo `.venv`.

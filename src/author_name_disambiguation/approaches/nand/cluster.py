@@ -515,19 +515,11 @@ def _resolve_cluster_backend(backend: str, metric: str) -> dict[str, Any]:
             "metric": metric_clean,
         }
 
-    # auto
-    if metric_clean == "precomputed" and available:
-        return {
-            "requested": requested,
-            "effective": "cuml_gpu",
-            "reason": "auto_gpu",
-            "cuml_available": True,
-            "metric": metric_clean,
-        }
+    # auto: keep the standard product path CPU-only and require explicit opt-in for cuML.
     return {
         "requested": requested,
         "effective": "sklearn_cpu",
-        "reason": reason or f"auto_cpu_metric_{metric_clean}",
+        "reason": "auto_cpu_default",
         "cuml_available": bool(available),
         "metric": metric_clean,
     }
@@ -750,7 +742,7 @@ else:  # pragma: no cover - exercised only when numba is unavailable
 
 def _resolve_exact_graph_union_impl(requested: str | None) -> str:
     if requested is None:
-        return "numba" if _bulk_union_find_numba is not None else "python"
+        return "python"
     normalized = str(requested).strip().lower()
     if normalized not in {"python", "numba"}:
         raise ValueError(f"Invalid union_impl={requested!r}; expected one of python/numba.")

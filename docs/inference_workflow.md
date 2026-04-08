@@ -86,6 +86,21 @@ This mode is paid, requires endpoint-write permission on the token, and is inten
 
 Rejected HF alternatives are recorded once in [hf_endpoint_t4_decision_20260401.md](/home/ubuntu/Author_Name_Disambiguation/docs/experiments/hf_endpoint_t4_decision_20260401.md).
 
+## Product Runtime Policy
+
+The current product stance for `run-infer-sources` is:
+
+- `chars2vec` is CPU-only in product inference
+- `cluster_backend=auto` resolves to `sklearn_cpu`
+- `cuml_gpu` is explicit opt-in only
+- `numba` remains optional and is not auto-selected
+
+These are deliberate product choices, not temporary accidents:
+
+- `chars2vec` GPU was removed as the production path after repeated ADS tests showed it was not the reliable default
+- `cuml_gpu` is kept as a special workflow because RAPIDS/cuML should not make the standard repo runtime more fragile
+- `numba` stays available for future explicit benchmarking, but correctness and the default runtime do not depend on it
+
 ## Optional Controls
 
 - `--infer-stage smoke|mini|mid|full`
@@ -96,10 +111,69 @@ Rejected HF alternatives are recorded once in [hf_endpoint_t4_decision_20260401.
 - `--uid-scope dataset|local|registry`
 - `--uid-namespace <name>`
 
+`cluster_backend=auto` is intentionally conservative and CPU-only. Use `--cluster-backend cuml_gpu` only when you are intentionally running a separate cuML-capable environment.
+
+## Hardware-Adaptive Defaults
+
+`run-infer-sources` now resolves an internal runtime policy before expensive work starts. That policy is written into:
+
+- `00_context.json`
+- `02_preflight_infer.json`
+- `05_stage_metrics_infer_sources.json`
+
+The recorded blocks are:
+
+- `host_profile`
+- `resolved_runtime_policy`
+- `safety_fallbacks`
+
+The goal is simple: choose the fastest safe supported path automatically, avoid avoidable OOMs, and explain every fallback in artifacts/logs.
+
+### Current Auto Rules
+
+- `chars2vec`
+  - always CPU in product inference
+  - default batch `128`
+  - reduced to `64` below `12 GiB` available RAM
+  - reduced to `32` below `6 GiB` available RAM
+- `SPECTER`
+  - on CUDA: keep the accepted GPU path and existing auto-batch heuristic
+  - on CPU: use `cpu_auto`, which prefers ONNX and falls back to transformers if ONNX is unavailable
+  - BF16 is only used when CUDA BF16 support is actually present; otherwise the run falls back to FP32
+  - on CUDA OOM, batch size is halved repeatedly down to `16` before CPU fallback
+- pair encoding and pair scoring
+  - keep the accepted Arrow / Exact-Graph / export fast paths
+  - on CUDA OOM, batch size is halved repeatedly down to `1024` before CPU fallback
+  - on CPU, auto score batch is clamped if its estimated peak exceeds `10%` of available RAM
+- clustering
+  - `auto` resolves to `sklearn_cpu`
+  - `cuml_gpu` remains explicit opt-in only
+- Exact-Graph union implementation
+  - default is `python`
+  - `numba` is not auto-selected even if installed
+
+### Fail-Fast Boundaries
+
+The package falls back automatically when a supported safer path exists. It fails early only when a run is physically or contractually impossible.
+
+Early hard failures are expected for:
+
+- physically insufficient scratch space for exact out-of-core inference
+- required artifacts or runtime components with no supported fallback
+- explicit backend requests that cannot be honored and have no supported fallback
+
+Automatic fallback is expected for:
+
+- `device=auto` when CUDA is unavailable
+- TensorFlow GPU unavailability
+- ONNX CPU unavailability
+- `cuml_gpu` unavailability under `cluster_backend=auto`
+
 ## GPU Notes
 
 - `--device auto` may fall back to CPU if PyTorch cannot use CUDA in the current venv/session.
 - The fallback is reported in `00_context.json`, `02_preflight_infer.json`, and `05_stage_metrics_infer_sources.json`.
+- TensorFlow GPU visibility is diagnostic only for product inference; `chars2vec` itself runs on CPU.
 - TensorFlow logging a visible GPU does not prove that SPECTER is on GPU; SPECTER and pair scoring use PyTorch.
 - The canonical GPU environment for this repo is `/home/ubuntu/Author_Name_Disambiguation/.venv`.
 - Bootstrap that repo venv with `uv pip` instead of creating a second conda env or patching CUDA packages ad hoc:
@@ -132,7 +206,7 @@ python scripts/ops/gpu_env_doctor.py --json
 ```
 
 - Do not trust TensorFlow-only GPU logs as proof of SPECTER acceleration.
-- If `gpu_env_doctor.py` reports `tensorflow_expected_cu12_but_detected_cu13_stack`, `chars2vec` will run on CPU even while PyTorch still uses CUDA.
+- If `gpu_env_doctor.py` reports `tensorflow_expected_cu12_but_detected_cu13_stack`, product inference can still proceed because `chars2vec` is CPU-only and SPECTER/pair scoring use PyTorch.
 - `requirements-gpu-cu126.txt` is the repo-managed `cu126/cu12` overlay for:
   - `torch 2.10.x + cu126`
   - TensorFlow `2.20` GPU vendor wheels on `cu12`
@@ -177,6 +251,7 @@ Important distinction:
 - `srcb2...` is the currently available and reproducible LSPO comparison state
 - the latest accepted cold-run package optimization session is documented in `docs/experiments/infer_cold_path_wave_20260408.md`
 - that experiment record is not the same thing as a formal ADS baseline promotion
+- in other words: `docs/baselines/infer_ads_active.json` remains the historical ADS baseline pointer, while the 2026-04-08 package state is the documented operational fast path
 
 Default integrity checks now validate the operational LSPO reference:
 

@@ -98,6 +98,75 @@ def _write_bundle(tmp_path: Path) -> Path:
 def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) -> dict[str, object]:
     seen: dict[str, object] = {}
 
+    def _policy(
+        *,
+        requested_device,
+        runtime_mode_requested,
+        specter_runtime_backend_requested,
+        cluster_backend_requested,
+        score_batch_size,
+        scratch_dir,
+        bootstrap_runtime=None,
+    ):
+        bootstrap = dict(bootstrap_runtime or {})
+        runtime_mode_effective = (
+            str(runtime_mode_requested).strip().lower()
+            if runtime_mode_requested is not None
+            else ("gpu" if str(bootstrap.get("resolved_device") or "").startswith("cuda") else "cpu")
+        )
+        if runtime_mode_effective == "hf":
+            specter_backend = "hf_endpoint"
+            effective_device = "cpu"
+        elif runtime_mode_effective == "cpu":
+            specter_backend = str(specter_runtime_backend_requested or "cpu_auto")
+            effective_device = "cpu"
+        else:
+            specter_backend = "transformers"
+            effective_device = "cuda"
+        cluster_requested = str(cluster_backend_requested or "sklearn_cpu")
+        cluster_effective = "sklearn_cpu" if cluster_requested == "auto" else cluster_requested
+        return {
+            "host_profile": {
+                "requested_device": str(requested_device),
+                "available_ram_bytes": 32 * 1024**3,
+                "scratch_dir": str(scratch_dir),
+                "scratch_free_bytes": 100 * 1024**3,
+                "cpu": {"cpu_limit": 8, "cpu_limit_source": "test"},
+                "torch": {
+                    "torch_version": bootstrap.get("torch_version"),
+                    "torch_cuda_version": bootstrap.get("torch_cuda_version"),
+                    "torch_cuda_available": bootstrap.get("torch_cuda_available"),
+                    "resolved_device": bootstrap.get("resolved_device"),
+                    "gpu_name": bootstrap.get("gpu_name"),
+                    "gpu_total_memory_bytes": 80 * 1024**3 if str(bootstrap.get("resolved_device") or "").startswith("cuda") else None,
+                    "fallback_reason": bootstrap.get("fallback_reason"),
+                    "cuda_probe_error": bootstrap.get("cuda_probe_error"),
+                },
+                "tensorflow_runtime": {"status": "cpu_fallback", "reason": "forced_cpu"},
+                "onnx_cpu_backend": {"available": True, "reason": None},
+                "cuml_gpu_backend": {"available": False, "reason": "missing"},
+            },
+            "resolved_runtime_policy": {
+                "runtime_mode_requested": runtime_mode_requested,
+                "runtime_mode_effective": runtime_mode_effective,
+                "requested_device": str(requested_device),
+                "effective_request_device": effective_device,
+                "specter_runtime_backend_requested": specter_runtime_backend_requested,
+                "specter_runtime_backend_effective": specter_backend,
+                "chars2vec_force_cpu": True,
+                "chars2vec_batch_size": 128,
+                "score_batch_size_requested": int(score_batch_size),
+                "score_batch_size_effective": int(score_batch_size),
+                "cluster_backend_requested": cluster_requested,
+                "cluster_backend_effective": cluster_effective,
+                "exact_graph_union_impl": "python",
+                "numba_auto_enabled": False,
+                "onnx_cpu_available": True,
+                "cuml_gpu_available": False,
+            },
+            "safety_fallbacks": [],
+        }
+
     def _chars(mentions, output_path, force_recompute=False, **_kwargs):
         seen["chars_kwargs"] = dict(_kwargs)
         path = Path(output_path)
@@ -534,6 +603,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
     monkeypatch.setattr("author_name_disambiguation.source_inference.encode_mentions_to_memmap", _encode_mentions)
     monkeypatch.setattr("author_name_disambiguation.source_inference.score_pairs_from_mention_embeddings", _score_from_embeddings)
     monkeypatch.setattr("author_name_disambiguation.source_inference.ExactGraphClusterAccumulator", _FakeExactGraphClusterAccumulator)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.resolve_infer_runtime_policy", _policy)
     return seen
 
 
@@ -599,6 +669,14 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert refs_df.loc[0, "AuthorUID"][1].startswith("my_ads_2026::blk.r.1")
     assert "author_display_name" in entities.columns
     assert set(assignments["assignment_kind"].unique()) == {"canonical"}
+    assert context["host_profile"]["cpu"]["cpu_limit"] == 8
+    assert context["resolved_runtime_policy"]["chars2vec_batch_size"] == 128
+    assert context["resolved_runtime_policy"]["exact_graph_union_impl"] == "python"
+    assert [item["component"] for item in context["safety_fallbacks"]] == [
+        "specter",
+        "mention_encoding",
+        "pair_scoring",
+    ]
     assert context["runtime"]["load_inputs"]["read_publications_seconds"] >= 0.0
     assert context["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert context["runtime"]["chars2vec"]["runtime_backend"] == "tensorflow-cpu"
@@ -609,6 +687,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert context["runtime"]["pair_building"]["cpu_workers_effective"] == 4
     assert context["runtime"]["clustering"]["cpu_workers_effective"] == 4
     assert preflight["runtime"]["chars2vec"]["tensorflow_cleanup_attempted"] is True
+    assert preflight["host_profile"]["torch"]["resolved_device"] == "cuda:0"
+    assert preflight["resolved_runtime_policy"]["runtime_mode_effective"] == "gpu"
     assert preflight["runtime"]["load_inputs"]["explode_mentions_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["exact_graph_accumulator_init_seconds"] >= 0.0
@@ -652,6 +732,13 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_building"]["sort_parquet_seconds"] >= 0.0
     assert preflight["runtime"]["clustering"]["cpu_workers_effective"] == 4
     assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_frame_reuse"
+    assert stage_metrics["host_profile"]["torch"]["gpu_name"] == "NVIDIA A100 80GB PCIe"
+    assert stage_metrics["resolved_runtime_policy"]["cluster_backend_effective"] == "sklearn_cpu"
+    assert [item["component"] for item in stage_metrics["safety_fallbacks"]] == [
+        "specter",
+        "mention_encoding",
+        "pair_scoring",
+    ]
     assert stage_metrics["runtime"]["chars2vec"]["generation_mode"] == "chars2vec"
     assert stage_metrics["runtime"]["load_inputs"]["deduplicate_seconds"] >= 0.0
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "gpu"
@@ -726,9 +813,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "START Bootstrap" in captured.err
     assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err
     assert "START Load inputs" in captured.err
+    assert "policy runtime_mode=gpu | specter_backend=transformers | device=cuda | chars2vec_batch_size=128 | score_batch_size=8,192 | cluster_backend=sklearn_cpu | union_impl=python" in captured.err
     assert "START Preflight" in captured.err
     assert "START Name embeddings" in captured.err
-    assert "backend=chars2vec/tensorflow-cpu | mode=predict | batch_size=auto" in captured.err
+    assert "backend=chars2vec/tensorflow-cpu | mode=predict | batch_size=128" in captured.err
     assert "DONE 5 names embedded in " in captured.err
     assert "backend=chars2vec/tensorflow-cpu" in captured.err
     assert "START Text embeddings" in captured.err
@@ -761,7 +849,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert payload_stdout["run_id"] == payload["run_id"]
     assert seen["specter_input_rows"] == 3
     assert seen["chars_kwargs"]["execution_mode"] == "predict"
-    assert seen["chars_kwargs"]["batch_size"] is None
+    assert seen["chars_kwargs"]["batch_size"] == 128
     assert seen["chars_kwargs"]["force_cpu"] is True
     assert seen["specter_kwargs"]["reuse_model"] is False
     assert seen["pair_kwargs"]["num_workers"] is None

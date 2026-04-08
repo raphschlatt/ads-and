@@ -289,6 +289,55 @@ class _RecordToModel(_IdentityModel):
         return self
 
 
+class _EncodeBackoffTensor:
+    def __init__(self, arr):
+        self.arr = np.asarray(arr, dtype=np.float32)
+        self.device_label = "cpu"
+
+    @property
+    def shape(self):
+        return self.arr.shape
+
+    def to(self, device):
+        self.device_label = str(device)
+        return self
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.arr
+
+
+class _FakeTorchEncodeBackoff:
+    def __init__(self):
+        self.cuda = _FakeCuda(available=True)
+
+    def from_numpy(self, arr):
+        return _EncodeBackoffTensor(arr)
+
+    def no_grad(self):
+        return _NoGrad()
+
+
+class _EncodeBackoffModel(_IdentityModel):
+    def __init__(self, max_cuda_batch_size: int):
+        self.max_cuda_batch_size = int(max_cuda_batch_size)
+        self.to_calls: list[str] = []
+
+    def to(self, device):
+        self.to_calls.append(str(device))
+        return self
+
+    def __call__(self, x):
+        if str(getattr(x, "device_label", "cpu")).startswith("cuda") and int(x.shape[0]) > self.max_cuda_batch_size:
+            raise RuntimeError("CUDA out of memory during mention encoding")
+        return x
+
+
 def test_score_pairs_clamps_numeric_boundary_values(monkeypatch):
     monkeypatch.setattr(infer_pairs, "_require_torch", lambda: _FakeTorchScore())
     monkeypatch.setattr(
@@ -362,6 +411,65 @@ def test_encode_mentions_cuda_path_materializes_batches_on_cpu_without_torch_cat
 
     np.testing.assert_allclose(emb, features)
     np.testing.assert_allclose(norms, np.linalg.norm(features, axis=1).astype(np.float32))
+
+
+def test_encode_mentions_to_memmap_auto_halves_batch_before_cpu_fallback(tmp_path, monkeypatch):
+    model = _EncodeBackoffModel(max_cuda_batch_size=512)
+    monkeypatch.setattr(infer_pairs, "_require_torch", lambda: _FakeTorchEncodeBackoff())
+    monkeypatch.setattr(
+        infer_pairs,
+        "_load_encoder_for_inference",
+        lambda **_kwargs: (
+            model,
+            "cuda",
+            {
+                "requested_device": "auto",
+                "resolved_device": "cuda",
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": "12.1",
+                "torch_cuda_available": True,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+                "effective_precision_mode": None,
+            },
+        ),
+    )
+    monkeypatch.setattr(infer_pairs, "_best_effort_clear_cuda_cache", lambda _torch: None)
+
+    rows = 1500
+    chars = np.ones((rows, 50), dtype=np.float32)
+    text = np.ones((rows, 1), dtype=np.float32)
+    mention_index = np.arange(rows, dtype=np.int64)
+
+    output_path = tmp_path / "mention_embeddings.npy"
+    norms_path = tmp_path / "mention_norms.npy"
+
+    with pytest.warns(RuntimeWarning, match="retrying on CPU"):
+        out_path, runtime_meta = infer_pairs.encode_mentions_to_memmap(
+            chars2vec=chars,
+            source_text_embeddings=text,
+            mention_source_index=mention_index,
+            checkpoint_path="checkpoint.pt",
+            output_path=output_path,
+            norms_output_path=norms_path,
+            batch_size=8192,
+            device="auto",
+            return_runtime_meta=True,
+            show_progress=False,
+        )
+
+    assert out_path == output_path
+    assert output_path.exists()
+    assert norms_path.exists()
+    assert runtime_meta["resolved_device"] == "cpu"
+    assert runtime_meta["fallback_reason"] == "pair_scoring_cuda_oom_retry_cpu"
+    assert runtime_meta["cuda_oom_fallback_used"] is True
+    assert runtime_meta["requested_batch_size"] == 8192
+    assert runtime_meta["effective_batch_size"] == 1024
+    assert runtime_meta["oom_retry_count"] == 4
+    assert runtime_meta["oom_retry_batch_sizes"] == [4096, 2048, 1024]
+    assert model.to_calls == ["cpu"]
 
 
 def test_score_pairs_matches_reference_cosine_from_preencoded_mentions(monkeypatch):
@@ -560,6 +668,10 @@ def test_score_pairs_auto_retries_on_cpu_after_cuda_oom_during_mention_encoding(
     assert runtime_meta["resolved_device"] == "cpu"
     assert runtime_meta["fallback_reason"] == "pair_scoring_cuda_oom_retry_cpu"
     assert runtime_meta["cuda_oom_fallback_used"] is True
+    assert runtime_meta["requested_batch_size"] == 8192
+    assert runtime_meta["effective_batch_size"] == 1024
+    assert runtime_meta["oom_retry_batch_sizes"] == [4096, 2048, 1024]
+    assert runtime_meta["oom_retry_count"] == 4
 
 
 def test_score_pairs_explicit_cuda_oom_during_mention_encoding_still_raises(monkeypatch):

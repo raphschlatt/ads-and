@@ -43,6 +43,7 @@ from author_name_disambiguation.common.pipeline_reports import (
     load_json,
     write_json,
 )
+from author_name_disambiguation.common.runtime_policy import resolve_infer_runtime_policy
 from author_name_disambiguation.common.run_report import evaluate_go_no_go, write_go_no_go_report
 from author_name_disambiguation.common.subset_builder import build_stage_subset
 from author_name_disambiguation.common.tensorflow_runtime import (
@@ -624,6 +625,35 @@ def _format_worker_request(value: object) -> str:
     return "auto" if value is None else str(value)
 
 
+def _append_safety_fallback(
+    target: list[dict[str, Any]],
+    *,
+    component: str,
+    reason: str,
+    action: str,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "component": str(component),
+        "reason": str(reason),
+        "action": str(action),
+    }
+    if details:
+        payload["details"] = dict(details)
+    if payload not in target:
+        target.append(payload)
+
+
+def _format_safety_fallbacks(fallbacks: list[Mapping[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in fallbacks:
+        component = str(item.get("component") or "runtime")
+        reason = str(item.get("reason") or "unknown")
+        action = str(item.get("action") or "fallback")
+        parts.append(f"{component}:{reason}->{action}")
+    return " | ".join(parts)
+
+
 def _probe_bootstrap_runtime(requested_device: str) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "requested_device": str(requested_device or "auto"),
@@ -844,35 +874,40 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     specter_batch_size_override = infer_overrides.get("specter_batch_size")
     specter_batch_size = None if specter_batch_size_override is None else int(specter_batch_size_override)
     specter_precision_mode = str(infer_overrides.get("specter_precision_mode", "auto")).strip().lower()
-    legacy_specter_runtime_backend = (
-        str(request.specter_runtime_backend).strip().lower()
-        if getattr(request, "specter_runtime_backend", None) is not None
-        else str(infer_overrides.get("specter_runtime_backend", "transformers")).strip().lower()
-    )
-    runtime_mode = runtime_mode_requested
-    effective_request_device = _requested_device_for_runtime_mode(
-        runtime_mode=runtime_mode,
-        requested_device=str(request.device),
-    )
-    if runtime_mode == "gpu":
-        if getattr(request, "specter_runtime_backend", None) == "onnx_fp32":
-            raise ValueError("runtime_mode='gpu' is incompatible with specter_runtime_backend='onnx_fp32'.")
-        specter_runtime_backend = "transformers"
-    elif runtime_mode == "hf":
-        if getattr(request, "specter_runtime_backend", None) is not None:
-            raise ValueError("runtime_mode='hf' does not accept specter_runtime_backend overrides.")
-        specter_runtime_backend = "hf_endpoint"
-    elif runtime_mode == "cpu":
-        specter_runtime_backend = (
-            legacy_specter_runtime_backend if getattr(request, "specter_runtime_backend", None) is not None else "cpu_auto"
-        )
+    if getattr(request, "specter_runtime_backend", None) is not None:
+        legacy_specter_runtime_backend = str(request.specter_runtime_backend).strip().lower()
+    elif "specter_runtime_backend" in infer_overrides and infer_overrides.get("specter_runtime_backend") is not None:
+        legacy_specter_runtime_backend = str(infer_overrides.get("specter_runtime_backend")).strip().lower()
     else:
-        specter_runtime_backend = legacy_specter_runtime_backend
-        runtime_mode = _infer_runtime_mode(
-            runtime_mode=runtime_mode,
-            specter_runtime_backend=specter_runtime_backend,
-            requested_device=effective_request_device,
-        )
+        legacy_specter_runtime_backend = None
+    cluster_backend = (
+        str(infer_overrides.get("cluster_backend", "sklearn_cpu"))
+        if request.cluster_backend is None
+        else str(request.cluster_backend)
+    )
+    runtime_policy = resolve_infer_runtime_policy(
+        requested_device=str(request.device),
+        runtime_mode_requested=runtime_mode_requested,
+        specter_runtime_backend_requested=legacy_specter_runtime_backend,
+        cluster_backend_requested=cluster_backend,
+        score_batch_size=score_batch_size,
+        scratch_dir=scratch_dir,
+        bootstrap_runtime=bootstrap_runtime,
+    )
+    host_profile = dict(runtime_policy.get("host_profile", {}) or {})
+    resolved_runtime_policy = dict(runtime_policy.get("resolved_runtime_policy", {}) or {})
+    safety_fallbacks: list[dict[str, Any]] = [dict(item) for item in runtime_policy.get("safety_fallbacks", []) or []]
+    runtime_mode = str(resolved_runtime_policy.get("runtime_mode_effective") or runtime_mode_requested or "cpu")
+    effective_request_device = str(
+        resolved_runtime_policy.get("effective_request_device")
+        or _requested_device_for_runtime_mode(runtime_mode=runtime_mode, requested_device=str(request.device))
+    )
+    specter_runtime_backend = str(
+        resolved_runtime_policy.get("specter_runtime_backend_effective") or legacy_specter_runtime_backend or "transformers"
+    )
+    score_batch_size = int(resolved_runtime_policy.get("score_batch_size_effective") or score_batch_size)
+    chars_batch_size = int(resolved_runtime_policy.get("chars2vec_batch_size") or 128)
+    cluster_backend_policy_effective = str(resolved_runtime_policy.get("cluster_backend_effective") or cluster_backend)
     score_chunk_rows = int(infer_overrides.get("score_chunk_rows", 200_000))
     pair_chunk_rows = int(infer_overrides.get("pair_chunk_rows", 200_000))
     cpu_workers = normalize_workers_request(infer_overrides.get("cpu_workers"))
@@ -880,11 +915,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     cpu_min_pairs_per_worker = int(infer_overrides.get("cpu_min_pairs_per_worker", 1_000_000))
     cpu_target_ram_fraction = float(infer_overrides.get("cpu_target_ram_fraction", 0.6))
     cpu_ram_budget_bytes = compute_ram_budget_bytes(target_fraction=cpu_target_ram_fraction)
-    cluster_backend = (
-        str(infer_overrides.get("cluster_backend", "sklearn_cpu"))
-        if request.cluster_backend is None
-        else str(request.cluster_backend)
-    )
     max_ram_fraction = 0.80
     context_path = output_root / "00_context.json"
     input_summary_path = output_root / "01_input_summary.json"
@@ -922,6 +952,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "generation_mode": None,
         "precision_mode": str(request.precision_mode),
         "cluster_backend": str(cluster_backend),
+        "host_profile": host_profile,
+        "resolved_runtime_policy": resolved_runtime_policy,
+        "safety_fallbacks": safety_fallbacks,
         "storage_mode": "out_of_core_exact",
         "cpu_runtime_policy": {
             "cpu_workers": _format_worker_request(cpu_workers),
@@ -931,6 +964,16 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "cpu_ram_budget_bytes": None if cpu_ram_budget_bytes is None else int(cpu_ram_budget_bytes),
         },
     }
+    _stage_info(
+        f"policy runtime_mode={runtime_mode} | specter_backend={specter_runtime_backend} | "
+        f"device={effective_request_device} | chars2vec_batch_size={_format_count(chars_batch_size)} | "
+        f"score_batch_size={_format_count(score_batch_size)} | "
+        f"cluster_backend={cluster_backend}"
+        + (f" -> {cluster_backend_policy_effective}" if cluster_backend_policy_effective != cluster_backend else "")
+        + " | union_impl=python"
+    )
+    if safety_fallbacks:
+        _stage_info(f"policy_fallbacks={_format_safety_fallbacks(safety_fallbacks)}")
     write_json(context_payload, context_path)
 
     prepared = prepare_ads_source_data(
@@ -1021,6 +1064,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     preflight["run_id"] = run_id
     preflight["run_stage"] = "infer_sources"
     preflight["infer_stage"] = infer_stage
+    preflight["host_profile"] = host_profile
+    preflight["resolved_runtime_policy"] = resolved_runtime_policy
+    preflight["safety_fallbacks"] = safety_fallbacks
     preflight["precomputed_embeddings"] = precomputed_embeddings
     write_json(preflight, preflight_path)
     consistency_paths.append(
@@ -1061,11 +1107,10 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     chars_path = dirs["embeddings"] / "chars2vec_cpu.npy"
     chars_cache_requested = chars_path.exists() and not bool(request.force)
     chars_execution_mode = "predict"
-    chars_batch_size = None
     _stage_info(
         f"cache={'reuse-if-valid' if chars_cache_requested else 'miss'} | "
         f"backend=chars2vec/{'tensorflow-cpu' if chars_force_cpu else 'tensorflow-auto'} | mode={chars_execution_mode} | "
-        f"batch_size={'auto' if chars_batch_size is None else _format_count(chars_batch_size)}"
+        f"batch_size={_format_count(chars_batch_size)}"
     )
     with activate_progress_reporter(reporter):
         chars_result = get_or_create_chars2vec_embeddings(
@@ -1163,6 +1208,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
                 "ONNX CPU SPECTER unavailable; falling back to transformers "
                 f"({type(exc).__name__}: {exc})"
             )
+            _append_safety_fallback(
+                safety_fallbacks,
+                component="specter",
+                reason="cpu_auto_onnx_fallback",
+                action="transformers_cpu_fallback",
+                details={"error": f"{type(exc).__name__}: {exc}"},
+            )
             text_result = _run_text_embeddings("transformers", transformers_text_path)
             text_path = transformers_text_path
             resolved_specter_runtime_backend = "transformers"
@@ -1186,10 +1238,19 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         text_runtime_meta.get("runtime_backend") or resolved_specter_runtime_backend
     )
     text_runtime_meta = _compact_specter_runtime_meta(text_runtime_meta)
+    if text_runtime_meta.get("fallback_reason"):
+        _append_safety_fallback(
+            safety_fallbacks,
+            component="specter",
+            reason=str(text_runtime_meta.get("fallback_reason")),
+            action="runtime_fallback",
+            details={"resolved_device": text_runtime_meta.get("resolved_device")},
+        )
     context_payload["runtime_mode"] = runtime_mode
     context_payload["runtime_backend"] = text_runtime_meta.get("runtime_backend")
     context_payload["resolved_device"] = text_runtime_meta.get("resolved_device")
     context_payload["generation_mode"] = text_runtime_meta.get("generation_mode")
+    context_payload["safety_fallbacks"] = safety_fallbacks
     write_json(context_payload, context_path)
     if not isinstance(text_source_embeddings, np.ndarray):
         text_source_embeddings = np.load(text_path, mmap_mode="r")
@@ -1223,6 +1284,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "chars2vec": dict(chars_meta),
         "specter": text_runtime_meta,
     }
+    preflight["safety_fallbacks"] = safety_fallbacks
     write_json(preflight, preflight_path)
     _best_effort_release_runtime_memory()
 
@@ -1422,6 +1484,30 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_score_runtime_meta,
         wall_seconds=pair_scoring_elapsed,
     )
+    if mention_encode_runtime_meta.get("fallback_reason") or mention_encode_runtime_meta.get("cuda_oom_fallback_used"):
+        _append_safety_fallback(
+            safety_fallbacks,
+            component="mention_encoding",
+            reason=str(mention_encode_runtime_meta.get("fallback_reason") or "cuda_oom_backoff"),
+            action="runtime_fallback",
+            details={
+                "resolved_device": mention_encode_runtime_meta.get("resolved_device"),
+                "effective_batch_size": mention_encode_runtime_meta.get("effective_batch_size"),
+                "oom_retry_count": mention_encode_runtime_meta.get("oom_retry_count"),
+            },
+        )
+    if pair_score_runtime_meta.get("fallback_reason") or pair_score_runtime_meta.get("cuda_oom_fallback_used"):
+        _append_safety_fallback(
+            safety_fallbacks,
+            component="pair_scoring",
+            reason=str(pair_score_runtime_meta.get("fallback_reason") or "cuda_oom_backoff"),
+            action="runtime_fallback",
+            details={
+                "resolved_device": pair_score_runtime_meta.get("resolved_device"),
+                "effective_batch_size": pair_score_runtime_meta.get("effective_batch_size"),
+                "oom_retry_count": pair_score_runtime_meta.get("oom_retry_count"),
+            },
+        )
     pair_scoring_core_elapsed = max(0.0, pair_scoring_elapsed - pair_scoring_runtime_meta_update_elapsed)
     pair_inference_runtime_meta = {
         "exact_graph_accumulator_init_seconds": float(exact_graph_accumulator_init_elapsed),
@@ -1466,6 +1552,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "mention_encoding": mention_encode_runtime_meta,
         "pair_scoring": pair_score_runtime_meta,
     }
+    preflight["safety_fallbacks"] = safety_fallbacks
     pair_preflight_write_started_at = perf_counter()
     write_json(preflight, preflight_path)
     pair_after_preflight_write_at = perf_counter()
@@ -1558,7 +1645,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     clustering_started_at = perf_counter()
     _stage_start("clustering")
     _stage_info(
-        f"backend={cluster_backend} | cpu_workers={_format_worker_request(cpu_workers)} | "
+        f"backend={cluster_backend}"
+        + (f" -> {cluster_backend_policy_effective}" if cluster_backend_policy_effective != cluster_backend else "")
+        + f" | cpu_workers={_format_worker_request(cpu_workers)} | "
         f"sharding={cpu_sharding_mode} | ram_budget={_format_ram_budget(cpu_ram_budget_bytes)}"
     )
     clustering_progress_emit_elapsed = 0.0
@@ -1620,6 +1709,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "pair_scoring": pair_score_runtime_meta,
         "clustering": cluster_runtime_meta,
     }
+    preflight["safety_fallbacks"] = safety_fallbacks
     clustering_preflight_write_started_at = perf_counter()
     write_json(preflight, preflight_path)
     clustering_preflight_write_elapsed = float(perf_counter() - clustering_preflight_write_started_at)
@@ -1722,6 +1812,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "clustering": cluster_runtime_meta,
         "export": export_runtime_meta,
     }
+    preflight["safety_fallbacks"] = safety_fallbacks
     write_json(preflight, preflight_path)
 
     cluster_qc = build_cluster_qc(
@@ -1756,6 +1847,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "clustering": cluster_runtime_meta,
             "export": export_runtime_meta,
         },
+        "host_profile": host_profile,
+        "resolved_runtime_policy": resolved_runtime_policy,
+        "safety_fallbacks": safety_fallbacks,
         "precomputed_embeddings": precomputed_embeddings,
         "uid_resolution": uid_mode_meta,
     }
@@ -1772,6 +1866,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "export": export_runtime_meta,
     }
     context_payload["precomputed_embeddings"] = precomputed_embeddings
+    context_payload["safety_fallbacks"] = safety_fallbacks
     write_json(context_payload, context_path)
     consistency_paths.append(
         _write_consistency(
@@ -1838,6 +1933,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         exact_infeasible_reason=preflight.get("exact_infeasible_reason"),
     )
     stage_metrics["embedding_contract"] = dict(model_info.get("embedding_contract", {}) or {})
+    stage_metrics["host_profile"] = host_profile
+    stage_metrics["resolved_runtime_policy"] = resolved_runtime_policy
+    stage_metrics["safety_fallbacks"] = safety_fallbacks
     _stage_info(f"writing {result_paths['stage_metrics'].name}")
     write_json(stage_metrics, result_paths["stage_metrics"])
     consistency_paths.append(
