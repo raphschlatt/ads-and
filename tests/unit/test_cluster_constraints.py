@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from importlib.util import find_spec
 
 from author_name_disambiguation.approaches.nand.cluster import (
     _apply_constraints,
@@ -319,6 +320,136 @@ def test_exact_graph_accumulator_uses_numeric_pair_helpers_and_reports_connected
     assert meta["connected_components_seconds_total"] >= 0.0
     assert meta["mapping_seconds_total"] >= 0.0
     assert meta["constraint_apply_seconds_total"] >= 0.0
+    assert meta["exact_graph_init_tokenize_seconds"] >= 0.0
+    assert meta["exact_graph_init_block_index_seconds"] >= 0.0
+    assert meta["exact_graph_init_state_seconds"] >= 0.0
+    assert meta["score_callback_group_seconds"] >= 0.0
+    assert meta["score_callback_index_seconds"] >= 0.0
+    assert meta["score_callback_constraint_seconds"] >= 0.0
+    assert meta["score_callback_union_seconds"] >= 0.0
+    assert meta["union_impl"] in {"python", "numba"}
+
+
+def test_exact_graph_accumulator_string_fallback_matches_numeric_fast_path():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "a3", "block_key": "blk.a", "author_raw": "A, A", "year": 2002},
+            {"mention_id": "b1", "block_key": "blk.b", "author_raw": "B, B", "year": 2003},
+            {"mention_id": "b2", "block_key": "blk.b", "author_raw": "B, B", "year": 2004},
+        ]
+    )
+    numeric_accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+    )
+    string_accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+    )
+
+    score_columns = {
+        "mention_id_1": np.asarray(["missing-a", "missing-a", "missing-b"], dtype=object),
+        "mention_id_2": np.asarray(["missing-b", "missing-c", "missing-c"], dtype=object),
+        "mention_idx_1": np.asarray([0, 0, 1], dtype=np.int64),
+        "mention_idx_2": np.asarray([1, 2, 2], dtype=np.int64),
+        "block_key": np.asarray(["blk.a", "blk.a", "blk.a"], dtype=object),
+        "block_idx": np.asarray([0, 0, 0], dtype=np.int64),
+        "distance": np.asarray([0.05, 0.05, 0.05], dtype=np.float32),
+    }
+    numeric_accumulator.consume_score_columns(score_columns)
+    string_accumulator.consume_score_columns(
+        {
+            "mention_id_1": np.asarray(["a1", "a1", "a2"], dtype=object),
+            "mention_id_2": np.asarray(["a2", "a3", "a3"], dtype=object),
+            "block_key": np.asarray(["blk.a", "blk.a", "blk.a"], dtype=object),
+            "distance": np.asarray([0.05, 0.05, 0.05], dtype=np.float32),
+        }
+    )
+
+    numeric_out, _ = numeric_accumulator.finalize()
+    string_out, _ = string_accumulator.finalize()
+
+    pd.testing.assert_frame_equal(
+        numeric_out.sort_values(["block_key", "mention_id"]).reset_index(drop=True),
+        string_out.sort_values(["block_key", "mention_id"]).reset_index(drop=True),
+    )
+
+
+def test_exact_graph_accumulator_lazy_union_keeps_edge_free_blocks_as_singletons():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "a3", "block_key": "blk.a", "author_raw": "A, A", "year": 2002},
+        ]
+    )
+    accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+    )
+
+    accumulator.consume_score_columns(
+        {
+            "mention_id_1": np.asarray(["a1", "a1", "a2"], dtype=object),
+            "mention_id_2": np.asarray(["a2", "a3", "a3"], dtype=object),
+            "mention_idx_1": np.asarray([0, 0, 1], dtype=np.int64),
+            "mention_idx_2": np.asarray([1, 2, 2], dtype=np.int64),
+            "block_key": np.asarray(["blk.a", "blk.a", "blk.a"], dtype=object),
+            "block_idx": np.asarray([0, 0, 0], dtype=np.int64),
+            "distance": np.asarray([0.8, 0.9, 0.7], dtype=np.float32),
+        }
+    )
+
+    out, meta = accumulator.finalize()
+
+    assert list(out.sort_values("mention_id")["author_uid"]) == ["blk.a::0", "blk.a::1", "blk.a::2"]
+    assert meta["connected_components_seconds_total"] >= 0.0
+
+
+@pytest.mark.skipif(find_spec("numba") is None, reason="numba not installed")
+def test_exact_graph_numba_union_matches_python_fallback():
+    mentions = pd.DataFrame(
+        [
+            {"mention_id": "a1", "block_key": "blk.a", "author_raw": "A, A", "year": 2000},
+            {"mention_id": "a2", "block_key": "blk.a", "author_raw": "A, A", "year": 2001},
+            {"mention_id": "a3", "block_key": "blk.a", "author_raw": "A, A", "year": 2002},
+            {"mention_id": "a4", "block_key": "blk.a", "author_raw": "A, A", "year": 2003},
+        ]
+    )
+    score_columns = {
+        "mention_id_1": np.asarray(["a1", "a2", "a3"], dtype=object),
+        "mention_id_2": np.asarray(["a2", "a3", "a4"], dtype=object),
+        "mention_idx_1": np.asarray([0, 1, 2], dtype=np.int64),
+        "mention_idx_2": np.asarray([1, 2, 3], dtype=np.int64),
+        "block_key": np.asarray(["blk.a", "blk.a", "blk.a"], dtype=object),
+        "block_idx": np.asarray([0, 0, 0], dtype=np.int64),
+        "distance": np.asarray([0.05, 0.05, 0.05], dtype=np.float32),
+    }
+    python_accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+        union_impl="python",
+    )
+    numba_accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+        union_impl="numba",
+    )
+
+    python_accumulator.consume_score_columns(score_columns)
+    numba_accumulator.consume_score_columns(score_columns)
+
+    python_out, python_meta = python_accumulator.finalize()
+    numba_out, numba_meta = numba_accumulator.finalize()
+
+    pd.testing.assert_frame_equal(
+        python_out.sort_values(["block_key", "mention_id"]).reset_index(drop=True),
+        numba_out.sort_values(["block_key", "mention_id"]).reset_index(drop=True),
+    )
+    assert python_meta["union_impl"] == "python"
+    assert numba_meta["union_impl"] == "numba"
 
 
 def test_cluster_eps_block_policy_applies_buckets_and_clamp(monkeypatch):

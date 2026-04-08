@@ -437,12 +437,31 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             self._mentions = mentions
             self._backend_requested = backend_requested
             self._pair_rows = 0
+            self._init_meta = {
+                "exact_graph_init_tokenize_seconds": 0.01,
+                "exact_graph_init_block_index_seconds": 0.02,
+                "exact_graph_init_state_seconds": 0.03,
+                "union_impl": "python",
+            }
+            self._callback_meta = {
+                "score_callback_group_seconds": 0.004,
+                "score_callback_index_seconds": 0.005,
+                "score_callback_constraint_seconds": 0.006,
+                "score_callback_union_seconds": 0.007,
+                "union_impl": "python",
+            }
 
         def consume_score_columns(self, score_columns):
             self._pair_rows += int(len(score_columns.get("block_key", [])))
             seen["cluster_pair_scores_rows"] = int(seen.get("cluster_pair_scores_rows", 0)) + int(
                 len(score_columns.get("block_key", []))
             )
+
+        def get_init_runtime_meta(self):
+            return dict(self._init_meta)
+
+        def get_callback_runtime_meta(self):
+            return dict(self._callback_meta)
 
         def finalize(self):
             out = self._mentions[["mention_id", "block_key"]].copy()
@@ -483,6 +502,14 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                     "asymmetry_pairs": 0,
                     "diag_reset_count": 0,
                 },
+                "exact_graph_init_tokenize_seconds": 0.01,
+                "exact_graph_init_block_index_seconds": 0.02,
+                "exact_graph_init_state_seconds": 0.03,
+                "score_callback_group_seconds": 0.004,
+                "score_callback_index_seconds": 0.005,
+                "score_callback_constraint_seconds": 0.006,
+                "score_callback_union_seconds": 0.007,
+                "union_impl": "python",
             }
             return out, meta
 
@@ -572,6 +599,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["load_inputs"]["explode_mentions_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["exact_graph_accumulator_init_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["exact_graph_init_tokenize_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["exact_graph_init_block_index_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_inference"]["exact_graph_init_state_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pair_stage_setup_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pair_build_wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_inference"]["pair_sort_seconds"] >= 0.0
@@ -593,6 +623,10 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_scoring"]["unaccounted_wall_seconds"] >= -0.05
     assert preflight["runtime"]["pair_scoring"]["pair_index_resolve_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["score_callback_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_group_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_index_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_constraint_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_union_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["batch_loop_overhead_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
     assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
@@ -618,13 +652,28 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["pair_inference"]["wall_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_inference"]["accounted_wall_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_inference"]["unaccounted_wall_seconds"] >= -0.05
+    assert stage_metrics["runtime"]["pair_inference"]["exact_graph_init_tokenize_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_inference"]["exact_graph_init_block_index_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_inference"]["exact_graph_init_state_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_scoring"]["accounted_wall_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_scoring"]["unaccounted_wall_seconds"] >= -0.05
+    assert stage_metrics["runtime"]["pair_scoring"]["score_callback_group_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["score_callback_index_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["score_callback_constraint_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["score_callback_union_seconds"] >= 0.0
     assert stage_metrics["runtime"]["mention_encoding"]["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["clustering"]["block_count_by_bucket"]
     assert stage_metrics["runtime"]["clustering"]["total_seconds_by_bucket"]
     assert stage_metrics["runtime"]["clustering"]["dbscan_seconds_by_bucket"]
+    assert stage_metrics["runtime"]["clustering"]["exact_graph_init_tokenize_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["exact_graph_init_block_index_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["exact_graph_init_state_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["score_callback_group_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["score_callback_index_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["score_callback_constraint_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["score_callback_union_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["union_impl"] == "python"
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] >= 0.0
     assert stage_metrics["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0

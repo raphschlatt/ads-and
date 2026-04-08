@@ -53,6 +53,9 @@ dev = [
   "pytest>=8.0",
 ]
 bench = []
+perf = [
+  "numba>=0.60",
+]
 cpu_onnx = [
   "onnx>=1.16",
   "onnxruntime>=1.18",

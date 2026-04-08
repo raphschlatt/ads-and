@@ -1259,6 +1259,11 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         if use_exact_graph_clustering
         else None
     )
+    exact_graph_init_runtime_meta = (
+        dict(cluster_accumulator.get_init_runtime_meta())
+        if cluster_accumulator is not None and hasattr(cluster_accumulator, "get_init_runtime_meta")
+        else {}
+    )
     exact_graph_accumulator_init_elapsed = (
         float(perf_counter() - exact_graph_accumulator_init_started_at) if use_exact_graph_clustering else 0.0
     )
@@ -1409,6 +1414,8 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         pair_score_runtime_meta["manifest_path"] = str(pair_scores_manifest_path)
         pair_scoring_runtime_meta_update_elapsed = float(perf_counter() - pair_scoring_runtime_meta_update_started_at)
     pair_scoring_elapsed = float(perf_counter() - pair_scoring_started_at)
+    if cluster_accumulator is not None and hasattr(cluster_accumulator, "get_callback_runtime_meta"):
+        pair_score_runtime_meta.update(cluster_accumulator.get_callback_runtime_meta())
     pair_score_runtime_meta = finalize_pair_scoring_runtime_meta(
         pair_score_runtime_meta,
         wall_seconds=pair_scoring_elapsed,
@@ -1416,6 +1423,12 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     pair_scoring_core_elapsed = max(0.0, pair_scoring_elapsed - pair_scoring_runtime_meta_update_elapsed)
     pair_inference_runtime_meta = {
         "exact_graph_accumulator_init_seconds": float(exact_graph_accumulator_init_elapsed),
+        "exact_graph_init_tokenize_seconds": float(exact_graph_init_runtime_meta.get("exact_graph_init_tokenize_seconds") or 0.0),
+        "exact_graph_init_block_index_seconds": float(
+            exact_graph_init_runtime_meta.get("exact_graph_init_block_index_seconds") or 0.0
+        ),
+        "exact_graph_init_state_seconds": float(exact_graph_init_runtime_meta.get("exact_graph_init_state_seconds") or 0.0),
+        "union_impl": exact_graph_init_runtime_meta.get("union_impl"),
         "pair_stage_setup_seconds": float(pair_stage_setup_elapsed),
         "pair_build_wall_seconds": float(pair_build_elapsed),
         "pair_sort_seconds": float(pair_sort_elapsed),
