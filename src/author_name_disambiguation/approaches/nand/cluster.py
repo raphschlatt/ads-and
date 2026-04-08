@@ -11,6 +11,8 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components as sparse_connected_components
 from sklearn.cluster import DBSCAN
 
 from author_name_disambiguation.common.cli_ui import iter_progress, loop_progress
@@ -53,6 +55,8 @@ _BLOCK_SIZE_HIST_BUCKETS = [
     ("65+", 65, None),
 ]
 _LAST_CUML_TIMINGS = {"gpu_transfer_seconds": 0.0, "dbscan_seconds": 0.0}
+_EXACT_GRAPH_SPARSE_MIN_BLOCK_SIZE = 9
+_EXACT_GRAPH_SPARSE_MIN_EDGE_COUNT = 9
 
 
 def _ascii_fold(text: str) -> str:
@@ -770,6 +774,49 @@ def _run_length_segments(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return starts, ends
 
 
+def _dedupe_undirected_local_edges(left: np.ndarray, right: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if len(left) == 0:
+        empty = np.asarray([], dtype=np.int32)
+        return empty, empty
+    pairs = np.empty(int(len(left)), dtype=[("left", np.int32), ("right", np.int32)])
+    pairs["left"] = np.asarray(left, dtype=np.int32, copy=False)
+    pairs["right"] = np.asarray(right, dtype=np.int32, copy=False)
+    unique_pairs = np.unique(pairs)
+    return (
+        np.asarray(unique_pairs["left"], dtype=np.int32, copy=False),
+        np.asarray(unique_pairs["right"], dtype=np.int32, copy=False),
+    )
+
+
+def _solve_component_ids_with_union_find(
+    n_local: int,
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    impl: str,
+) -> np.ndarray:
+    labels = np.arange(int(n_local), dtype=np.int64)
+    if int(n_local) <= 0 or len(left) == 0:
+        return labels
+    uf = _UnionFind(int(n_local))
+    uf.union_many(np.asarray(left, dtype=np.int64), np.asarray(right, dtype=np.int64), impl=impl)
+    for local_idx in range(int(n_local)):
+        labels[local_idx] = np.int64(uf.find(int(local_idx)))
+    return labels
+
+
+def _solve_component_ids_with_sparse_graph(n_local: int, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    labels = np.arange(int(n_local), dtype=np.int64)
+    if int(n_local) <= 0 or len(left) == 0:
+        return labels
+    row = np.concatenate((np.asarray(left, dtype=np.int32), np.asarray(right, dtype=np.int32)))
+    col = np.concatenate((np.asarray(right, dtype=np.int32), np.asarray(left, dtype=np.int32)))
+    data = np.ones(len(row), dtype=np.int8)
+    graph = coo_matrix((data, (row, col)), shape=(int(n_local), int(n_local))).tocsr()
+    _, sparse_labels = sparse_connected_components(graph, directed=False, return_labels=True)
+    return np.asarray(sparse_labels, dtype=np.int64)
+
+
 def _build_block_bucket_counts_from_sizes(block_sizes: np.ndarray) -> dict[str, int]:
     counts: dict[str, int] = {}
     for size in np.asarray(block_sizes, dtype=np.int64).tolist():
@@ -875,12 +922,19 @@ class ExactGraphClusterAccumulator:
         self.score_callback_index_seconds = 0.0
         self.score_callback_constraint_seconds = 0.0
         self.score_callback_union_seconds = 0.0
+        self.score_callback_edge_buffer_seconds = 0.0
+        self.score_callback_edge_rows = 0
         self.processed_pair_rows = 0
         self.numeric_pair_index_rows = 0
         self.string_pair_index_rows = 0
         self.exact_graph_init_tokenize_seconds = 0.0
         self.exact_graph_init_block_index_seconds = 0.0
         self.exact_graph_init_state_seconds = 0.0
+        self.finalize_component_solve_seconds = 0.0
+        self.finalize_sparse_components_seconds = 0.0
+        self.finalize_union_fallback_seconds = 0.0
+        self.accepted_edges_total = 0
+        self.accepted_edges_deduped_total = 0
 
         mentions_reset = mentions.reset_index(drop=True)
         self._n_mentions = int(len(mentions_reset))
@@ -941,8 +995,9 @@ class ExactGraphClusterAccumulator:
         self._block_key_to_idx = {
             str(block_key): idx for idx, block_key in enumerate(self._block_keys_by_idx.tolist())
         }
-        self._ufs_by_block_idx: list[_UnionFind | None] = [None] * int(len(self._block_starts))
         self._mention_index: dict[str, int] | None = None
+        self._edge_left_chunks_by_block: list[list[np.ndarray] | None] = [None] * int(len(self._block_starts))
+        self._edge_right_chunks_by_block: list[list[np.ndarray] | None] = [None] * int(len(self._block_starts))
 
         self._effective_eps_by_block = np.empty(int(len(self._block_starts)), dtype=np.float32)
         self._eps_bucket_by_block = np.empty(int(len(self._block_starts)), dtype=object)
@@ -982,6 +1037,8 @@ class ExactGraphClusterAccumulator:
             "score_callback_index_seconds": float(self.score_callback_index_seconds),
             "score_callback_constraint_seconds": float(self.score_callback_constraint_seconds),
             "score_callback_union_seconds": float(self.score_callback_union_seconds),
+            "score_callback_edge_buffer_seconds": float(self.score_callback_edge_buffer_seconds),
+            "score_callback_edge_rows": int(self.score_callback_edge_rows),
             "union_impl": str(self.union_impl),
         }
 
@@ -1100,27 +1157,74 @@ class ExactGraphClusterAccumulator:
             self.constraint_seconds_total += float(constraint_elapsed)
             self.score_callback_constraint_seconds += float(constraint_elapsed)
 
-            union_started_at = perf_counter()
             edge_mask = effective <= float(self._effective_eps_by_block[current_block_idx])
             if bool(edge_mask.any()):
-                uf = self._ufs_by_block_idx[current_block_idx]
-                if uf is None:
-                    uf = _UnionFind(int(self._block_sizes[current_block_idx]))
-                    self._ufs_by_block_idx[current_block_idx] = uf
-                uf.union_many(idx1_valid[edge_mask], idx2_valid[edge_mask], impl=self.union_impl)
-            union_elapsed = float(perf_counter() - union_started_at)
-            self.union_seconds_total += float(union_elapsed)
-            self.score_callback_union_seconds += float(union_elapsed)
+                edge_buffer_started_at = perf_counter()
+                left = np.asarray(idx1_valid[edge_mask], dtype=np.int32)
+                right = np.asarray(idx2_valid[edge_mask], dtype=np.int32)
+                left_norm = np.minimum(left, right)
+                right_norm = np.maximum(left, right)
+                non_self = left_norm != right_norm
+                if bool(non_self.any()):
+                    left_edges = np.asarray(left_norm[non_self], dtype=np.int32, copy=False)
+                    right_edges = np.asarray(right_norm[non_self], dtype=np.int32, copy=False)
+                    left_chunks = self._edge_left_chunks_by_block[current_block_idx]
+                    right_chunks = self._edge_right_chunks_by_block[current_block_idx]
+                    if left_chunks is None or right_chunks is None:
+                        left_chunks = []
+                        right_chunks = []
+                        self._edge_left_chunks_by_block[current_block_idx] = left_chunks
+                        self._edge_right_chunks_by_block[current_block_idx] = right_chunks
+                    left_chunks.append(left_edges)
+                    right_chunks.append(right_edges)
+                    accepted = int(len(left_edges))
+                    self.accepted_edges_total += int(accepted)
+                    self.score_callback_edge_rows += int(accepted)
+                edge_buffer_elapsed = float(perf_counter() - edge_buffer_started_at)
+                self.score_callback_edge_buffer_seconds += float(edge_buffer_elapsed)
 
     def finalize(self) -> tuple[pd.DataFrame, dict[str, Any]]:
         author_uids = np.empty(int(self._n_mentions), dtype=object)
+        sparse_blocks = 0
+        union_fallback_blocks = 0
         for block_idx, (start, end) in enumerate(zip(self._block_starts.tolist(), self._block_ends.tolist())):
             block_key = str(self._block_keys_by_idx[block_idx])
             root_to_label: dict[int, int] = {}
             next_label = 0
-            uf = self._ufs_by_block_idx[block_idx]
-            for local_idx in range(int(end - start)):
-                root = int(local_idx) if uf is None else int(uf.find(int(local_idx)))
+            n_local = int(end - start)
+            component_ids = np.arange(n_local, dtype=np.int64)
+            left_chunks = self._edge_left_chunks_by_block[block_idx]
+            right_chunks = self._edge_right_chunks_by_block[block_idx]
+            if left_chunks is not None and right_chunks is not None and len(left_chunks) > 0:
+                left = np.concatenate(left_chunks).astype(np.int32, copy=False)
+                right = np.concatenate(right_chunks).astype(np.int32, copy=False)
+                left, right = _dedupe_undirected_local_edges(left, right)
+                self.accepted_edges_deduped_total += int(len(left))
+                solve_started_at = perf_counter()
+                use_sparse_solver = bool(
+                    n_local >= _EXACT_GRAPH_SPARSE_MIN_BLOCK_SIZE
+                    and len(left) >= _EXACT_GRAPH_SPARSE_MIN_EDGE_COUNT
+                )
+                if use_sparse_solver:
+                    component_ids = _solve_component_ids_with_sparse_graph(n_local, left, right)
+                    sparse_blocks += 1
+                else:
+                    component_ids = _solve_component_ids_with_union_find(
+                        n_local,
+                        left,
+                        right,
+                        impl=self.union_impl,
+                    )
+                    union_fallback_blocks += 1
+                solve_elapsed = float(perf_counter() - solve_started_at)
+                self.finalize_component_solve_seconds += float(solve_elapsed)
+                self.union_seconds_total += float(solve_elapsed)
+                if use_sparse_solver:
+                    self.finalize_sparse_components_seconds += float(solve_elapsed)
+                else:
+                    self.finalize_union_fallback_seconds += float(solve_elapsed)
+            for local_idx in range(n_local):
+                root = int(component_ids[local_idx])
                 if root not in root_to_label:
                     root_to_label[root] = int(next_label)
                     next_label += 1
@@ -1141,12 +1245,21 @@ class ExactGraphClusterAccumulator:
         block_size_histogram = {
             str(key): int(value) for key, value in sorted(block_count_by_bucket.items())
         }
+        if sparse_blocks > 0 and union_fallback_blocks > 0:
+            component_solver_impl = "hybrid_sparse_python"
+        elif sparse_blocks > 0:
+            component_solver_impl = "sparse"
+        elif union_fallback_blocks > 0:
+            component_solver_impl = "python_union"
+        else:
+            component_solver_impl = "singleton_only"
         meta = {
             "cluster_backend_requested": self.backend_requested,
             "cluster_backend_effective": "connected_components_cpu",
             "cluster_backend_reason": "exact_min_samples_1_graph",
             "cluster_strategy": "connected_components_exact",
             "union_impl": str(self.union_impl),
+            "component_solver_impl": str(component_solver_impl),
             "eps_base": float(self.eps),
             "eps_block_policy_enabled": bool(self.eps_block_policy.get("enabled", False)),
             "eps_block_policy_summary": self.eps_block_policy_summary,
@@ -1172,6 +1285,9 @@ class ExactGraphClusterAccumulator:
             "sanitize_seconds_total": 0.0,
             "dbscan_seconds_total": 0.0,
             "connected_components_seconds_total": float(self.union_seconds_total),
+            "finalize_component_solve_seconds": float(self.finalize_component_solve_seconds),
+            "finalize_sparse_components_seconds": float(self.finalize_sparse_components_seconds),
+            "finalize_union_fallback_seconds": float(self.finalize_union_fallback_seconds),
             "gpu_transfer_seconds_total": 0.0,
             "top_slow_blocks": [],
             "sanitize_totals": dict(self.sanitize_totals),
@@ -1180,6 +1296,8 @@ class ExactGraphClusterAccumulator:
             "mapping_seconds_total": float(self.mapping_seconds_total),
             "numeric_pair_index_rows": int(self.numeric_pair_index_rows),
             "string_pair_index_rows": int(self.string_pair_index_rows),
+            "accepted_edges_total": int(self.accepted_edges_total),
+            "accepted_edges_deduped_total": int(self.accepted_edges_deduped_total),
             "exact_graph_init_tokenize_seconds": float(self.exact_graph_init_tokenize_seconds),
             "exact_graph_init_block_index_seconds": float(self.exact_graph_init_block_index_seconds),
             "exact_graph_init_state_seconds": float(self.exact_graph_init_state_seconds),
@@ -1187,6 +1305,8 @@ class ExactGraphClusterAccumulator:
             "score_callback_index_seconds": float(self.score_callback_index_seconds),
             "score_callback_constraint_seconds": float(self.score_callback_constraint_seconds),
             "score_callback_union_seconds": float(self.score_callback_union_seconds),
+            "score_callback_edge_buffer_seconds": float(self.score_callback_edge_buffer_seconds),
+            "score_callback_edge_rows": int(self.score_callback_edge_rows),
         }
         return out, meta
 

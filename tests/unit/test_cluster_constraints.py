@@ -327,6 +327,14 @@ def test_exact_graph_accumulator_uses_numeric_pair_helpers_and_reports_connected
     assert meta["score_callback_index_seconds"] >= 0.0
     assert meta["score_callback_constraint_seconds"] >= 0.0
     assert meta["score_callback_union_seconds"] >= 0.0
+    assert meta["score_callback_edge_buffer_seconds"] >= 0.0
+    assert meta["score_callback_edge_rows"] >= 0
+    assert meta["finalize_component_solve_seconds"] >= 0.0
+    assert meta["finalize_sparse_components_seconds"] >= 0.0
+    assert meta["finalize_union_fallback_seconds"] >= 0.0
+    assert meta["accepted_edges_total"] >= 0
+    assert meta["accepted_edges_deduped_total"] >= 0
+    assert meta["component_solver_impl"] in {"singleton_only", "python_union", "sparse", "hybrid_sparse_python"}
     assert meta["union_impl"] in {"python", "numba"}
 
 
@@ -406,6 +414,64 @@ def test_exact_graph_accumulator_lazy_union_keeps_edge_free_blocks_as_singletons
 
     assert list(out.sort_values("mention_id")["author_uid"]) == ["blk.a::0", "blk.a::1", "blk.a::2"]
     assert meta["connected_components_seconds_total"] >= 0.0
+    assert meta["accepted_edges_total"] == 0
+    assert meta["accepted_edges_deduped_total"] == 0
+    assert meta["component_solver_impl"] == "singleton_only"
+
+
+def test_exact_graph_accumulator_sparse_solver_matches_python_fallback_and_preserves_stable_labels():
+    rows = []
+    for idx in range(12):
+        rows.append(
+            {
+                "mention_id": f"a{idx}",
+                "block_key": "blk.a",
+                "author_raw": "A, A",
+                "year": 2000 + idx,
+            }
+        )
+    mentions = pd.DataFrame(rows)
+    accumulator = ExactGraphClusterAccumulator(
+        mentions=mentions,
+        cluster_config={"eps": 0.2, "min_samples": 1, "metric": "precomputed", "constraints": {"enabled": False}},
+    )
+
+    left = np.asarray([0, 1, 2, 3, 4, 8, 9, 10, 0, 1, 2], dtype=np.int64)
+    right = np.asarray([1, 2, 3, 4, 5, 9, 10, 11, 1, 2, 5], dtype=np.int64)
+    accumulator.consume_score_columns(
+        {
+            "mention_id_1": np.asarray([f"a{i}" for i in left], dtype=object),
+            "mention_id_2": np.asarray([f"a{i}" for i in right], dtype=object),
+            "mention_idx_1": left,
+            "mention_idx_2": right,
+            "block_key": np.asarray(["blk.a"] * len(left), dtype=object),
+            "block_idx": np.asarray([0] * len(left), dtype=np.int64),
+            "distance": np.asarray([0.05] * len(left), dtype=np.float32),
+        }
+    )
+
+    out, meta = accumulator.finalize()
+    labels_by_mention = dict(zip(out["mention_id"].tolist(), out["author_uid"].tolist()))
+
+    assert labels_by_mention == {
+        "a0": "blk.a::0",
+        "a1": "blk.a::0",
+        "a2": "blk.a::0",
+        "a3": "blk.a::0",
+        "a4": "blk.a::0",
+        "a5": "blk.a::0",
+        "a6": "blk.a::1",
+        "a7": "blk.a::2",
+        "a8": "blk.a::3",
+        "a9": "blk.a::3",
+        "a10": "blk.a::3",
+        "a11": "blk.a::3",
+    }
+    assert meta["component_solver_impl"] == "sparse"
+    assert meta["accepted_edges_total"] == len(left)
+    assert meta["accepted_edges_deduped_total"] == 9
+    assert meta["finalize_sparse_components_seconds"] >= 0.0
+    assert meta["finalize_union_fallback_seconds"] == 0.0
 
 
 @pytest.mark.skipif(find_spec("numba") is None, reason="numba not installed")

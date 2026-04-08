@@ -447,7 +447,9 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "score_callback_group_seconds": 0.004,
                 "score_callback_index_seconds": 0.005,
                 "score_callback_constraint_seconds": 0.006,
-                "score_callback_union_seconds": 0.007,
+                "score_callback_union_seconds": 0.0,
+                "score_callback_edge_buffer_seconds": 0.007,
+                "score_callback_edge_rows": 3,
                 "union_impl": "python",
             }
 
@@ -508,7 +510,15 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "score_callback_group_seconds": 0.004,
                 "score_callback_index_seconds": 0.005,
                 "score_callback_constraint_seconds": 0.006,
-                "score_callback_union_seconds": 0.007,
+                "score_callback_union_seconds": 0.0,
+                "score_callback_edge_buffer_seconds": 0.007,
+                "score_callback_edge_rows": 3,
+                "finalize_component_solve_seconds": 0.008,
+                "finalize_sparse_components_seconds": 0.008,
+                "finalize_union_fallback_seconds": 0.0,
+                "accepted_edges_total": 3,
+                "accepted_edges_deduped_total": 2,
+                "component_solver_impl": "sparse",
                 "union_impl": "python",
             }
             return out, meta
@@ -627,6 +637,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_scoring"]["score_callback_index_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["score_callback_constraint_seconds"] >= 0.0
     assert preflight["runtime"]["pair_scoring"]["score_callback_union_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_edge_buffer_seconds"] >= 0.0
+    assert preflight["runtime"]["pair_scoring"]["score_callback_edge_rows"] >= 0
     assert preflight["runtime"]["pair_scoring"]["batch_loop_overhead_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["cpu_sharding_enabled"] is True
     assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
@@ -661,6 +673,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["pair_scoring"]["score_callback_index_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_scoring"]["score_callback_constraint_seconds"] >= 0.0
     assert stage_metrics["runtime"]["pair_scoring"]["score_callback_union_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["score_callback_edge_buffer_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["pair_scoring"]["score_callback_edge_rows"] >= 0
     assert stage_metrics["runtime"]["mention_encoding"]["storage_mode"] == "out_of_core_exact"
     assert stage_metrics["runtime"]["clustering"]["block_size_histogram"]
     assert stage_metrics["runtime"]["clustering"]["block_count_by_bucket"]
@@ -673,6 +687,19 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["clustering"]["score_callback_index_seconds"] >= 0.0
     assert stage_metrics["runtime"]["clustering"]["score_callback_constraint_seconds"] >= 0.0
     assert stage_metrics["runtime"]["clustering"]["score_callback_union_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["score_callback_edge_buffer_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["score_callback_edge_rows"] >= 0
+    assert stage_metrics["runtime"]["clustering"]["finalize_component_solve_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["finalize_sparse_components_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["finalize_union_fallback_seconds"] >= 0.0
+    assert stage_metrics["runtime"]["clustering"]["accepted_edges_total"] >= 0
+    assert stage_metrics["runtime"]["clustering"]["accepted_edges_deduped_total"] >= 0
+    assert stage_metrics["runtime"]["clustering"]["component_solver_impl"] in {
+        "singleton_only",
+        "python_union",
+        "sparse",
+        "hybrid_sparse_python",
+    }
     assert stage_metrics["runtime"]["clustering"]["union_impl"] == "python"
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] >= 0.0
     assert stage_metrics["storage_mode"] == "out_of_core_exact"
