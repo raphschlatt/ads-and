@@ -141,6 +141,8 @@ The goal is simple: choose the fastest safe supported path automatically, avoid 
   - on CPU: use `cpu_auto`, which prefers ONNX and falls back to transformers if ONNX is unavailable
   - BF16 is only used when CUDA BF16 support is actually present; otherwise the run falls back to FP32
   - on CUDA OOM, batch size is halved repeatedly down to `16` before CPU fallback
+
+The CPU-only repo-host smoke A/B from 2026-04-08 confirmed that ONNX CPU is functional and quality-identical, but it did not beat the plain transformers CPU path on that host. `cpu_auto` therefore means "best supported automatic CPU path", not "guaranteed fastest on every CPU".
 - pair encoding and pair scoring
   - keep the accepted Arrow / Exact-Graph / export fast paths
   - on CUDA OOM, batch size is halved repeatedly down to `1024` before CPU fallback

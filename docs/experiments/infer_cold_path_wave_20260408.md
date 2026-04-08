@@ -87,6 +87,32 @@ Reason for rejection:
 - not output-identical
 - no convincing cold-run ROI
 
+### CPU-only ONNX uplift as a general speed claim
+
+- installed the optional `cpu_onnx` stack in the repo `.venv`
+- reran the same CPU-only ADS smoke under the same smoke conditions
+- quality stayed exact, but the current host did not show a speed win
+
+Recorded runs:
+
+- CPU baseline smoke:
+  - `artifacts/exports/ads_cpu_only_smoke_20260408`
+- CPU ONNX smoke:
+  - `artifacts/exports/ads_cpu_only_smoke_onnx_20260408`
+
+Observed SPECTER runtime on the current host:
+
+- CPU transformers smoke:
+  - `specter.wall_seconds = 1032.964s`
+- CPU ONNX smoke:
+  - `specter.wall_seconds = 1043.297s`
+
+Conclusion:
+
+- ONNX CPU is functional and remains part of `cpu_auto`
+- this repository should not describe ONNX CPU as universally faster
+- on the current host, the measured CPU-only smoke was slightly slower with ONNX
+
 ## Quality Outcome
 
 For the kept changes:
@@ -96,6 +122,12 @@ For the kept changes:
   - `artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__arrow_fastpath_20260408_v1.json`
 
 The historical March ADS baseline and the historical `srcd52...` LSPO/train state still remain separate historical references. They were not re-established as the current operational package reference in this session.
+
+The CPU-only ONNX smoke A/B also stayed output-identical:
+
+- `ads_clusters_delta = 0`
+- `mention_cluster_changed_mentions = 0`
+- `mention_cluster_changed_blocks = 0`
 
 ## Performance Outcome
 

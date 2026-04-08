@@ -11,6 +11,6 @@ Closed decisions now reflected in docs/code:
 
 Remaining work is now mostly product/ops, not performance chasing:
 
-- Run and retain one explicit real CPU-only acceptance smoke for the hardware-adaptive auto policy, so the docs are backed by a non-mocked end-to-end artifact as well.
 - Decide whether the historical `srcd52...` LSPO/train baseline should be formally retired as historical-only or reconstructed on purpose.
+- If CPU-only speed becomes a first-class product target, benchmark ONNX thread tuning or a host-aware CPU selector before making a stronger ONNX speed claim; the 2026-04-08 repo-host smoke showed ONNX CPU was functional but slightly slower than the transformers CPU path there.
 - If `cuml_gpu` is ever supported beyond experimental use, define it as a separate documented environment/workflow instead of broadening the standard repo `.venv`.

@@ -65,6 +65,7 @@ Important distinction:
 
 - the formal active ADS baseline manifest is still the historical promoted baseline in `docs/baselines/infer_ads_active.json`
 - the 2026-04-08 optimization record documents the currently accepted package-side cold-run improvements that were validated against the operational CPU reference but not yet promoted as a new historical ADS baseline manifest
+- the same record now also captures the CPU-only acceptance smoke and the repo-host ONNX A/B result: ONNX CPU was functional but not faster on that host
 
 ## Current Product Decisions
 
