@@ -1,56 +1,52 @@
 # ads-and
 
-`ads-and` is a Python package for author name disambiguation in the [SAO/NASA Astrophysics Data System (ADS)](https://ui.adsabs.harvard.edu/). It is designed for one task: take ADS-style parquet inputs and write disambiguated outputs with stable author identifiers.
+`ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. It is scoped to the ADS column schema and is not a general-purpose AND toolkit for arbitrary metadata.
 
-The bundled baseline model is derived from the [Neural Author Name Disambiguator (NAND)](https://github.com/deepthought-initiative/neural_name_dismabiguator) line of work described in [Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was evaluated on the [Large-Scale Physics Open Researcher and Contributor ID (ORCID)-Linked dataset (LSPO)](https://doi.org/10.5281/zenodo.11489161), a large physics and astronomy author name disambiguation dataset built from NASA/ADS records linked to ORCID identities.
+The bundled model is a packaged and refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package — no external bundle required.
 
-The paper reports that NAND achieves up to **94% accuracy** in pairwise disambiguation and **over 95% F1** in clustering on LSPO. The current packaged operational reference in this repository is not byte-identical to the original research stack; the current reproducible LSPO quality reference for the bundled package is **F1 = 0.9702**, **precision = 0.9636**, and **recall = 0.9770** with constraints enabled on the retained five-seed LSPO evaluation workflow.
+The bundled package was re-evaluated on the same LSPO benchmark under a reproducible five-seed protocol. Clustering performance on LSPO (with constraints enabled):
 
-The default workflow uses the model that ships with the package, so no external model bundle is required.
+| | F1 | Precision | Recall |
+|---|---|---|---|
+| NAND — Amado Olivo et al. 2025 | 95.93% | 96.15% | 96.21% |
+| `ads-and` (this package) | **97.02%** | **96.36%** | **97.70%** |
 
-Package name on PyPI: `ads-and`  
 Python import path: `author_name_disambiguation`
 
 ## Install
 
+Requires Python ≥ 3.11.
+Use [uv](https://docs.astral.sh/uv/)
+
 ```bash
 uv pip install ads-and
-```
-
-or
-
-```bash
+# or
 pip install ads-and
 ```
 
-Optional CPU ONNX runtime:
+Optional if you don't have a GPU: faster CPU inference via ONNX (still much slower than GPU):
 
 ```bash
 uv pip install "ads-and[cpu_onnx]"
 ```
 
-`ads-and` requires Python 3.11 or newer.
+## Usage
 
-## Command line
-
-Run disambiguation on one ADS dataset:
+**CLI**
 
 ```bash
 ads-and infer \
   --publications-path data/ads/publications.parquet \
   --references-path data/ads/references.parquet \
-  --output-dir outputs/ads_run
+  --output-dir outputs/ads_run \
+  --runtime auto
 ```
 
-Add `--json` if you want the final run summary as JSON.
+Add `--json` for a machine-readable run summary on stdout.
 
-Runtime selection:
+`--runtime` options: `auto` (GPU if CUDA is available, else CPU), `gpu`, `cpu`.
 
-- `--runtime auto` prefers a local GPU when CUDA is available and otherwise uses the local CPU path
-- `--runtime gpu` forces the local GPU path
-- `--runtime cpu` forces the local CPU path
-
-## Python
+**Python**
 
 ```python
 from author_name_disambiguation import disambiguate_sources
@@ -66,69 +62,56 @@ print(result.publications_disambiguated_path)
 print(result.summary_path)
 ```
 
-## Input data
+## Input schema
 
-`--publications-path` is required. `--references-path` is optional.
-
-Each input record should use ADS-style columns:
+`--publications-path` is required. `--references-path` is optional but improves disambiguation coverage.
 
 | Column | Required | Notes |
 | --- | --- | --- |
-| `Bibcode` | yes | ADS source identifier |
-| `Author` | yes | author list for the record |
+| `Bibcode` | **yes** | ADS source identifier |
+| `Author` | **yes** | author name list |
+| `Title_en` or `Title` | no — but matters | title text; strongly recommended |
+| `Abstract_en` or `Abstract` | no — but matters | abstract text; strongly recommended |
+| `Affiliation` | no | affiliation text or list |
 | `Year` | no | publication year |
-| `Title_en` or `Title` | no | title text |
-| `Abstract_en` or `Abstract` | no | abstract text |
-| `Affiliation` | no | affiliation text or affiliation list |
-| `precomputed_embedding` | no | optional precomputed text embedding |
+| `precomputed_embedding` | no | precomputed text embedding; skips embedding step when present |
 
-Records without `Bibcode` or `Author` are skipped.
+Records missing `Bibcode` or `Author` are skipped. Records missing both `Title` and `Abstract` will be processed but with meaningfully reduced disambiguation quality, since the model relies heavily on textual context to distinguish authors.
 
 ## Output
 
-The package writes the following files under `output_dir`:
+All files are written under `output_dir`:
 
-| File | Purpose |
+| File | Contents |
 | --- | --- |
-| `publications_disambiguated.parquet` | publications with disambiguated author columns |
-| `references_disambiguated.parquet` | references with disambiguated author columns when references are provided |
-| `source_author_assignments.parquet` | row-level author assignments |
+| `publications_disambiguated.parquet` | input columns + `AuthorUID`, `AuthorDisplayName` |
+| `references_disambiguated.parquet` | same, for references (only when references are provided) |
+| `source_author_assignments.parquet` | row-level author-to-entity assignments |
 | `author_entities.parquet` | inferred author entities |
 | `mention_clusters.parquet` | mention-to-cluster mapping |
 | `summary.json` | high-level run summary |
-| `05_stage_metrics_infer_sources.json` | detailed runtime and stage metrics |
+| `05_stage_metrics_infer_sources.json` | per-stage runtime and diagnostic metrics |
 | `05_go_no_go_infer_sources.json` | run validation summary |
 
-The disambiguated source parquets keep the input columns and add:
+## Runtime notes
 
-- `AuthorUID`
-- `AuthorDisplayName`
+- CPU path uses `chars2vec`; ONNX is used automatically when the `cpu_onnx` extra is installed, otherwise falls back to the transformers CPU path.
+- The package fails early with a clear error if a requested backend is unavailable or there is insufficient scratch space.
 
-## Runtime behavior
+## Further reading
 
-- The bundled model is embedded in the package.
-- The supported product path runs `chars2vec` on CPU.
-- CPU inference can use ONNX when the optional `cpu_onnx` extra is installed and usable.
-- If ONNX is unavailable or unusable, the package falls back automatically to the local transformers CPU path.
-- If a requested run is physically impossible because of missing scratch space or an unsupported explicit backend, the package fails early with a clear error.
+- [Inference workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/inference_workflow.md)
+- [Training workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/training_workflow.md)
+- [Provenance and baseline notes](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/provenance.md)
 
-## Scope
+## Citation
 
-`ads-and` is an inference package for ADS-style parquet data. It is not presented as a general-purpose author name disambiguation toolkit for arbitrary metadata formats.
+If you use `ads-and`, cite the software entry in [`CITATION.cff`](CITATION.cff) and the underlying NAND paper:
 
-The repository also contains training, LSPO evaluation, and baseline-management workflows for research use, but those workflows are not required for normal package use:
+Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen.  
+*Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.*  
+<https://doi.org/10.1088/1538-3873/ae1e2d>
 
-- repository: <https://github.com/raphschlatt/Author_Name_Disambiguation>
-- inference workflow: <https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/inference_workflow.md>
-- training workflow: <https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/training_workflow.md>
-- provenance and baseline notes: <https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/provenance.md>
-
-## Background and citation
-
-If you use `ads-and`, cite the software entry in `CITATION.cff` and the NAND paper:
-
-- original NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
+Related resources:
+- NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
 - LSPO dataset: <https://doi.org/10.5281/zenodo.11489161>
-- paper: *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature*  
-  Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen  
-  <https://doi.org/10.1088/1538-3873/ae1e2d>
