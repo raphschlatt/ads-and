@@ -85,4 +85,4 @@ Training writes under the explicit workspace roots:
 
 - `run-train-stage` no longer exports a bundle implicitly
 - `export-model-bundle` is the explicit bundle creation step
-- repo-local workspace files such as `configs/paths.local.yaml` are repo concerns, not package concerns
+- packaged default resources are the standard config path; explicit override files are optional and local to a repo checkout

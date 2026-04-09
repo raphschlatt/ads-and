@@ -103,10 +103,7 @@ def _apply_pipeline_mocks(monkeypatch, *, text_mock):
             if runtime_mode_requested is not None
             else ("gpu" if str(bootstrap.get("resolved_device") or "").startswith("cuda") else "cpu")
         )
-        if runtime_mode_effective == "hf":
-            specter_backend = "hf_endpoint"
-            effective_device = "cpu"
-        elif runtime_mode_effective == "cpu":
+        if runtime_mode_effective == "cpu":
             specter_backend = str(specter_runtime_backend_requested or "cpu_auto")
             effective_device = "cpu"
         else:
@@ -451,60 +448,6 @@ def test_runtime_mode_cpu_falls_back_from_onnx_to_transformers(monkeypatch, tmp_
     assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "cpu"
     assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "transformers"
     assert stage_metrics["runtime"]["specter"]["fallback_reason"] == "cpu_auto_onnx_fallback"
-
-
-def test_runtime_mode_hf_uses_direct_hf_backend(monkeypatch, tmp_path: Path):
-    publications_path, references_path = _write_dataset(tmp_path)
-    bundle_dir = _write_bundle(tmp_path)
-    calls: list[str] = []
-
-    def _text(mentions, output_path, **kwargs):
-        runtime_backend = str(kwargs["runtime_backend"])
-        calls.append(runtime_backend)
-        arr = np.ones((len(mentions), 768), dtype=np.float32)
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        np.save(output_path, arr)
-        meta = {
-            "cache_hit": False,
-            "generation_mode": "remote_endpoint_only",
-            "runtime_backend": runtime_backend,
-            "requested_device": "hf",
-            "resolved_device": "remote:hf-endpoint",
-            "fallback_reason": None,
-            "effective_precision_mode": None,
-            "api_concurrency": 8,
-            "request_batch_size": 64,
-            "column_present": False,
-            "precomputed_embedding_count": 0,
-            "recomputed_embedding_count": int(len(mentions)),
-            "used_precomputed_embeddings": False,
-        }
-        return arr, meta
-
-    _apply_pipeline_mocks(monkeypatch, text_mock=_text)
-    result = run_infer_sources(
-        InferSourcesRequest(
-            publications_path=publications_path,
-            references_path=references_path,
-            output_root=tmp_path / "out_hf",
-            dataset_id="ads_runtime_hf",
-            model_bundle=bundle_dir,
-            runtime_mode="hf",
-            progress=False,
-        )
-    )
-
-    context = json.loads((result.output_root / "00_context.json").read_text(encoding="utf-8"))
-    stage_metrics = json.loads(result.stage_metrics_path.read_text(encoding="utf-8"))
-    assert calls == ["hf_endpoint"]
-    assert context["runtime_mode"] == "hf"
-    assert context["runtime_backend"] == "hf_endpoint"
-    assert context["resolved_device"] == "remote:hf-endpoint"
-    assert context["generation_mode"] == "remote_endpoint_only"
-    assert context["resolved_runtime_policy"]["runtime_mode_effective"] == "hf"
-    assert stage_metrics["runtime"]["specter"]["runtime_mode"] == "hf"
-    assert stage_metrics["runtime"]["specter"]["runtime_backend"] == "hf_endpoint"
-    assert stage_metrics["runtime"]["specter"]["resolved_device"] == "remote:hf-endpoint"
 
 
 def test_internal_backend_override_keeps_public_runtime_metadata_compact(monkeypatch, tmp_path: Path):

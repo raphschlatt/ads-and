@@ -28,10 +28,6 @@ def test_normalize_runtime_backend_rejects_onnx_for_cuda():
         specter_runtime.normalize_runtime_backend("onnx_fp32", device="cuda")
 
 
-def test_normalize_runtime_backend_accepts_internal_hf_transport():
-    assert specter_runtime.normalize_runtime_backend("hf_endpoint", device="cpu") == "hf_endpoint"
-
-
 def test_temporary_torch_cpu_thread_policy_restores_values(monkeypatch: pytest.MonkeyPatch):
     state = {"threads": 8, "interop": 4}
 

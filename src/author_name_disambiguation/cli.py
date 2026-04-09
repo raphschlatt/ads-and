@@ -2006,46 +2006,6 @@ def cmd_train_lspo(args):
         ui.close()
 
 
-def cmd_precompute_source_embeddings(args):
-    ui = CliUI(total_steps=1, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
-    try:
-        from author_name_disambiguation.precompute_source_embeddings import (
-            PrecomputeSourceEmbeddingsRequest,
-            precompute_source_embeddings,
-        )
-
-        ui.start("Precompute remote source embeddings")
-        ui.info(
-            f"mode=hf_endpoint_t4 | output_root={Path(args.output_root).expanduser().resolve()}"
-        )
-        result = precompute_source_embeddings(
-            PrecomputeSourceEmbeddingsRequest(
-                publications_path=args.publications_path,
-                references_path=args.references_path,
-                output_root=args.output_root,
-                dataset_id=args.dataset_id,
-                hf_token_env_var=args.hf_token_env_var,
-                force=bool(args.force),
-                progress=bool(args.progress),
-            )
-        )
-        payload = {
-            "run_id": result.run_id,
-            "output_root": str(result.output_root),
-            "publications_output_path": str(result.publications_output_path),
-            "references_output_path": None if result.references_output_path is None else str(result.references_output_path),
-            "report_path": str(result.report_path),
-        }
-        ui.done(f"Wrote precomputed source artifacts to {result.output_root}")
-        print(json.dumps(payload, indent=2))
-        return payload
-    except Exception as exc:
-        ui.fail(str(exc))
-        raise
-    finally:
-        ui.close()
-
-
 def cmd_compare_infer_baseline(args):
     payload = None
     ui = CliUI(total_steps=1, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
@@ -2648,7 +2608,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--gates-config", default=None)
     sp.add_argument(
         "--runtime-mode",
-        choices=["gpu", "cpu", "hf"],
+        choices=["gpu", "cpu"],
         default=None,
         help="Preferred public runtime interface for inference.",
     )
@@ -2667,21 +2627,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dataset-id", default=None)
     sp.add_argument("--model-bundle", default=None)
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full", "incremental"], default="full")
-    sp.add_argument("--runtime", choices=["auto", "gpu", "cpu", "hf"], default="auto")
+    sp.add_argument("--runtime", choices=["auto", "gpu", "cpu"], default="auto")
     sp.add_argument("--force", action="store_true")
     _add_progress_and_logging_args(sp)
     _add_json_output_arg(sp)
     sp.set_defaults(func=cmd_infer)
-
-    sp = sub.add_parser("precompute-source-embeddings")
-    sp.add_argument("--publications-path", required=True)
-    sp.add_argument("--references-path", default=None)
-    sp.add_argument("--output-root", required=True)
-    sp.add_argument("--dataset-id", default=None)
-    sp.add_argument("--hf-token-env-var", default="HF_TOKEN")
-    sp.add_argument("--force", action="store_true")
-    _add_progress_and_logging_args(sp)
-    sp.set_defaults(func=cmd_precompute_source_embeddings)
 
     sp = sub.add_parser("compare-infer-baseline")
     sp.add_argument("--baseline-run-id", required=True)

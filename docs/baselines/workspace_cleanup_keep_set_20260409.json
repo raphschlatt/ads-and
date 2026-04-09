@@ -1,0 +1,42 @@
+{
+  "generated_utc": "2026-04-09T00:00:00Z",
+  "purpose": "Explicit local workspace keep-set for the 2026-04-09 cleanup wave.",
+  "source_documents": [
+    "docs/baselines/infer_ads_active.json",
+    "docs/baselines/lspo_quality_operational.json",
+    "docs/experiments/infer_cold_path_wave_20260408.md"
+  ],
+  "keep_data_paths": [
+    "data/raw/ads/ads_full_run_20260305",
+    "data/raw/lspo/LSPO_v1.parquet",
+    "data/interim/lspo_mentions.parquet",
+    "data/cache/_shared/subsets/lspo_mentions_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.parquet",
+    "data/cache/_shared/subsets/subset_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.meta.json",
+    "data/cache/_shared/embeddings/lspo_chars2vec_cpu_4b7bfbd51bb9.npy",
+    "data/cache/_shared/embeddings/lspo_specter_4b7bfbd51bb9.npy",
+    "data/cache/_shared/pairs/lspo_mentions_split_266b4f62be53.parquet",
+    "data/cache/_shared/pairs/lspo_pairs_266b4f62be53.parquet",
+    "data/cache/_shared/pairs/split_balance_266b4f62be53.json",
+    "data/cache/_shared/pairs/pairs_qc_train_266b4f62be53.json"
+  ],
+  "keep_artifact_paths": [
+    "artifacts/models/full_20260218T111506Z_cli02681429",
+    "artifacts/checkpoints/full_20260218T111506Z_cli02681429",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429",
+    "artifacts/exports/bench_full_v22_fix2",
+    "artifacts/exports/ads_full_chars2vec_cpu_ab_20260407",
+    "artifacts/exports/ads_full_package_auto_20260407",
+    "artifacts/exports/ads_full_arrow_fastpath_20260408_v1",
+    "artifacts/exports/ads_full_export_reuse_20260408_v1",
+    "artifacts/exports/ads_cpu_only_smoke_20260408",
+    "artifacts/exports/ads_cpu_only_smoke_onnx_20260408"
+  ],
+  "keep_local_paths": [
+    ".venv"
+  ],
+  "notes": [
+    "The historical ADS baseline remains full in this cleanup wave.",
+    "Intermediate exact-graph validation runs are not retained in the local keep-set.",
+    "Anything outside this keep-set is eligible for local removal after tracked docs and tests are updated."
+  ]
+}

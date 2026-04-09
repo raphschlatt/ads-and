@@ -119,8 +119,6 @@ def _resolve_runtime_mode(
         return requested_mode
     backend = str(specter_runtime_backend_requested or "transformers").strip().lower() or "transformers"
     device = str(requested_device or "auto").strip().lower() or "auto"
-    if backend == "hf_endpoint":
-        return "hf"
     if backend == "onnx_fp32" or device.startswith("cpu"):
         return "cpu"
     if str(torch_host.get("resolved_device") or "").startswith("cuda"):
@@ -132,7 +130,7 @@ def _resolve_requested_device_for_runtime_mode(*, runtime_mode: str, requested_d
     device = str(requested_device or "auto").strip().lower() or "auto"
     if runtime_mode == "gpu":
         return "cuda" if device == "auto" else device
-    if runtime_mode in {"cpu", "hf"}:
+    if runtime_mode == "cpu":
         return "cpu" if device == "auto" else device
     return device
 
@@ -235,9 +233,7 @@ def resolve_infer_runtime_policy(
         runtime_mode=runtime_mode_effective,
         requested_device=requested_device,
     )
-    if runtime_mode_effective == "hf":
-        specter_runtime_backend_effective = "hf_endpoint"
-    elif runtime_mode_effective == "cpu":
+    if runtime_mode_effective == "cpu":
         requested_backend = (
             str(specter_runtime_backend_requested).strip().lower()
             if specter_runtime_backend_requested is not None

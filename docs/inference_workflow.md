@@ -16,7 +16,7 @@ This document covers the broader repo-only workspace around that product:
 - explicit `run-infer-sources`
 - baseline comparison and retention
 - internal runtime telemetry
-- optional and experimental runtime paths
+- explicit research/training/baseline workflows
 
 Use the research CLI from a repo checkout:
 
@@ -52,7 +52,6 @@ The current supported product/runtime stance is:
 - `cluster_backend=auto` resolves to `sklearn_cpu`
 - `cuml_gpu` is explicit opt-in only
 - `numba` remains optional and is not auto-selected
-- HF endpoint mode is repo-only and not part of the public package surface
 
 These are deliberate product decisions, not accidental leftovers.
 
@@ -121,11 +120,10 @@ Automatic fallback is expected for:
 - ONNX CPU unavailability
 - `cuml_gpu` unavailability under `cluster_backend=auto`
 
-## Repo-Only Advanced Paths
+## Repo-Only Operations
 
 These remain in the repo workspace and are not part of the public package contract:
 
-- HF endpoint inference mode
 - baseline compare/freeze flows
 - cleanup/retention workflows
 - experimental GPU clustering environments

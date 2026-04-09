@@ -101,9 +101,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated seed list expected in LSPO clustering reports.",
     )
     parser.add_argument(
-        "--paths-config",
-        default="configs/paths.local.yaml",
-        help="Paths config fallback for interim path resolution.",
+        "--interim-lspo-mentions",
+        default="data/interim/lspo_mentions.parquet",
+        help="Direct fallback path for interim LSPO mentions when the report does not embed one.",
     )
     return parser
 
@@ -119,18 +119,14 @@ def _resolve_interim_path(
     *,
     repo_root: Path,
     report: dict[str, Any] | None,
-    paths_cfg_path: Path,
+    fallback_path: str,
 ) -> Path:
     if report:
         source_paths = report.get("lspo_source_paths") or {}
         from_report = str(source_paths.get("interim_lspo_mentions", "")).strip()
         if from_report:
             return _resolve_path(repo_root, from_report)
-    cfg = _load_yaml(paths_cfg_path)
-    data_cfg = dict(cfg.get("data", {}) or {})
-    interim_dir_raw = str(data_cfg.get("interim_dir", "data/interim"))
-    interim_dir = _resolve_path(repo_root, interim_dir_raw)
-    return interim_dir / "lspo_mentions.parquet"
+    return _resolve_path(repo_root, fallback_path)
 
 
 def _resolve_run_config_path(repo_root: Path, context: dict[str, Any]) -> Path | None:
@@ -144,7 +140,7 @@ def _compute_subset_key(
     *,
     repo_root: Path,
     report: dict[str, Any],
-    paths_cfg_path: Path,
+    interim_lspo_mentions: str,
     failures: list[str],
 ) -> tuple[str | None, str | None]:
     context_path_raw = str(report.get("source_context_path", "")).strip()
@@ -169,7 +165,7 @@ def _compute_subset_key(
     interim_path = _resolve_interim_path(
         repo_root=repo_root,
         report=report,
-        paths_cfg_path=paths_cfg_path,
+        fallback_path=interim_lspo_mentions,
     )
     if not interim_path.exists():
         failures.append(f"Interim LSPO mentions path not found: {interim_path}")
@@ -249,11 +245,10 @@ def _run_operational_check(args: argparse.Namespace, repo_root: Path) -> dict[st
             f"expected={expected_subset_cache_key}, got={report_subset_cache_key}"
         )
 
-    paths_cfg_path = _resolve_path(repo_root, str(args.paths_config))
     computed_source_fingerprint, computed_subset_cache_key = _compute_subset_key(
         repo_root=repo_root,
         report=report,
-        paths_cfg_path=paths_cfg_path,
+        interim_lspo_mentions=str(args.interim_lspo_mentions),
         failures=failures,
     )
     if expected_source_fingerprint and computed_source_fingerprint != expected_source_fingerprint:
@@ -298,8 +293,6 @@ def _run_operational_check(args: argparse.Namespace, repo_root: Path) -> dict[st
 def _run_historical_check(args: argparse.Namespace, repo_root: Path) -> dict[str, Any]:
     run_id = str(args.baseline_run_id).strip()
     expected_seeds = _parse_expected_seeds(str(args.expected_seeds))
-    paths_cfg_path = _resolve_path(repo_root, str(args.paths_config))
-
     failures: list[str] = []
     missing_keep_paths: list[str] = []
     for rel in HISTORICAL_BASELINE_KEEP_PATHS:
@@ -337,7 +330,7 @@ def _run_historical_check(args: argparse.Namespace, repo_root: Path) -> dict[str
             computed_source_fingerprint, computed_subset_cache_key = _compute_subset_key(
                 repo_root=repo_root,
                 report=report or {},
-                paths_cfg_path=paths_cfg_path,
+                interim_lspo_mentions=str(args.interim_lspo_mentions),
                 failures=failures,
             )
             _ = computed_source_fingerprint

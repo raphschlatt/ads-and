@@ -30,18 +30,6 @@ from author_name_disambiguation.features.specter_runtime import (
 
 _SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
 _SPECTER_DIM = TEXT_EMBEDDING_DIM
-DEFAULT_HF_TOKEN_ENV_VAR = "HF_TOKEN"
-
-
-def _load_hf_transport():
-    try:
-        from author_name_disambiguation.hf_transport import embed_texts_via_hf_endpoint
-    except Exception as exc:
-        raise RuntimeError(
-            "The Hugging Face endpoint runtime is not part of the public inference package. "
-            "Use the repo research workspace if you need runtime_mode='hf'."
-        ) from exc
-    return embed_texts_via_hf_endpoint
 
 
 def _tokenizers_parallelism_setting() -> str:
@@ -437,7 +425,6 @@ def generate_specter_embeddings(
     quiet_libraries: bool = False,
     reuse_model: bool = True,
     onnx_cache_path: str | Path | None = None,
-    hf_token_env_var: str = DEFAULT_HF_TOKEN_ENV_VAR,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     titles = mentions["title"].fillna("").astype(str).tolist()
@@ -503,74 +490,6 @@ def generate_specter_embeddings(
 
     requested_device = str(device)
     runtime_backend_clean = str(runtime_backend or "transformers").strip().lower() or "transformers"
-    if runtime_backend_clean == "hf_endpoint":
-        tokenizer = load_tokenizer_prefer_fast(model_name)
-        vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
-        if vectors_for_indices:
-            ordered = compute_token_length_order(
-                [texts[idx] for idx in vectors_for_indices],
-                tokenizer=tokenizer,
-                max_length=max_length,
-            )
-            vectors_for_indices = [vectors_for_indices[int(pos)] for pos in ordered.tolist()]
-        out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
-        for idx, item in enumerate(precomputed_vectors):
-            if item is not None:
-                out[idx] = item
-        if vectors_for_indices:
-            embed_texts_via_hf_endpoint = _load_hf_transport()
-            remote_vectors, remote_meta = embed_texts_via_hf_endpoint(
-                texts=[texts[idx] for idx in vectors_for_indices],
-                model_name=model_name,
-                hf_token_env_var=hf_token_env_var,
-                max_length=max_length,
-                progress=show_progress,
-                progress_label="SPECTER HF endpoint texts",
-            )
-            out[np.asarray(vectors_for_indices, dtype=np.int64)] = remote_vectors
-        else:
-            remote_meta = {
-                "transport": "hf_endpoint",
-                "model_name": str(model_name),
-                "api_concurrency": 8,
-                "texts_total": 0,
-                "texts_successful": 0,
-                "texts_failed": 0,
-                "attempts_total": 0,
-                "backoff_seconds_total": 0.0,
-                "processing_wall_seconds": 0.0,
-                "wall_seconds": 0.0,
-                "resolved_device": "remote:hf-endpoint",
-                "requested_device": "hf",
-                "runtime_backend": "hf_endpoint",
-                "generation_mode": "remote_endpoint_only",
-            }
-        meta = {
-            **_base_runtime_meta(
-                requested_device="hf",
-                resolved_device=str(remote_meta.get("resolved_device") or "remote:hf-endpoint"),
-                effective_precision_mode=None,
-                requested_batch_size=None if batch_size is None else int(batch_size),
-                effective_batch_size=int(remote_meta.get("request_batch_size") or 64),
-                fallback_reason=None,
-                torch_version=None,
-                torch_cuda_version=None,
-                torch_cuda_available=None,
-                cuda_probe_error=None,
-                model_to_cuda_error=None,
-            ),
-            **remote_meta,
-            **precomputed_summary,
-        }
-        meta["generation_mode"] = (
-            "precomputed_plus_remote_endpoint"
-            if precomputed_summary["precomputed_embedding_count"]
-            else "remote_endpoint_only"
-        )
-        meta["runtime_backend"] = "hf_endpoint"
-        meta["column_present"] = bool(precomputed_summary.get("column_present"))
-        return (out.astype(np.float32), meta) if return_meta else out.astype(np.float32)
-
     try:
         import torch
     except Exception as exc:
@@ -904,7 +823,6 @@ def get_or_create_specter_embeddings(
     show_progress: bool = False,
     quiet_libraries: bool = False,
     reuse_model: bool = True,
-    hf_token_env_var: str = DEFAULT_HF_TOKEN_ENV_VAR,
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     output = Path(output_path)
@@ -958,7 +876,6 @@ def get_or_create_specter_embeddings(
         quiet_libraries=quiet_libraries,
         reuse_model=reuse_model,
         onnx_cache_path=build_onnx_cache_path(output_path=output_path, model_name=model_name, max_length=max_length),
-        hf_token_env_var=hf_token_env_var,
         return_meta=True,
     )
     emb, meta = emb_result

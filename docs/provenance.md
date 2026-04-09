@@ -75,6 +75,10 @@ That file is intended for tooling and should be updated together with every futu
 
 Intermediate optimization runs are not part of long-term provenance once the compare report exists and failed ADS candidates have been pruned to the JSON-only retention set.
 
+The current local workspace keep-set used for cleanup is recorded in:
+
+- `docs/baselines/workspace_cleanup_keep_set_20260409.json`
+
 ## Current Optimization Record
 
 The latest accepted cold-run package optimization session is documented separately in:
@@ -95,7 +99,6 @@ The current product/runtime stance is intentionally narrower than the full set o
 - `numba` remains optional and is not part of the standard runtime contract
 - `cuml_gpu` remains special/explicit and is not the standard `auto` clustering path
 - the historical ADS baseline manifest remains unchanged; the faster 2026-04-08 package state is documented operationally rather than promoted here as a new historical provenance anchor
-- HF endpoint mode remains repo-only and is not part of the public PyPI package story
 
 That split is deliberate:
 

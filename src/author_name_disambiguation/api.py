@@ -23,7 +23,7 @@ from author_name_disambiguation.workflow_helpers import (
 )
 
 
-UserRuntime = Literal["auto", "gpu", "cpu", "hf"]
+UserRuntime = Literal["auto", "gpu", "cpu"]
 UserInferStage = Literal["full", "incremental", "smoke", "mini", "mid"]
 TrainStage = Literal["smoke", "mini", "mid", "full"]
 ProgressStyle = Literal["compact", "verbose"]
@@ -77,8 +77,8 @@ def _resolve_user_runtime(runtime: UserRuntime) -> str:
             return "gpu" if bool(torch.cuda.is_available()) else "cpu"
         except Exception:
             return "cpu"
-    if normalized not in {"gpu", "cpu", "hf"}:
-        raise ValueError(f"Unsupported runtime={runtime!r}. Expected one of ['auto', 'cpu', 'gpu', 'hf'].")
+    if normalized not in {"gpu", "cpu"}:
+        raise ValueError(f"Unsupported runtime={runtime!r}. Expected one of ['auto', 'cpu', 'gpu'].")
     return normalized
 
 

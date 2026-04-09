@@ -32,11 +32,11 @@ Operational reference:
 - callback and finalize telemetry were reconciled and then optimized
 - callback-side union work was removed from the hot path
 
-Validated run:
+Validated as intermediate steps during the 2026-04-08 optimization wave.
+Those exact-graph candidate run directories are not retained locally after the cleanup wave; the kept operational outcome is represented by:
 
-- `artifacts/exports/ads_full_exact_graph_fastpath_20260408_v1`
-- `artifacts/exports/ads_full_exact_graph_callback_20260408_v1`
-- `artifacts/exports/ads_full_exact_graph_finalize_20260408_v1`
+- `artifacts/exports/ads_full_arrow_fastpath_20260408_v1`
+- `artifacts/exports/ads_full_export_reuse_20260408_v1`
 
 ### 3. Arrow fast path
 
@@ -77,10 +77,6 @@ The full validation run stayed output-identical to the CPU reference and the run
 - SPECTER itself improved only slightly
 - the full ADS run got slower overall
 - output drifted relative to the current CPU reference
-
-Rejected candidate:
-
-- `artifacts/exports/ads_full_specter_batch_20260408_v1`
 
 Reason for rejection:
 

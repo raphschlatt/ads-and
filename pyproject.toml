@@ -42,7 +42,6 @@ dependencies = [
   "keras==3.13.2",
   "tensorflow==2.20.0",
   "torch>=2.10,<2.11",
-  "requests>=2.31",
   "huggingface_hub>=0.23",
   "transformers>=4.38",
   "adapters>=0.2",
@@ -52,7 +51,6 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
-bench = []
 perf = [
   "numba>=0.60",
 ]
@@ -79,9 +77,6 @@ packages = ["src/author_name_disambiguation"]
 exclude = [
   "/src/author_name_disambiguation/api.py",
   "/src/author_name_disambiguation/cli.py",
-  "/src/author_name_disambiguation/hf_transport.py",
-  "/src/author_name_disambiguation/precompute_source_embeddings.py",
-  "/src/author_name_disambiguation/source_subset.py",
   "/src/author_name_disambiguation/workflow_helpers.py",
   "/src/author_name_disambiguation/data/prepare_lspo.py",
   "/src/author_name_disambiguation/common/subset_artifacts.py",
@@ -100,9 +95,6 @@ include = [
 exclude = [
   "/src/author_name_disambiguation/api.py",
   "/src/author_name_disambiguation/cli.py",
-  "/src/author_name_disambiguation/hf_transport.py",
-  "/src/author_name_disambiguation/precompute_source_embeddings.py",
-  "/src/author_name_disambiguation/source_subset.py",
   "/src/author_name_disambiguation/workflow_helpers.py",
   "/src/author_name_disambiguation/data/prepare_lspo.py",
   "/src/author_name_disambiguation/common/subset_artifacts.py",

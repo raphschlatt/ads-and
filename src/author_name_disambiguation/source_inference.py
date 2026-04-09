@@ -66,7 +66,7 @@ MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 UID_SCOPE_VALUES = {"dataset", "local", "registry"}
 INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full", "incremental"}
 INFER_STAGE_ALIASES = {"incremental": "full"}
-RUNTIME_MODE_VALUES = {"gpu", "cpu", "hf"}
+RUNTIME_MODE_VALUES = {"gpu", "cpu"}
 INFER_PROGRESS_STAGES: dict[str, tuple[int, str]] = {
     "bootstrap": (1, "Bootstrap"),
     "load_inputs": (2, "Load inputs"),
@@ -272,7 +272,7 @@ def _requested_device_for_runtime_mode(*, runtime_mode: str | None, requested_de
     device = str(requested_device or "auto").strip().lower() or "auto"
     if runtime_mode == "gpu":
         return "cuda" if device == "auto" else device
-    if runtime_mode in {"cpu", "hf"}:
+    if runtime_mode == "cpu":
         return "cpu" if device == "auto" else device
     return device
 
@@ -282,8 +282,6 @@ def _infer_runtime_mode(*, runtime_mode: str | None, specter_runtime_backend: st
         return runtime_mode
     backend = str(specter_runtime_backend or "transformers").strip().lower() or "transformers"
     device = str(requested_device or "auto").strip().lower() or "auto"
-    if backend == "hf_endpoint":
-        return "hf"
     if backend == "onnx_fp32" or device.startswith("cpu"):
         return "cpu"
     return "gpu"

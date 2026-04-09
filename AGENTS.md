@@ -31,7 +31,6 @@ Minimality is still a real goal:
 Public runtime story:
 - `gpu`
 - `cpu`
-- `hf`
 
 Default implementation bias:
 - keep exactly one promoted path per public runtime mode
@@ -240,29 +239,24 @@ Avoid these ambiguous names:
 - "LSPO testset" when you really mean the LSPO Quality Run
 - "Goldlauf"
 
-## What The Current chars2vec Experiment Is
+## Current Package Stance
 
-Current experiment tag:
-- `perf_pkg2_chars_v1`
+Public package:
+- `ads-and`
+- inference-only
+- bundled fixed ADS model
+- local CPU/GPU auto runtime only
 
-Experiment type:
-- inference-only experiment
+Repo-only research surface:
+- LSPO quality and reporting
+- training
+- bundle export
+- baseline compare, freeze, prune, and integrity workflows
 
-What is being changed:
-- the chars2vec inference execution path and batch behavior
-
-What must stay fixed:
-- the Fixed Trained NAND Model
-- the Raw LSPO Source
-
-Therefore the correct next step is:
-- run an LSPO Quality Run with the existing Fixed Model Baseline
-
-The correct first command is conceptually:
-- `author-name-disambiguation run-cluster-test-report --model-run-id <Fixed Model Baseline> ... --report-tag perf_pkg2_chars_v1`
-
-The wrong command for this experiment is:
-- `author-name-disambiguation run-train-stage ...`
+Not part of the retained surface:
+- HF remote embedding runtime
+- benchmark-only side paths
+- `chars2vec` GPU as a product path
 
 ## Aborted Run Hygiene
 
@@ -282,9 +276,6 @@ For inference-only experiments, we keep the Fixed Trained NAND Model fixed, use 
 Permanent experiment notes live here:
 - `docs/experiments/`
 
-Current note for the active chars2vec wave:
-- `docs/experiments/perf_pkg2_chars_v1.md`
-
 Rule:
 - Keep vocabulary and workflow rules in `AGENTS.md`.
 - Keep concrete experiment outcomes, measured numbers, and next-step recommendations in `docs/experiments/`.
@@ -301,10 +292,10 @@ Implication for this repo:
 - A chars2vec batch-size change is not automatically a "runtime-only" change.
 - In this repo, changing the effective chars2vec batch size can change embeddings numerically and can therefore move LSPO Quality Run metrics.
 
-Current project lesson from `perf_pkg2_chars_v1`:
-- The large-batch chars2vec path was much faster in microbenchmarks.
-- It did not pass the LSPO Quality Run under the current no-drift policy.
-- Therefore large-batch chars2vec must not be treated as promoted behavior unless we explicitly change policy or prove equivalence.
+Current project lesson:
+- `chars2vec` GPU is not a promoted product path.
+- Product inference keeps `chars2vec` on CPU.
+- Any future `chars2vec` execution-path change still needs LSPO quality validation because embedding numerics can drift.
 
 ## LSPO Control-Run Reproducibility Rule
 

@@ -12,7 +12,6 @@ def test_build_parser_exposes_workspace_commands():
         "train-lspo",
         "run-train-stage",
         "run-infer-sources",
-        "precompute-source-embeddings",
         "compare-infer-baseline",
         "run-cluster-test-report",
         "export-model-bundle",
@@ -166,7 +165,7 @@ def test_run_infer_sources_parser_accepts_overrides():
             "--no-progress",
             "--verbose-libs",
             "--runtime-mode",
-            "hf",
+            "cpu",
             "--precision-mode",
             "amp_bf16",
             "--cluster-backend",
@@ -186,7 +185,7 @@ def test_run_infer_sources_parser_accepts_overrides():
     assert args.progress is False
     assert args.progress_style == "compact"
     assert args.quiet_libs is False
-    assert args.runtime_mode == "hf"
+    assert args.runtime_mode == "cpu"
     assert args.precision_mode == "amp_bf16"
     assert args.cluster_backend == "sklearn_cpu"
     assert args.uid_scope == "registry"
@@ -310,27 +309,6 @@ def test_export_model_bundle_parser():
     assert args.output_dir == "/tmp/out"
     assert args.func is cli.cmd_export_model_bundle
 
-
-def test_precompute_source_embeddings_parser_defaults():
-    parser = cli.build_parser()
-    args = parser.parse_args(
-        [
-            "precompute-source-embeddings",
-            "--publications-path",
-            "publications.parquet",
-            "--output-root",
-            "out",
-        ]
-    )
-    assert args.command == "precompute-source-embeddings"
-    assert args.publications_path == "publications.parquet"
-    assert args.references_path is None
-    assert args.output_root == "out"
-    assert args.dataset_id is None
-    assert args.hf_token_env_var == "HF_TOKEN"
-    assert args.progress is True
-    assert args.quiet_libs is True
-    assert args.func is cli.cmd_precompute_source_embeddings
 
 def test_run_cluster_test_report_parser_defaults():
     parser = cli.build_parser()

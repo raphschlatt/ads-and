@@ -14,7 +14,7 @@ InferStage = Literal["smoke", "mini", "mid", "full", "incremental"]
 PrecisionMode = Literal["fp32", "amp_bf16"]
 ClusterBackend = Literal["auto", "sklearn_cpu", "cuml_gpu"]
 SpecterRuntimeBackend = Literal["transformers", "onnx_fp32"]
-RuntimeMode = Literal["gpu", "cpu", "hf"]
+RuntimeMode = Literal["gpu", "cpu"]
 
 
 @dataclass(slots=True)

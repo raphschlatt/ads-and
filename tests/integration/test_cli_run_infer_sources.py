@@ -114,10 +114,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             if runtime_mode_requested is not None
             else ("gpu" if str(bootstrap.get("resolved_device") or "").startswith("cuda") else "cpu")
         )
-        if runtime_mode_effective == "hf":
-            specter_backend = "hf_endpoint"
-            effective_device = "cpu"
-        elif runtime_mode_effective == "cpu":
+        if runtime_mode_effective == "cpu":
             specter_backend = str(specter_runtime_backend_requested or "cpu_auto")
             effective_device = "cpu"
         else:
@@ -1129,7 +1126,7 @@ def test_run_infer_sources_accepts_incremental_alias_and_writes_summary(monkeypa
     assert summary["infer_stage_requested"] == "incremental"
     assert summary["infer_stage_effective"] == "full"
     assert summary["outputs"]["publications_disambiguated_path"] == str(result.publications_disambiguated_path)
-    assert summary["runtime_mode"] in {"cpu", "gpu", "hf"}
+    assert summary["runtime_mode"] in {"cpu", "gpu"}
     assert summary["counts"]["publications"] == 2
     assert summary["counts"]["mentions"] >= 2
     assert summary["stage_seconds"]["total"] >= 0.0
