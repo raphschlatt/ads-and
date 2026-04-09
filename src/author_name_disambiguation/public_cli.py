@@ -145,7 +145,9 @@ def cmd_infer(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="ads-and public inference CLI")
+    parser = argparse.ArgumentParser(
+        description="Disambiguate author names in ADS parquet datasets with the bundled baseline model."
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("infer", help="Disambiguate one ADS dataset with the bundled baseline model.")

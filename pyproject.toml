@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ads-and"
 version = "0.2.0"
-description = "ADS author name disambiguation with an embedded baseline model and local CPU/GPU auto runtime."
+description = "ADS author name disambiguation with a bundled NAND-based baseline model and automatic local CPU/GPU inference."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -16,10 +16,13 @@ maintainers = [
   { name = "Raphael Schlattmann", email = "raphael.schlattmann@tu-berlin.de" },
 ]
 keywords = [
+  "ads",
+  "astronomy",
   "author-name-disambiguation",
   "entity-resolution",
-  "bibliography",
-  "scientific-metadata",
+  "bibliometrics",
+  "scholarly-metadata",
+  "digital-humanities",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -67,6 +70,8 @@ research = [
 Homepage = "https://github.com/raphschlatt/Author_Name_Disambiguation"
 Repository = "https://github.com/raphschlatt/Author_Name_Disambiguation"
 Issues = "https://github.com/raphschlatt/Author_Name_Disambiguation/issues"
+Paper = "https://doi.org/10.1088/1538-3873/ae1e2d"
+"Original NAND Repository" = "https://github.com/deepthought-initiative/neural_name_dismabiguator"
 
 [project.scripts]
 ads-and = "author_name_disambiguation.public_cli:main"
