@@ -2,7 +2,7 @@
 
 `ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. It is scoped to the ADS column schema and is not a general-purpose AND toolkit for arbitrary metadata.
 
-The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package — no external bundle required.
+The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package, no external bundle is required.
 
 The bundled package was re-evaluated on the same LSPO benchmark under a reproducible five-seed protocol. Clustering performance on LSPO (with constraints enabled):
 
@@ -111,6 +111,6 @@ If you use `ads-and`, cite the software entry in [`CITATION.cff`](CITATION.cff) 
 
 Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
 
-Related resources:
+Resources:
 - NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
 - LSPO dataset: <https://doi.org/10.5281/zenodo.11489161>
