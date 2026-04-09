@@ -99,12 +99,7 @@ The two disambiguated parquets preserve all input columns and append:
 
 Both columns are parallel lists in the same order as the input `Author` column. Each UID is stable across runs for the same registry. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
 
-## Runtime notes
-
-- CPU path uses `chars2vec`; ONNX is used automatically when the `cpu_onnx` extra is installed, otherwise falls back to the transformers CPU path.
-- The package fails early with a clear error if a requested backend is unavailable or there is insufficient scratch space.
-
-## Further reading
+## Further Details
 
 - [Inference workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/inference_workflow.md)
 - [Training workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/training_workflow.md)
@@ -114,9 +109,7 @@ Both columns are parallel lists in the same order as the input `Author` column. 
 
 If you use `ads-and`, cite the software entry in [`CITATION.cff`](CITATION.cff) and the underlying NAND paper:
 
-Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen.  
-*Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.*  
-<https://doi.org/10.1088/1538-3873/ae1e2d>
+Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
 
 Related resources:
 - NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
