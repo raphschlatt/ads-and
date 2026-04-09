@@ -63,15 +63,15 @@ print(result.summary_path)
 
 `--publications-path` is required. `--references-path` is optional.
 
-| Column | Required | Notes |
-| --- | --- | --- |
-| `Bibcode` | **yes** | ADS source identifier |
-| `Author` | **yes** | author name list |
-| `Title_en` or `Title` | no — but strongly recommended | title text |
-| `Abstract_en` or `Abstract` | no — but strongly recommended | abstract text |
-| `Affiliation` | no | affiliation text or list |
-| `Year` | no | publication year |
-| `precomputed_embedding` | no | precomputed text embedding; skips embedding step when present |
+| Column | Required | Type | Example |
+| --- | --- | --- | --- |
+| `Bibcode` | **yes** | `str` | `"2000MNRAS.319..168C"` |
+| `Author` | **yes** | `list[str]` or semicolon-delimited `str` | `["Cole, Shaun", "Lacey, Cedric G."]` |
+| `Title_en` or `Title` | no — but strongly recommended | `str` | `"Galaxy luminosity functions in..."` |
+| `Abstract_en` or `Abstract` | no — but strongly recommended | `str` | `"We model the galaxy population..."` |
+| `Affiliation` | no | `str` (ADS format) or `list[str]` (per-author) | `"AA(Durham Univ, Dept of Physics); AB(...)"` |
+| `Year` | no | `int` | `2000` |
+| `precomputed_embedding` | no | `list[float]` | `[0.12, -0.34, 0.07, ...]` — must be [SPECTER](https://huggingface.co/allenai/specter) embeddings for full quality |
 
 Records missing `Bibcode` or `Author` are skipped. Records missing both `Title` and `Abstract` will be processed but with meaningfully reduced disambiguation quality, since the model relies heavily on textual context to distinguish authors.
 
@@ -89,6 +89,15 @@ All files are written under `output_dir`:
 | `summary.json` | high-level run summary |
 | `05_stage_metrics_infer_sources.json` | per-stage runtime and diagnostic metrics |
 | `05_go_no_go_infer_sources.json` | run validation summary |
+
+The two disambiguated parquets preserve all input columns and append:
+
+| Column | Type | Example |
+| --- | --- | --- |
+| `AuthorUID` | `list[str]` | `["ads_run::s.cole::1", "ads_run::c.lacey::0", "ads_run::c.baugh::0"]` |
+| `AuthorDisplayName` | `list[str]` | `["Cole, Shaun", "Lacey, C. G.", "Baugh, C. M."]` |
+
+Both columns are parallel lists in the same order as the input `Author` column. Each UID is stable across runs for the same registry. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
 
 ## Runtime notes
 
