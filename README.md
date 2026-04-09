@@ -2,7 +2,7 @@
 
 `ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. It is scoped to the ADS column schema and is not a general-purpose AND toolkit for arbitrary metadata.
 
-The bundled model is a packaged and refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package — no external bundle required.
+The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package — no external bundle required.
 
 The bundled package was re-evaluated on the same LSPO benchmark under a reproducible five-seed protocol. Clustering performance on LSPO (with constraints enabled):
 
@@ -15,16 +15,13 @@ Python import path: `author_name_disambiguation`
 
 ## Install
 
-Requires Python ≥ 3.11.
-Use [uv](https://docs.astral.sh/uv/)
+Use [uv](https://docs.astral.sh/uv/). Requires Python ≥ 3.11.
 
 ```bash
 uv pip install ads-and
-# or
-pip install ads-and
 ```
 
-Optional if you don't have a GPU: faster CPU inference via ONNX (still much slower than GPU):
+If you don't have a GPU: Optional faster CPU inference via ONNX (still much slower than GPU):
 
 ```bash
 uv pip install "ads-and[cpu_onnx]"
@@ -64,14 +61,14 @@ print(result.summary_path)
 
 ## Input schema
 
-`--publications-path` is required. `--references-path` is optional but improves disambiguation coverage.
+`--publications-path` is required. `--references-path` is optional.
 
 | Column | Required | Notes |
 | --- | --- | --- |
 | `Bibcode` | **yes** | ADS source identifier |
 | `Author` | **yes** | author name list |
-| `Title_en` or `Title` | no — but matters | title text; strongly recommended |
-| `Abstract_en` or `Abstract` | no — but matters | abstract text; strongly recommended |
+| `Title_en` or `Title` | no — but strongly recommended | title text |
+| `Abstract_en` or `Abstract` | no — but strongly recommended | abstract text |
 | `Affiliation` | no | affiliation text or list |
 | `Year` | no | publication year |
 | `precomputed_embedding` | no | precomputed text embedding; skips embedding step when present |
