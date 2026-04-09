@@ -107,6 +107,11 @@ Observed SPECTER runtime on the current host:
 - CPU ONNX smoke:
   - `specter.wall_seconds = 1043.297s`
 
+Important host context for that A/B:
+
+- the run was executed in a cgroup-limited environment with only about `4` visible CPUs
+- treat this as a host-specific CPU-only result, not a universal ONNX verdict for larger many-core CPU hosts
+
 Conclusion:
 
 - ONNX CPU is functional and remains part of `cpu_auto`

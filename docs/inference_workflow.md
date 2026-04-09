@@ -143,6 +143,11 @@ The goal is simple: choose the fastest safe supported path automatically, avoid 
   - on CUDA OOM, batch size is halved repeatedly down to `16` before CPU fallback
 
 The CPU-only repo-host smoke A/B from 2026-04-08 confirmed that ONNX CPU is functional and quality-identical, but it did not beat the plain transformers CPU path on that host. `cpu_auto` therefore means "best supported automatic CPU path", not "guaranteed fastest on every CPU".
+
+Current product decision:
+
+- leave CPU-only on the current `cpu_auto` policy
+- do not add a host-specific ONNX-vs-transformers selector unless CPU-only becomes a primary performance target later
 - pair encoding and pair scoring
   - keep the accepted Arrow / Exact-Graph / export fast paths
   - on CUDA OOM, batch size is halved repeatedly down to `1024` before CPU fallback
