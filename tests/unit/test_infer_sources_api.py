@@ -164,6 +164,17 @@ def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch,
 
 def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp_path: Path):
     captured = {}
+    report_path = tmp_path / "report.json"
+    report_path.write_text(
+        '{"variants":{"dbscan_with_constraints":{"f1_mean":0.97},"dbscan_no_constraints":{"f1_mean":0.96},"delta_with_constraints_minus_no_constraints":{"f1":0.01}},"wall_seconds":12.3}',
+        encoding="utf-8",
+    )
+    summary_csv = tmp_path / "summary.csv"
+    summary_csv.write_text("metric,value\nf1,0.97\n", encoding="utf-8")
+    per_seed_csv = tmp_path / "per_seed.csv"
+    per_seed_csv.write_text("seed,f1\n1,0.97\n", encoding="utf-8")
+    markdown_path = tmp_path / "report.md"
+    markdown_path.write_text("# report\n", encoding="utf-8")
 
     class _FakeCli:
         @staticmethod
@@ -171,6 +182,15 @@ def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp
             captured["args"] = args
 
     monkeypatch.setattr("author_name_disambiguation.api._load_cli_module", lambda: _FakeCli)
+    monkeypatch.setattr(
+        "author_name_disambiguation.api.resolve_report_paths",
+        lambda metrics_dir, report_tag=None: {
+            "json": report_path,
+            "summary_csv": summary_csv,
+            "per_seed_csv": per_seed_csv,
+            "markdown": markdown_path,
+        },
+    )
     result = evaluate_lspo_quality(
         data_root=tmp_path / "data",
         artifacts_root=tmp_path / "artifacts",

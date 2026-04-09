@@ -1,0 +1,8 @@
+tests/ export-ignore
+scripts/ export-ignore
+docs/ export-ignore
+artifacts/ export-ignore
+data/ export-ignore
+configs/ export-ignore
+ToDo.md export-ignore
+author_name_disambiguation_research/ export-ignore

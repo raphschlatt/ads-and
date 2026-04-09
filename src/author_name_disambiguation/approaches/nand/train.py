@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
+from author_name_disambiguation.approaches.nand.feature_build import build_feature_matrix
 from author_name_disambiguation.approaches.nand.modeling import create_encoder, info_nce_loss
 from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.torch_runtime import resolve_torch_device
@@ -57,13 +58,6 @@ def _autocast_context(torch, precision_mode: str):
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         return nullcontext()
     return nullcontext()
-
-
-def build_feature_matrix(chars2vec: np.ndarray, text_emb: np.ndarray) -> np.ndarray:
-    if len(chars2vec) != len(text_emb):
-        raise ValueError(f"Embedding length mismatch: chars={len(chars2vec)}, text={len(text_emb)}")
-    feats = np.concatenate([chars2vec.astype(np.float32), text_emb.astype(np.float32)], axis=1)
-    return feats
 
 
 def _build_index(mentions: pd.DataFrame) -> Dict[str, int]:

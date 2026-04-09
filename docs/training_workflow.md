@@ -1,6 +1,22 @@
 # Training Workflow
 
-This package keeps training as an official product path, but only through the public operator CLI.
+Repo-only research workflow. Training is not part of the public `ads-and` PyPI package contract.
+
+## Scope
+
+This workspace surface covers:
+
+- LSPO training
+- LSPO quality runs
+- train-stage orchestration
+- clustering reports
+- model-bundle export for research and promotion workflows
+
+Run it from a repository checkout:
+
+```bash
+python -m author_name_disambiguation_research -h
+```
 
 ## Required Inputs
 
@@ -16,20 +32,20 @@ Optional explicit overrides:
 - `--cluster-config`
 - `--gates-config`
 
-If no override is given, packaged defaults are used.
+If no override is given, the repo defaults are used.
 
 ## End-to-End Flow
 
 1. Train a run stage.
 2. Generate the clustering test report for that run.
-3. Export a model bundle for inference.
+3. Export a model bundle for inference or evaluation.
 
 ## Commands
 
 Train:
 
 ```bash
-author-name-disambiguation run-train-stage \
+python -m author_name_disambiguation_research run-train-stage \
   --run-stage smoke \
   --data-root data \
   --artifacts-root artifacts \
@@ -39,7 +55,7 @@ author-name-disambiguation run-train-stage \
 Clustering report:
 
 ```bash
-author-name-disambiguation run-cluster-test-report \
+python -m author_name_disambiguation_research run-cluster-test-report \
   --model-run-id smoke_20260309T120000Z_cli12345678 \
   --data-root data \
   --artifacts-root artifacts \
@@ -49,7 +65,7 @@ author-name-disambiguation run-cluster-test-report \
 Bundle export:
 
 ```bash
-author-name-disambiguation export-model-bundle \
+python -m author_name_disambiguation_research export-model-bundle \
   --model-run-id smoke_20260309T120000Z_cli12345678 \
   --artifacts-root artifacts
 ```
@@ -67,6 +83,6 @@ Training writes under the explicit workspace roots:
 
 ## Notes
 
-- `run-train-stage` no longer exports a bundle implicitly.
-- `export-model-bundle` is the only public bundle creation step.
-- Repo-local path files such as `configs/paths.local.yaml` are not part of the public contract.
+- `run-train-stage` no longer exports a bundle implicitly
+- `export-model-bundle` is the explicit bundle creation step
+- repo-local workspace files such as `configs/paths.local.yaml` are repo concerns, not package concerns

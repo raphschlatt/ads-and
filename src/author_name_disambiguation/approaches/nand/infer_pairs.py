@@ -9,15 +9,12 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from author_name_disambiguation.approaches.nand.feature_build import build_feature_matrix
 from author_name_disambiguation.approaches.nand.modeling import create_encoder
-from author_name_disambiguation.approaches.nand.train import build_feature_matrix as _legacy_build_feature_matrix
 from author_name_disambiguation.common.cli_ui import iter_progress
 from author_name_disambiguation.common.io_schema import PAIR_SCORE_REQUIRED_COLUMNS, validate_columns, save_parquet
 from author_name_disambiguation.common.numeric_safety import clamp_cosine_sim, compute_safe_distance_from_cosine
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
-
-# Backward-compatible export for tests/legacy monkeypatch points.
-build_feature_matrix = _legacy_build_feature_matrix
 
 PAIR_NUMERIC_HELPER_COLUMNS = ("mention_idx_1", "mention_idx_2", "block_idx")
 PAIR_SCORING_ENVELOPE_FIELDS = (

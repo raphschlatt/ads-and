@@ -1,4 +1,4 @@
-from author_name_disambiguation.cli import main
+from author_name_disambiguation.public_cli import main
 
 
 if __name__ == "__main__":

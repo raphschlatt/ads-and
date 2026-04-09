@@ -14,10 +14,6 @@ import pandas as pd
 
 from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.embedding_contract import TEXT_EMBEDDING_DIM, build_source_text
-from author_name_disambiguation.hf_transport import (
-    DEFAULT_HF_TOKEN_ENV_VAR,
-    embed_texts_via_hf_endpoint,
-)
 from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 from author_name_disambiguation.features.specter_runtime import (
@@ -34,6 +30,18 @@ from author_name_disambiguation.features.specter_runtime import (
 
 _SPECTER_MODEL_CACHE: dict[str, tuple[Any, Any]] = {}
 _SPECTER_DIM = TEXT_EMBEDDING_DIM
+DEFAULT_HF_TOKEN_ENV_VAR = "HF_TOKEN"
+
+
+def _load_hf_transport():
+    try:
+        from author_name_disambiguation.hf_transport import embed_texts_via_hf_endpoint
+    except Exception as exc:
+        raise RuntimeError(
+            "The Hugging Face endpoint runtime is not part of the public inference package. "
+            "Use the repo research workspace if you need runtime_mode='hf'."
+        ) from exc
+    return embed_texts_via_hf_endpoint
 
 
 def _tokenizers_parallelism_setting() -> str:
@@ -510,6 +518,7 @@ def generate_specter_embeddings(
             if item is not None:
                 out[idx] = item
         if vectors_for_indices:
+            embed_texts_via_hf_endpoint = _load_hf_transport()
             remote_vectors, remote_meta = embed_texts_via_hf_endpoint(
                 texts=[texts[idx] for idx in vectors_for_indices],
                 model_name=model_name,

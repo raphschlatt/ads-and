@@ -3,7 +3,7 @@ import pytest
 from author_name_disambiguation import cli
 
 
-def test_build_parser_exposes_only_public_commands():
+def test_build_parser_exposes_workspace_commands():
     parser = cli.build_parser()
     commands = set(parser._subparsers._group_actions[0].choices.keys())
     assert commands == {

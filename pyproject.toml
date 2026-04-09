@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "author-name-disambiguation"
-version = "0.1.0"
-description = "Standalone author name disambiguation for curated source datasets."
+name = "ads-and"
+version = "0.2.0"
+description = "ADS author name disambiguation with an embedded baseline model and local CPU/GPU auto runtime."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -71,10 +71,24 @@ Repository = "https://github.com/raphschlatt/Author_Name_Disambiguation"
 Issues = "https://github.com/raphschlatt/Author_Name_Disambiguation/issues"
 
 [project.scripts]
-author-name-disambiguation = "author_name_disambiguation.cli:main"
+ads-and = "author_name_disambiguation.public_cli:main"
+author-name-disambiguation = "author_name_disambiguation.public_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/author_name_disambiguation"]
+exclude = [
+  "/src/author_name_disambiguation/api.py",
+  "/src/author_name_disambiguation/cli.py",
+  "/src/author_name_disambiguation/hf_transport.py",
+  "/src/author_name_disambiguation/precompute_source_embeddings.py",
+  "/src/author_name_disambiguation/source_subset.py",
+  "/src/author_name_disambiguation/workflow_helpers.py",
+  "/src/author_name_disambiguation/data/prepare_lspo.py",
+  "/src/author_name_disambiguation/common/subset_artifacts.py",
+  "/src/author_name_disambiguation/approaches/nand/train.py",
+  "/src/author_name_disambiguation/resources/train_runs/**",
+  "/src/author_name_disambiguation/resources/models/nand_best.yaml",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -82,5 +96,24 @@ include = [
   "/README.md",
   "/LICENSE",
   "/CITATION.cff",
-  "/docs",
+]
+exclude = [
+  "/src/author_name_disambiguation/api.py",
+  "/src/author_name_disambiguation/cli.py",
+  "/src/author_name_disambiguation/hf_transport.py",
+  "/src/author_name_disambiguation/precompute_source_embeddings.py",
+  "/src/author_name_disambiguation/source_subset.py",
+  "/src/author_name_disambiguation/workflow_helpers.py",
+  "/src/author_name_disambiguation/data/prepare_lspo.py",
+  "/src/author_name_disambiguation/common/subset_artifacts.py",
+  "/src/author_name_disambiguation/approaches/nand/train.py",
+  "/src/author_name_disambiguation/resources/train_runs/**",
+  "/src/author_name_disambiguation/resources/models/nand_best.yaml",
+  "/docs/**",
+  "/tests/**",
+  "/scripts/**",
+  "/artifacts/**",
+  "/data/**",
+  "/configs/**",
+  "/ToDo.md",
 ]

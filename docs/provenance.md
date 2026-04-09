@@ -2,12 +2,32 @@
 
 This repository is the maintained package form of a larger research code lineage around neural author name disambiguation.
 
+This is a repo-only provenance and operations document. It is not part of the public `ads-and` package contract.
+
 ## What Changed
 
 - The package namespace is now `author_name_disambiguation`.
-- The public surface was reduced to four CLI commands and one source-based inference API.
+- The public distribution is now `ads-and`.
+- The public surface is now an inference-focused product with one primary CLI front door and one primary Python API.
 - Notebook-specific runtime assumptions and repo-root heuristics were removed from the public package path.
 - The vendored snapshot directory `neural_name_dismabiguator-main/` was removed from the repository tree.
+
+## Two Surfaces
+
+The repository now deliberately serves two different surfaces:
+
+- public package:
+  - `ads-and`
+  - embedded ADS baseline model
+  - ADS dataset in, disambiguated ADS dataset out
+  - local CPU/GPU auto runtime
+- repo-only research workspace:
+  - LSPO quality
+  - training
+  - baselines
+  - benchmarking
+  - cleanup and operational tooling
+  - optional/experimental runtime paths
 
 ## What Stays in Git History
 
@@ -75,6 +95,7 @@ The current product/runtime stance is intentionally narrower than the full set o
 - `numba` remains optional and is not part of the standard runtime contract
 - `cuml_gpu` remains special/explicit and is not the standard `auto` clustering path
 - the historical ADS baseline manifest remains unchanged; the faster 2026-04-08 package state is documented operationally rather than promoted here as a new historical provenance anchor
+- HF endpoint mode remains repo-only and is not part of the public PyPI package story
 
 That split is deliberate:
 
