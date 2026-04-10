@@ -1,15 +1,41 @@
-# Project Lineage and Modifications
+# Project Lineage and Technical Modifications
 
-This document records how `ads-and` relates to the NAND research code line and
-what this repository changes. It is repo documentation, not a replacement for
-the citation and resource links in `README.md`.
+This document explains the technical lineage of `ads-and`: what comes from
+the NAND paper and imported NAND code snapshot, what was rebuilt in this
+package, and how those changes affect reproducibility and reported metrics.
+It is not a workflow runbook and it does not replace the citation and resource
+links in `README.md`.
 
-## Upstream References
+The document separates three layers:
 
-- Original NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
-- NAND paper: Vicente Amado Olivo et al. 2025, PASP 137, 124503, <https://doi.org/10.1088/1538-3873/ae1e2d>
-- LSPO dataset: <https://doi.org/10.5281/zenodo.11489161>
-- This package: `ads-and`, import path `author_name_disambiguation`
+- the NAND paper method
+- the imported NAND snapshot at commit `af46945`
+- the current `ads-and` package implementation
+
+## Evidence Sources
+
+Technical claims in this document are based on:
+
+- the NAND paper cited in `README.md`
+- the original imported snapshot available through
+  `git show af46945:neural_name_dismabiguator-main/...`
+- current package code under `src/author_name_disambiguation`
+- the fixed bundle artifacts under
+  `src/author_name_disambiguation/resources/model_bundles/fixed_model_baseline/bundle_v1`
+- operational LSPO and ADS notes under `docs/` where they describe current
+  repo workflows
+
+## Upstream Method
+
+NAND is an author name disambiguation method evaluated on LSPO. The paper
+combines chars2vec name features with SPECTER title/abstract embeddings, learns
+a contrastive pair-scoring representation, and clusters mentions within name
+blocks with DBSCAN plus metadata constraints.
+
+The NAND paper is the method and metric reference point. Its Table 3 reports
+LSPO clustering with constraints at F1 95.93%, precision 96.15%, and recall
+96.21%. This paper result should not be read as a guarantee that any imported
+code snapshot is a complete, directly executable reproduction of the paper.
 
 ## Imported NAND Snapshot
 
@@ -17,87 +43,86 @@ This repository imported an upstream snapshot in commit `af46945` under
 `neural_name_dismabiguator-main/`. That snapshot was later removed from the
 tracked tree in commit `52194e9`.
 
-The imported files were:
+The imported snapshot contained the NAND README, environment and Croissant
+metadata, the paper PDF, and the scripts `AND_dataset_builder.py`,
+`AND_nn_exp.py`, `AND_readdata_exp.py`, `experiment.py`, and `results.py`.
+Together, those files describe a flat research-script workflow: build LSPO
+pairs, train a PyTorch-Lightning pair-scoring model, and evaluate saved
+checkpoints.
 
-- `AND_dataset_builder.py`
-- `AND_nn_exp.py`
-- `AND_readdata_exp.py`
-- `experiment.py`
-- `results.py`
-- `README.md`
-- `environment.yml`
-- `croissant.json`
-- `Amado_Olivo_2025_PASP_137_124503.pdf`
+The snapshot is a lineage reference, not the source tree that is executed by
+the current package. Its scripts use hardcoded local paths and environment
+assumptions, and some references point to names that are not present in the
+imported tree, such as `AND_nn_exp2` and `AND_readdata_exp2`. The current
+package should therefore be described as a rebuilt package implementation in
+the NAND/LSPO line, not as a direct packaging of a complete executable upstream
+snapshot.
 
-The snapshot described a flat research-script workflow for LSPO-based Neural
-Author Name Disambiguation. It built SPECTER plus chars2vec features, generated
-within-block author-pair examples, trained a PyTorch-Lightning pair-scoring
-network, and evaluated checkpoints with accuracy, precision, recall, F1, and
-standard-error summaries.
-
-The imported snapshot used hardcoded local paths in several scripts. Some
-script references in that snapshot point to files or class names that were not
-present in the imported tree, so this repository should not describe the
-current package as a direct packaging of a complete executable snapshot.
-
-## Current Package Surface
+## Current Package Implementation
 
 The public package surface is inference-focused:
 
 - CLI: `ads-and infer`
 - Python API: `author_name_disambiguation.disambiguate_sources`
 - bundled Trained NAND Model: `full_20260218T111506Z_cli02681429`
-- fixed model bundle resource: `resources/model_bundles/fixed_model_baseline/bundle_v1`
+- fixed bundle resource: `resources/model_bundles/fixed_model_baseline/bundle_v1`
 
-The repo-only research surface is exposed through:
+The repo-only research surface supports an LSPO Gate Run, an ADS Full Candidate
+Run, model-training experiments, and explicit model bundle export. Public ADS
+inference reads ADS-shaped parquet inputs and writes disambiguated parquet
+outputs with `AuthorUID` and `AuthorDisplayName`, plus assignment, entity,
+cluster, summary, stage-metric, and go/no-go artifacts.
 
-- `python -m author_name_disambiguation_research`
-- `run-cluster-test-report` and `quality-lspo` for an LSPO Gate Run
-- `run-infer-sources` for an ADS Full Candidate Run
-- `run-train-stage` and `train-lspo` for a model-training experiment
-- `export-model-bundle` for explicit bundle creation
+The Raw LSPO Source is not redistributed by this package. Repo workflows expect
+the local Raw LSPO Source at `data/raw/lspo/LSPO_v1.parquet`.
 
-## What Changed
+## Technical Differences That Affect Reproducibility and Metrics
 
-The current repository keeps the NAND/LSPO/SPECTER/chars2vec lineage but
-rebuilds the workflow as a Python package and repo workspace:
+| Area | NAND paper / imported snapshot | Current package | Why it matters |
+| --- | --- | --- | --- |
+| Repository shape | Paper method plus flat scripts in `neural_name_dismabiguator-main/`. Users edit scripts, paths, embeddings, and checkpoint references. | Installable Python package under `src/author_name_disambiguation`, with public CLI/API and repo-only research commands. | Current results come from a rebuilt package workflow, not from running the imported scripts unchanged. |
+| Data and pair construction | The snapshot builds within-block LSPO pairs from local files and then balances labels after pair construction. | Current pair building uses ORCID-aware splits, feasibility checks, split-balance/QC reports, `exclude_same_bibcode`, and manifests. | Pair construction defines the train/validation/test candidate space, so controlled split and balance behavior can change measured F1. |
+| Pair-scoring model | The paper uses chars2vec plus SPECTER and contrastive learning. The imported `AND_nn_exp.py` encoder is an `818 -> 1024 -> 1024 -> 256` Lightning-style network. | The fixed package config uses `818 -> 1024 -> 256`; the current encoder normalizes output embeddings and training combines positive-pair InfoNCE with a negative-margin loss. | The learned similarity space is not text-identical to the imported script, so pairwise scores and downstream clusters can differ. |
+| Thresholding | The imported evaluation code uses a ROC/G-mean-style threshold selection path. | Current training selects the cosine threshold by validation F1 sweep and records the selected threshold in the bundle manifest. | The threshold directly controls pair decisions and clustering edges. Different threshold policy can change precision, recall, and F1. |
+| Clustering and constraints | The paper clusters within name blocks with DBSCAN and applies metadata constraints such as full-name conflicts and large year gaps. | Current clustering keeps that lineage but resolves eps through manifest-driven config, records sweep metadata, and applies explicit hard/soft constraint settings. | The clustering policy is reproducible from package artifacts, but it is not merely an implicit rerun of the original scripts. |
+| Runtime and export | The snapshot evaluates manually selected checkpoints through local scripts. | Public inference resolves the bundled Trained NAND Model, writes ADS parquet outputs, and emits reports/manifests for inspection. | These changes mainly affect packaging, auditability, and ADS usability; they should not be described as proof of quality gains by themselves. |
 
-- package layout under `src/author_name_disambiguation`
-- public CLI and Python API for local ADS inference
-- ADS parquet input support for publications and optional references
-- output `AuthorUID` and `AuthorDisplayName` columns
-- exported assignment, entity, cluster, summary, stage-metric, and go/no-go artifacts
-- bundled fixed model resolution instead of user-supplied checkpoint paths for public inference
-- repo-only LSPO Gate Run for inference-only experiments
-- repo-only model-training experiment workflow with manifests and reports
-- explicit `export-model-bundle` step after training
-- runtime policy for CPU/GPU selection, SPECTER backend selection, chars2vec CPU behavior, clustering backend selection, and fallback diagnostics
-- ADS inference baseline comparison and retention tooling
+## Metric Provenance
 
-The model implementation is not text-identical to the imported Lightning
-script. For example, the imported `AND_nn_exp.py` encoder used an
-`818 -> 1024 -> 1024 -> 256` network, while the packaged fixed model config
-uses `818 -> 1024 -> 256` with normalized output embeddings.
+Two metric references are relevant and should not be collapsed:
 
-## Model and Data Provenance
+- NAND paper Table 3 reports LSPO clustering with constraints at F1 95.93%,
+  precision 96.15%, and recall 96.21%.
+- `README.md` reports the current package LSPO clustering row at F1 97.02%,
+  precision 96.36%, and recall 97.70%.
 
-The Raw LSPO Source is not redistributed by this package. The canonical local
-path for repo workflows is `data/raw/lspo/LSPO_v1.parquet`.
+The tracked fixed bundle contains related but not identical metric artifacts.
+`bundle_manifest.json` records the source model run
+`full_20260218T111506Z_cli02681429`, selected eps `0.35`, threshold `0.502`,
+and pairwise `best_test_f1 = 0.976252414576076`. `clustering_resolved.json`
+records the validation eps-sweep selection, including F1
+`0.9737836575953416` at eps `0.35`.
 
-The bundled Trained NAND Model is recorded by its source model run id,
-`full_20260218T111506Z_cli02681429`, in the fixed bundle manifest. Do not
-describe these bundled weights as upstream NAND weights unless that claim is
-separately established.
+The README clustering row should therefore be treated as the package-reported
+LSPO clustering result for this implementation. The complete LSPO clustering
+report behind that README row is not redistributed as a tracked JSON artifact
+in this repository. Without a tracked ablation study, the higher package
+metrics should be described as consistent with the technical differences above,
+not as caused by any single change.
 
-The current ADS inference baseline is `bench_full_v22_fix2` and is documented
-under `docs/baselines/`. That is an operational inference comparison target,
-not the same concept as the trained model baseline.
+## What This Document Does Not Claim
+
+- It does not claim that the current code is byte-identical to the paper code.
+- It does not claim that the bundled weights are upstream weights.
+- It does not claim that the Raw LSPO Source is redistributed with the package.
+- It does not claim that one implementation change alone explains the F1
+  difference from the paper.
 
 ## License and Attribution
 
 This repository is distributed under BSD-3-Clause.
 
-The original NAND repository README states BSD-3-Clause licensing for the
-upstream project. LSPO is attributed to its Zenodo record and remains separately
+The imported NAND README states BSD-3-Clause licensing for the upstream
+project. LSPO is attributed through its Zenodo record and remains separately
 licensed by its dataset terms, reported there as CC BY 4.0. Users should cite
 the software entry in `CITATION.cff` and the NAND paper listed in `README.md`.
