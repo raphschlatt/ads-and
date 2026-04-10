@@ -18,8 +18,8 @@ def test_release_artifacts_are_inference_only(tmp_path: Path):
         text=True,
     )
 
-    wheel_path = next(dist_dir.glob("ads_and-0.2.0-*.whl"))
-    sdist_path = next(dist_dir.glob("ads_and-0.2.0.tar.gz"))
+    wheel_path = next(dist_dir.glob("ads_and-0.1.0-*.whl"))
+    sdist_path = next(dist_dir.glob("ads_and-0.1.0.tar.gz"))
 
     assert wheel_path.stat().st_size < 6_000_000
 
@@ -41,7 +41,7 @@ def test_release_artifacts_are_inference_only(tmp_path: Path):
 
     with tarfile.open(sdist_path, "r:gz") as sdist:
         sdist_members = set(sdist.getnames())
-    root_prefix = f"ads_and-0.2.0"
+    root_prefix = f"ads_and-0.1.0"
     assert f"{root_prefix}/README.md" in sdist_members
     assert f"{root_prefix}/LICENSE" in sdist_members
     assert f"{root_prefix}/CITATION.cff" in sdist_members
