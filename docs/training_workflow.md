@@ -1,88 +1,77 @@
-# Training Workflow
+# LSPO and Training Workflow
 
-Repo-only research workflow. Training is not part of the public `ads-and` PyPI package contract.
+This is a repo-level runbook for LSPO evaluation and model-training work. These
+commands are not part of the public `ads-and` package contract.
 
-## Scope
+## Inference-Only Experiment
 
-This workspace surface covers:
+For an inference-only experiment, keep the Trained NAND Model fixed and run an
+LSPO Gate Run first. Do not run `run-train-stage`.
 
-- LSPO training
-- LSPO quality runs
-- train-stage orchestration
-- clustering reports
-- model-bundle export for research and promotion workflows
-
-Run it from a repository checkout:
-
-```bash
-python -m author_name_disambiguation_research -h
-```
-
-## Required Inputs
-
-- `data-root`
-- `artifacts-root`
-- `raw-lspo-parquet`
-
-Optional explicit overrides:
-
-- `--raw-lspo-h5`
-- `--run-config`
-- `--model-config`
-- `--cluster-config`
-- `--gates-config`
-
-If no override is given, the repo defaults are used.
-
-## End-to-End Flow
-
-1. Train a run stage.
-2. Generate the clustering test report for that run.
-3. Export a model bundle for inference or evaluation.
-
-## Commands
-
-Train:
-
-```bash
-python -m author_name_disambiguation_research run-train-stage \
-  --run-stage smoke \
-  --data-root data \
-  --artifacts-root artifacts \
-  --raw-lspo-parquet data/raw/lspo/mock.parquet
-```
-
-Clustering report:
+Canonical LSPO Gate Run:
 
 ```bash
 python -m author_name_disambiguation_research run-cluster-test-report \
-  --model-run-id smoke_20260309T120000Z_cli12345678 \
+  --model-run-id full_20260218T111506Z_cli02681429 \
   --data-root data \
   --artifacts-root artifacts \
-  --raw-lspo-parquet data/raw/lspo/mock.parquet
+  --raw-lspo-parquet data/raw/lspo/LSPO_v1.parquet \
+  --report-tag <experiment-tag>
 ```
 
-Bundle export:
+This command rebuilds or verifies the LSPO evaluation subset from the Raw LSPO
+Source, reuses the existing trained model baseline, recomputes embeddings, pair
+scores, and clustering, then writes `06_clustering_test_report*.json`,
+`*.csv`, and `*.md` outputs under `artifacts/metrics/<model-run-id>/`.
+
+Convenience wrapper:
+
+```bash
+python -m author_name_disambiguation_research quality-lspo \
+  --model-run-id full_20260218T111506Z_cli02681429 \
+  --report-tag <experiment-tag>
+```
+
+## Model-Training Experiment
+
+Use `run-train-stage` only when the experiment intentionally changes weights,
+training configuration, model architecture, or training-time representation
+semantics.
+
+```bash
+python -m author_name_disambiguation_research run-train-stage \
+  --run-stage full \
+  --data-root data \
+  --artifacts-root artifacts \
+  --raw-lspo-parquet data/raw/lspo/LSPO_v1.parquet
+```
+
+`run-train-stage` prepares LSPO mentions, subsets, splits, pairs, embeddings,
+checkpoints, threshold metadata, stage metrics, and go/no-go reports. It does
+not export a model bundle implicitly.
+
+Convenience wrapper:
+
+```bash
+python -m author_name_disambiguation_research train-lspo \
+  --run-stage full
+```
+
+## Bundle Export
+
+After a model-training experiment, export a model bundle explicitly:
 
 ```bash
 python -m author_name_disambiguation_research export-model-bundle \
-  --model-run-id smoke_20260309T120000Z_cli12345678 \
+  --model-run-id <trained-run-id> \
   --artifacts-root artifacts
 ```
 
-## Artifact Layout
+The default output is `artifacts/models/<trained-run-id>/bundle_v1/`. The
+bundle contains `checkpoint.pt`, `model_config.yaml`,
+`clustering_resolved.json`, and `bundle_manifest.json`.
 
-Training writes under the explicit workspace roots:
+## Workflow Rule
 
-- `artifacts/metrics/<run_id>/`
-- `artifacts/checkpoints/<run_id>/`
-- `artifacts/models/<run_id>/bundle_v1/`
-- `data/interim/`
-- `data/subsets/cache/`
-- `data/subsets/manifests/`
-
-## Notes
-
-- `run-train-stage` no longer exports a bundle implicitly
-- `export-model-bundle` is the explicit bundle creation step
-- packaged default resources are the standard config path; explicit override files are optional and local to a repo checkout
+- Inference-only experiment: fixed Trained NAND Model -> LSPO Gate Run -> ADS Full Candidate Run.
+- Model-training experiment: `run-train-stage` -> LSPO Gate Run for the new run -> optional bundle export -> optional ADS Full Candidate Run.

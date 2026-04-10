@@ -103,7 +103,7 @@ Both columns are parallel lists in the same order as the input `Author` column. 
 
 - [Inference workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/inference_workflow.md)
 - [Training workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/training_workflow.md)
-- [Provenance and baseline notes](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/provenance.md)
+- [Project lineage and modifications](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/lineage_and_modifications.md)
 
 ## Citation
 

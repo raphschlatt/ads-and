@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def test_release_artifacts_are_inference_only(tmp_path: Path):
-    repo_root = Path("/home/ubuntu/Author_Name_Disambiguation")
+    repo_root = Path(__file__).resolve().parents[2]
     dist_dir = tmp_path / "dist"
     subprocess.run(
         ["uv", "build", "--out-dir", str(dist_dir)],

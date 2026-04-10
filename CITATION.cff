@@ -8,7 +8,7 @@ authors:
     email: "raphael.schlattmann@tu-berlin.de"
 repository-code: "https://github.com/raphschlatt/Author_Name_Disambiguation"
 url: "https://github.com/raphschlatt/Author_Name_Disambiguation"
-license: "LicenseRef-Proprietary"
+license: "BSD-3-Clause"
 version: "0.2.0"
 date-released: "2026-04-09"
 preferred-citation:

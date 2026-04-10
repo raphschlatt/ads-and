@@ -1,13 +1,13 @@
-# ADS Baseline Transition: v21_fix4 -> v22_fix2
+# ADS Inference Baseline Transition: v21_fix4 -> v22_fix2
 
 This note closes the historical audit gap for the promotion from `bench_full_v21_fix4` to `bench_full_v22_fix2`.
 
 ## Status
 
-- current active baseline: `bench_full_v22_fix2`
-- previous baseline id: `bench_full_v21_fix4`
+- current ADS inference baseline: `bench_full_v22_fix2`
+- previous ADS inference baseline id: `bench_full_v21_fix4`
 - current manifest: `docs/baselines/infer_ads_full_run_20260305_v22_fix2.json`
-- active baseline marker: `docs/baselines/infer_ads_active.json`
+- ADS inference baseline marker: `docs/baselines/infer_ads_active.json`
 
 ## Limitation
 

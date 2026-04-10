@@ -91,7 +91,7 @@ Reason for rejection:
 
 Recorded runs:
 
-- CPU baseline smoke:
+- CPU transformers reference smoke:
   - `artifacts/exports/ads_cpu_only_smoke_20260408`
 - CPU ONNX smoke:
   - `artifacts/exports/ads_cpu_only_smoke_onnx_20260408`
@@ -122,7 +122,7 @@ For the kept changes:
 - LSPO quality stayed exact to the operational LSPO reference after the Arrow wave:
   - `artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__arrow_fastpath_20260408_v1.json`
 
-The historical March ADS baseline and the historical `srcd52...` LSPO/train state still remain separate historical references. They were not re-established as the current operational package reference in this session.
+The historical March ADS inference baseline and the historical `srcd52...` LSPO/train state still remain separate historical references. They were not re-established as the current operational package reference in this session.
 
 The CPU-only ONNX smoke A/B also stayed output-identical:
 
@@ -161,4 +161,4 @@ What the repository should treat as settled after this wave:
 - SPECTER auto-batch uplift is rejected
 - Arrow fast path is kept
 - export frame reuse is kept
-- future work should focus on baseline policy and hardware robustness before chasing more micro-optimizations
+- future work should focus on ADS inference baseline policy and hardware robustness before chasing more micro-optimizations

@@ -1,40 +1,35 @@
 # Inference Workflow
 
-Repo-only operational and research reference. This document is not part of the public PyPI package contract.
+This is a repo-level runbook for ADS inference. Public package users normally
+only need the `README.md` usage examples.
 
-## Public Product Boundary
+## Public Path
 
-The public package is `ads-and`:
-
-- install with `uv pip install ads-and`
-- use the bundled ADS baseline model automatically
-- run local inference via `ads-and infer`
-- rely on local CPU/GPU auto-selection only
-
-This document covers the broader repo-only workspace around that product:
-
-- explicit `run-infer-sources`
-- baseline comparison and retention
-- internal runtime telemetry
-- explicit research/training/baseline workflows
-
-Use the research CLI from a repo checkout:
+The public command uses the bundled Trained NAND Model:
 
 ```bash
-python -m author_name_disambiguation_research run-infer-sources -h
+ads-and infer \
+  --publications-path data/ads/publications.parquet \
+  --references-path data/ads/references.parquet \
+  --output-dir outputs/ads_run \
+  --runtime auto
 ```
 
-## Required Inputs
+Equivalent Python entry point:
 
-- curated `publications`
-- optional curated `references`
-- explicit `output_root`
-- explicit `dataset_id`
+```python
+from author_name_disambiguation import disambiguate_sources
+```
 
-The public package path uses the embedded fixed ADS model automatically.
-Repo-only workflows may still point at explicit bundle paths when needed.
+`--references-path` is optional. `--runtime` is `auto`, `gpu`, or `cpu`.
 
-## Minimal Repo Command
+## ADS Full Candidate Run
+
+An ADS Full Candidate Run is the repo-only production-scale inference benchmark
+for an inference-only experiment. It does not train or change the Trained NAND
+Model.
+
+Run it from a checkout:
 
 ```bash
 python -m author_name_disambiguation_research run-infer-sources \
@@ -44,98 +39,53 @@ python -m author_name_disambiguation_research run-infer-sources \
   --dataset-id ads_prod_current
 ```
 
-## Product Runtime Policy
+Required arguments are `--publications-path`, `--output-root`, and
+`--dataset-id`. Useful optional arguments are `--references-path`,
+`--model-bundle`, `--scratch-dir`, `--runtime-mode`, `--cluster-backend`,
+`--uid-scope`, and `--uid-namespace`.
 
-The current supported product/runtime stance is:
+If `--model-bundle` is omitted, the packaged fixed model bundle is used.
 
-- `chars2vec` is CPU-only in product inference
-- `cluster_backend=auto` resolves to `sklearn_cpu`
-- `cuml_gpu` is explicit opt-in only
-- `numba` remains optional and is not auto-selected
+## Runtime Policy
 
-These are deliberate product decisions, not accidental leftovers.
+Current product behavior is intentionally conservative:
 
-## Hardware-Adaptive Defaults
+- `chars2vec` runs on CPU in the product path.
+- SPECTER uses GPU when requested and available; CPU mode can use `cpu_auto`,
+  which prefers ONNX when available and falls back to transformers.
+- `cluster_backend=auto` resolves to `sklearn_cpu`.
+- `cuml_gpu` is explicit opt-in only.
+- `numba` is optional and is not auto-selected.
 
-`run-infer-sources` resolves an internal runtime policy before expensive work starts. That policy is recorded in:
+The resolved runtime policy and fallbacks are written to run reports before
+the expensive stages start.
 
-- `00_context.json`
-- `02_preflight_infer.json`
+## Outputs and Reports
+
+The run writes disambiguated sources plus operational reports under
+`--output-root`, including:
+
+- `publications_disambiguated.parquet`
+- `references_disambiguated.parquet`, when references are provided
+- `source_author_assignments.parquet`
+- `author_entities.parquet`
+- `mention_clusters.parquet`
+- `summary.json`
 - `05_stage_metrics_infer_sources.json`
+- `05_go_no_go_infer_sources.json`
 
-Recorded blocks:
+## ADS Inference Baseline Comparison
 
-- `host_profile`
-- `resolved_runtime_policy`
-- `safety_fallbacks`
+The current ADS inference baseline is `bench_full_v22_fix2`.
 
-Current automatic behavior:
+Compare an ADS Full Candidate Run against it with:
 
-- `chars2vec`
-  - always CPU in the product path
-  - default batch `128`
-  - reduced to `64` below `12 GiB` available RAM
-  - reduced to `32` below `6 GiB` available RAM
-- `SPECTER`
-  - on CUDA: use the accepted GPU path and existing auto-batch heuristic
-  - on CPU: use `cpu_auto`, which prefers ONNX and falls back to transformers
-  - on CUDA OOM, halve batch size repeatedly down to `16` before CPU fallback
-- pair scoring
-  - on CUDA OOM, halve batch size repeatedly down to `1024` before CPU fallback
-  - on CPU, clamp automatic score batch if the peak estimate exceeds `10%` of available RAM
-- clustering
-  - `auto` resolves to `sklearn_cpu`
-  - `cuml_gpu` remains explicit opt-in only
-- Exact-Graph union implementation
-  - default is `python`
-  - `numba` is not auto-selected even if installed
+```bash
+python -m author_name_disambiguation_research compare-infer-baseline \
+  --baseline-run-id bench_full_v22_fix2 \
+  --current-run-id <candidate-run-id> \
+  --metrics-root artifacts/exports
+```
 
-## CPU-Only Notes
-
-The 2026-04-08 repo-host CPU-only smoke and ONNX A/B are retained as operational reference:
-
-- CPU-only is supported and robust
-- ONNX CPU was functional and quality-identical on that host
-- ONNX CPU was not faster than the plain transformers CPU path there
-
-Current product decision:
-
-- keep `cpu_auto`
-- do not add a host-specific ONNX-vs-transformers selector unless CPU-only becomes a first-class performance target later
-
-## Fail-Fast Boundaries
-
-The package falls back automatically when a supported safer path exists. It fails early only when a run is physically or contractually impossible.
-
-Early hard failures are expected for:
-
-- physically insufficient scratch space for exact out-of-core inference
-- required artifacts or runtime components with no supported fallback
-- explicit backend requests that cannot be honored and have no supported fallback
-
-Automatic fallback is expected for:
-
-- `device=auto` when CUDA is unavailable
-- TensorFlow GPU unavailability
-- ONNX CPU unavailability
-- `cuml_gpu` unavailability under `cluster_backend=auto`
-
-## Repo-Only Operations
-
-These remain in the repo workspace and are not part of the public package contract:
-
-- baseline compare/freeze flows
-- cleanup/retention workflows
-- experimental GPU clustering environments
-
-## Local GPU Environment Notes
-
-The former root-level `requirements-gpu-cu126.txt` was a host-specific repair overlay for a shared repo `.venv`, not a standalone solver input or public package install contract.
-
-If a repo-local GPU environment needs repair, reconstruct the CUDA vendor overlay from the active Torch/TensorFlow versions and keep that pin file local to the machine.
-
-## Related Repo Docs
-
-- `docs/training_workflow.md`
-- `docs/provenance.md`
-- `docs/experiments/infer_cold_path_wave_20260408.md`
+Keep or promote a candidate only after reviewing runtime, coverage, and output
+drift against the ADS inference baseline.
