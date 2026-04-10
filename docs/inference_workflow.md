@@ -128,6 +128,12 @@ These remain in the repo workspace and are not part of the public package contra
 - cleanup/retention workflows
 - experimental GPU clustering environments
 
+## Local GPU Environment Notes
+
+The former root-level `requirements-gpu-cu126.txt` was a host-specific repair overlay for a shared repo `.venv`, not a standalone solver input or public package install contract.
+
+If a repo-local GPU environment needs repair, reconstruct the CUDA vendor overlay from the active Torch/TensorFlow versions and keep that pin file local to the machine.
+
 ## Related Repo Docs
 
 - `docs/training_workflow.md`

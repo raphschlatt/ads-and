@@ -112,5 +112,4 @@ exclude = [
   "/artifacts/**",
   "/data/**",
   "/configs/**",
-  "/ToDo.md",
 ]

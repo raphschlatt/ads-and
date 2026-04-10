@@ -105,3 +105,13 @@ That split is deliberate:
 - provenance stays stable and historically readable
 - the operational package can still improve and document accepted runtime policy changes
 - special hardware paths remain available without redefining the standard install/runtime expectations for all users
+
+## Current Follow-Ups
+
+Remaining work is product and operations cleanup, not active performance chasing:
+
+- decide whether the historical `srcd52...` trained model baseline and LSPO subset state should be formally retired as historical-only or reconstructed on purpose
+- if CPU-only speed becomes a first-class product target, benchmark ONNX thread tuning or a host-aware CPU selector before making a stronger ONNX speed claim
+- if `cuml_gpu` is ever supported beyond experimental use, define it as a separate documented environment/workflow instead of broadening the standard repo `.venv`
+- tighten the public release gate around wheel/sdist install smoke, bundled-model resolution, and one-command ADS inference from a fresh environment
+- keep the tracked repo and local workspace aligned with the explicit 2026-04-09 keep-set so historical ballast does not creep back in

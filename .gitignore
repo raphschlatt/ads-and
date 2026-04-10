@@ -4,6 +4,9 @@
 __pycache__/
 .pytest_cache/
 
+# Local agent instructions
+AGENTS.md
+
 # Data and artifacts
 artifacts/
 data/cache/

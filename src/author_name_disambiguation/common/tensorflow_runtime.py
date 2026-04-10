@@ -250,7 +250,7 @@ def tensorflow_runtime_needs_warning(runtime: Mapping[str, Any] | None) -> bool:
 def format_tensorflow_runtime_warning(
     runtime: Mapping[str, Any] | None,
     *,
-    repair_hint: str = "Repair the repo venv with the documented cu126/cu12 uv pip workflow and rerun the GPU doctor.",
+    repair_hint: str = "Repair the repo-local GPU environment to match the active Torch/TensorFlow CUDA vendor packages and rerun the GPU doctor.",
 ) -> str:
     if not runtime:
         return "chars2vec TensorFlow GPU unavailable; falling back to CPU."
