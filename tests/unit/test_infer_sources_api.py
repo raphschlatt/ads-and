@@ -3,7 +3,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from author_name_disambiguation.api import disambiguate_sources, evaluate_lspo_quality, train_lspo_model
+from author_name_disambiguation.api import (
+    disambiguate_sources,
+    evaluate_lspo_quality,
+    resolve_modal_cost,
+    train_lspo_model,
+)
+from author_name_disambiguation._modal_backend import ModalCostResult
 from author_name_disambiguation.infer_sources import InferSourcesRequest, InferSourcesResult, run_infer_sources
 
 
@@ -47,6 +53,7 @@ def test_run_infer_sources_returns_typed_result(monkeypatch, tmp_path: Path):
     assert result.output_root == tmp_path
 
     captured_request = captured["request"]
+    assert captured_request.backend == "local"
     assert captured_request.dataset_id == "ads_prod_current"
     assert captured_request.uid_scope == "dataset"
     assert captured_request.uid_namespace == "ads_prod_current"
@@ -93,11 +100,12 @@ def test_run_infer_sources_accepts_keyword_arguments(monkeypatch, tmp_path: Path
 
     assert result.summary_path == tmp_path / "summary.json"
     captured_request = captured["request"]
+    assert captured_request.backend == "local"
     assert captured_request.model_bundle == tmp_path / "packaged_bundle"
     assert captured_request.infer_stage == "incremental"
     assert captured_request.progress is False
     assert captured_request.progress_handler is handler
-    assert captured_request.runtime_mode in {"cpu", "gpu"}
+    assert captured_request.runtime_mode is None
 
 
 def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch, tmp_path: Path):
@@ -155,11 +163,83 @@ def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch,
 
     assert result.summary_path == tmp_path / "summary.json"
     kwargs = captured["kwargs"]
+    assert kwargs["backend"] == "local"
     assert kwargs["dataset_id"] == "out"
     assert kwargs["runtime_mode"] == "cpu"
     assert kwargs["model_bundle"] == tmp_path / "bundle"
     assert created_ui["args"]["progress_style"] == "verbose"
     assert created_ui["closed"] is True
+
+
+def test_run_infer_sources_dispatches_modal_backend(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    def _fake_run_modal(request):
+        captured["request"] = request
+        return InferSourcesResult(
+            run_id="infer_sources_modal_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=tmp_path / "summary.json",
+        )
+
+    monkeypatch.setattr("author_name_disambiguation.infer_sources._run_modal_infer_sources", _fake_run_modal)
+
+    result = run_infer_sources(
+        publications_path=tmp_path / "publications.parquet",
+        output_root=tmp_path / "out",
+        dataset_id="ads_prod_current",
+        backend="modal",
+    )
+
+    assert result.run_id == "infer_sources_modal_test"
+    captured_request = captured["request"]
+    assert captured_request.backend == "modal"
+    assert captured_request.runtime_mode == "gpu"
+
+
+def test_disambiguate_sources_maps_modal_auto_runtime_to_gpu(monkeypatch, tmp_path: Path):
+    captured = {}
+
+    def _fake_run(request=None, **kwargs):
+        captured["kwargs"] = kwargs
+        return InferSourcesResult(
+            run_id="infer_sources_modal_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=tmp_path / "summary.json",
+        )
+
+    monkeypatch.setattr("author_name_disambiguation.api.run_infer_sources", _fake_run)
+    monkeypatch.setattr("author_name_disambiguation.api.resolve_fixed_model_bundle_path", lambda: tmp_path / "bundle")
+    monkeypatch.setattr("author_name_disambiguation.api.CliUI", lambda *args, **kwargs: type("FakeUi", (), {"close": lambda self: None})())
+    monkeypatch.setattr("author_name_disambiguation.api.get_active_ui", lambda: None)
+
+    disambiguate_sources(
+        publications_path=tmp_path / "publications.parquet",
+        output_dir=tmp_path / "out",
+        backend="modal",
+        runtime="auto",
+        progress=False,
+    )
+
+    kwargs = captured["kwargs"]
+    assert kwargs["backend"] == "modal"
+    assert kwargs["runtime_mode"] == "gpu"
 
 
 def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp_path: Path):
@@ -315,3 +395,19 @@ def test_disambiguate_sources_with_progress_handler_disables_internal_ui(monkeyp
 
     assert created["called"] is False
     assert captured["kwargs"]["progress_handler"] is handler
+
+
+def test_resolve_modal_cost_delegates_to_backend(monkeypatch, tmp_path: Path):
+    expected = ModalCostResult(
+        status="complete",
+        app_id="ap-test",
+        exact_cost_available_after_utc="2026-04-13T12:10:00Z",
+        actual_cost_usd=0.42,
+        cost_report_path=tmp_path / "modal_cost_report.json",
+    )
+
+    monkeypatch.setattr("author_name_disambiguation.api.resolve_modal_actual_cost", lambda **kwargs: expected)
+
+    result = resolve_modal_cost(tmp_path)
+
+    assert result is expected

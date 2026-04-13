@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-from author_name_disambiguation.public_api import disambiguate_sources
+from author_name_disambiguation.public_api import disambiguate_sources, resolve_modal_cost
 
 
 def _configure_library_noise(quiet_libraries: bool) -> None:
@@ -117,8 +118,37 @@ def _build_infer_human_summary(summary: dict[str, Any]) -> str:
             f"Summary: {summary.get('summary_path', 'n/a')}",
         ]
     )
+    modal_payload = dict(summary.get("modal", {}) or {})
+    if modal_payload:
+        lines.append(
+            "Modal: "
+            f"app_id={modal_payload.get('app_id', 'n/a')} | "
+            f"exact_cost_after={modal_payload.get('exact_cost_available_after_utc', 'n/a')}"
+        )
     if warnings_list:
         lines.append("Warnings: " + ", ".join(str(w) for w in warnings_list))
+    return "\n".join(lines)
+
+
+def _build_cost_payload(result: Any) -> dict[str, Any]:
+    payload = dataclasses.asdict(result)
+    cost_report_path = payload.get("cost_report_path")
+    if cost_report_path is not None:
+        payload["cost_report_path"] = str(cost_report_path)
+    return payload
+
+
+def _build_cost_human_summary(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status") or "n/a")
+    lines = [f"Modal cost lookup: {status}"]
+    lines.append(f"App ID: {payload.get('app_id', 'n/a')}")
+    lines.append(f"Exact cost available after: {payload.get('exact_cost_available_after_utc', 'n/a')}")
+    if payload.get("actual_cost_usd") is not None:
+        lines.append(f"Actual cost (USD): {payload['actual_cost_usd']}")
+    if payload.get("cost_report_path"):
+        lines.append(f"Cost report: {payload['cost_report_path']}")
+    if payload.get("reason"):
+        lines.append(f"Reason: {payload['reason']}")
     return "\n".join(lines)
 
 
@@ -127,6 +157,7 @@ def cmd_infer(args):
         publications_path=args.publications_path,
         references_path=args.references_path,
         output_dir=args.output_dir,
+        backend=args.backend,
         runtime=args.runtime,
         dataset_id=args.dataset_id,
         infer_stage=args.infer_stage,
@@ -144,6 +175,16 @@ def cmd_infer(args):
     return payload
 
 
+def cmd_cost(args):
+    result = resolve_modal_cost(output_dir=args.output_dir)
+    payload = _build_cost_payload(result)
+    if bool(getattr(args, "json_output", False)):
+        print(json.dumps(payload, indent=2))
+        return payload
+    print(_build_cost_human_summary(payload))
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Disambiguate author names in ADS parquet datasets with the bundled baseline model."
@@ -154,6 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--publications-path", required=True)
     sp.add_argument("--references-path", default=None)
     sp.add_argument("--output-dir", required=True)
+    sp.add_argument("--backend", choices=["local", "modal"], default="local")
     sp.add_argument("--dataset-id", default=None)
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full", "incremental"], default="full")
     sp.add_argument("--runtime", choices=["auto", "gpu", "cpu"], default="auto")
@@ -169,6 +211,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", dest="json_output", action="store_true")
     sp.set_defaults(json_output=False)
     sp.set_defaults(func=cmd_infer)
+
+    cp = sub.add_parser("cost", help="Resolve exact Modal costs for a completed modal-backed inference run.")
+    cp.add_argument("--output-dir", required=True)
+    cp.add_argument("--quiet-libs", dest="quiet_libs", action="store_true")
+    cp.add_argument("--verbose-libs", dest="quiet_libs", action="store_false")
+    cp.set_defaults(quiet_libs=True)
+    cp.add_argument("--json", dest="json_output", action="store_true")
+    cp.set_defaults(json_output=False)
+    cp.set_defaults(func=cmd_cost)
 
     return parser
 

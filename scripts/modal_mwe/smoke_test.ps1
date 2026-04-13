@@ -47,11 +47,12 @@ $InputDir = Join-Path $WorkDir "input"
 $OutputDir = Join-Path $WorkDir "out"
 
 uv run --python $PythonExe python .\scripts\modal_mwe\build_testset.py --output-dir $InputDir
-uv run --python $PythonExe --with modal python .\scripts\modal_mwe\client_mwe.py `
-    run `
-    --publications (Join-Path $InputDir "publications.parquet") `
-    --references (Join-Path $InputDir "references.parquet") `
+uv run --python $PythonExe --extra modal ads-and `
+    infer `
+    --publications-path (Join-Path $InputDir "publications.parquet") `
+    --references-path (Join-Path $InputDir "references.parquet") `
     --output-dir $OutputDir `
+    --backend modal `
     --runtime $Runtime `
     --infer-stage $InferStage
 
@@ -59,4 +60,4 @@ Write-Host ""
 Write-Host "Smoke test finished:"
 Write-Host "  Input:  $InputDir"
 Write-Host "  Output: $OutputDir"
-Write-Host "  Cost:   uv run --python $PythonExe --with modal python .\scripts\modal_mwe\client_mwe.py cost --output-dir $OutputDir"
+Write-Host "  Cost:   uv run --python $PythonExe --extra modal ads-and cost --output-dir $OutputDir"

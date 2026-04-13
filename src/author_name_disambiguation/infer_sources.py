@@ -9,6 +9,7 @@ from author_name_disambiguation.progress import ProgressHandler
 from author_name_disambiguation.source_inference import run_source_inference
 
 
+Backend = Literal["local", "modal"]
 UidScope = Literal["dataset", "local", "registry"]
 InferStage = Literal["smoke", "mini", "mid", "full", "incremental"]
 PrecisionMode = Literal["fp32", "amp_bf16"]
@@ -23,6 +24,7 @@ class InferSourcesRequest:
     output_root: str | Path
     dataset_id: str
     model_bundle: str | Path | None = None
+    backend: Backend = "local"
     references_path: str | Path | None = None
     scratch_dir: str | Path | None = None
     uid_scope: UidScope = "dataset"
@@ -55,6 +57,33 @@ class InferSourcesResult:
     summary_path: Path | None = None
 
 
+def _resolve_backend(value: str | None) -> Backend:
+    normalized = str(value or "local").strip().lower() or "local"
+    if normalized not in {"local", "modal"}:
+        raise ValueError(f"Unsupported backend={value!r}. Expected one of ['local', 'modal'].")
+    return normalized
+
+
+def _resolve_runtime_mode(
+    *,
+    backend: Backend,
+    runtime_mode: RuntimeMode | None,
+    specter_runtime_backend: SpecterRuntimeBackend | None,
+    device: str,
+) -> RuntimeMode | None:
+    if runtime_mode is not None:
+        return runtime_mode
+    if backend == "modal":
+        return "gpu"
+    return None
+
+
+def _run_modal_infer_sources(request: InferSourcesRequest) -> InferSourcesResult:
+    from author_name_disambiguation._modal_backend import run_modal_infer_sources
+
+    return run_modal_infer_sources(request)
+
+
 def _build_infer_request(
     request: InferSourcesRequest | None = None,
     **kwargs: Any,
@@ -64,22 +93,30 @@ def _build_infer_request(
     if request is None:
         if not kwargs:
             raise TypeError("run_infer_sources requires an InferSourcesRequest or keyword arguments.")
-        if "runtime_mode" not in kwargs and "specter_runtime_backend" not in kwargs and str(kwargs.get("device", "auto")).strip().lower() == "auto":
-            try:
-                import torch
-
-                kwargs["runtime_mode"] = "gpu" if bool(torch.cuda.is_available()) else "cpu"
-            except Exception:
-                kwargs["runtime_mode"] = "cpu"
+        kwargs["backend"] = _resolve_backend(kwargs.get("backend"))
+        kwargs["runtime_mode"] = _resolve_runtime_mode(
+            backend=kwargs["backend"],
+            runtime_mode=kwargs.get("runtime_mode"),
+            specter_runtime_backend=kwargs.get("specter_runtime_backend"),
+            device=str(kwargs.get("device", "auto")),
+        )
         request = InferSourcesRequest(**kwargs)
     if not isinstance(request, InferSourcesRequest):
         raise TypeError("run_infer_sources expected an InferSourcesRequest instance.")
+    resolved_backend = _resolve_backend(request.backend)
+    resolved_runtime_mode = _resolve_runtime_mode(
+        backend=resolved_backend,
+        runtime_mode=request.runtime_mode,
+        specter_runtime_backend=request.specter_runtime_backend,
+        device=request.device,
+    )
     if request.model_bundle is None:
         request = InferSourcesRequest(
             publications_path=request.publications_path,
             output_root=request.output_root,
             dataset_id=request.dataset_id,
             model_bundle=resolve_fixed_model_bundle_path(),
+            backend=resolved_backend,
             references_path=request.references_path,
             scratch_dir=request.scratch_dir,
             uid_scope=request.uid_scope,
@@ -87,7 +124,30 @@ def _build_infer_request(
             infer_stage=request.infer_stage,
             cluster_config=request.cluster_config,
             gates_config=request.gates_config,
-            runtime_mode=request.runtime_mode,
+            runtime_mode=resolved_runtime_mode,
+            device=request.device,
+            precision_mode=request.precision_mode,
+            specter_runtime_backend=request.specter_runtime_backend,
+            cluster_backend=request.cluster_backend,
+            force=request.force,
+            progress=request.progress,
+            progress_handler=request.progress_handler,
+        )
+    elif resolved_backend != request.backend or resolved_runtime_mode != request.runtime_mode:
+        request = InferSourcesRequest(
+            publications_path=request.publications_path,
+            output_root=request.output_root,
+            dataset_id=request.dataset_id,
+            model_bundle=request.model_bundle,
+            backend=resolved_backend,
+            references_path=request.references_path,
+            scratch_dir=request.scratch_dir,
+            uid_scope=request.uid_scope,
+            uid_namespace=request.uid_namespace,
+            infer_stage=request.infer_stage,
+            cluster_config=request.cluster_config,
+            gates_config=request.gates_config,
+            runtime_mode=resolved_runtime_mode,
             device=request.device,
             precision_mode=request.precision_mode,
             specter_runtime_backend=request.specter_runtime_backend,
@@ -100,4 +160,7 @@ def _build_infer_request(
 
 
 def run_infer_sources(request: InferSourcesRequest | None = None, **kwargs: Any) -> InferSourcesResult:
-    return run_source_inference(_build_infer_request(request, **kwargs))
+    resolved_request = _build_infer_request(request, **kwargs)
+    if resolved_request.backend == "modal":
+        return _run_modal_infer_sources(resolved_request)
+    return run_source_inference(resolved_request)

@@ -1,0 +1,72 @@
+{
+  "run_id": "infer_sources_20260413T142308Z_87f6d884",
+  "dataset_id": "out",
+  "output_root": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out",
+  "summary_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\summary.json",
+  "go": true,
+  "infer_stage_requested": "smoke",
+  "infer_stage_effective": "smoke",
+  "runtime_mode": "gpu",
+  "runtime_backend": "transformers",
+  "resolved_device": "cuda",
+  "precision_mode": "amp_bf16",
+  "clustering_backend": "connected_components_cpu",
+  "counts": {
+    "publications": 2,
+    "references": 1,
+    "canonical_records": 3,
+    "specter_sources": 3,
+    "mentions": 5,
+    "clusters": 4,
+    "authors_total": 5,
+    "authors_mapped": 5,
+    "authors_unmapped": 0
+  },
+  "stage_seconds": {
+    "bootstrap": 8.348246705,
+    "load_inputs": 7.232938224999998,
+    "preflight": 0.02933153400000066,
+    "name_embeddings": 2.009612437999998,
+    "text_embeddings": 14.898065992,
+    "pair_inference": 0.6003998059999986,
+    "clustering": 0.0051776249999946344,
+    "export": 0.12697234999999552,
+    "total": 33.576093667
+  },
+  "warnings": [
+    "singleton_ratio"
+  ],
+  "blockers": [],
+  "publications_disambiguated_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\publications_disambiguated.parquet",
+  "references_disambiguated_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\references_disambiguated.parquet",
+  "author_entities_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\author_entities.parquet",
+  "source_author_assignments_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\source_author_assignments.parquet",
+  "mention_clusters_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\mention_clusters.parquet",
+  "stage_metrics_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\05_stage_metrics_infer_sources.json",
+  "go_no_go_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\05_go_no_go_infer_sources.json",
+  "outputs": {
+    "publications_disambiguated_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\publications_disambiguated.parquet",
+    "references_disambiguated_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\references_disambiguated.parquet",
+    "source_author_assignments_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\source_author_assignments.parquet",
+    "author_entities_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\author_entities.parquet",
+    "mention_clusters_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\mention_clusters.parquet",
+    "stage_metrics_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\05_stage_metrics_infer_sources.json",
+    "go_no_go_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\modal_pkg_smoke\\out\\05_go_no_go_infer_sources.json"
+  },
+  "modal": {
+    "app_id": "ap-uM9ApHoH8Be0F6Ydvofw7A",
+    "app_name": "ads-and-modal",
+    "mode": "ephemeral_app_run",
+    "transport": "modal_sdk_app_run",
+    "run_started_at_utc": "2026-04-13T14:19:19Z",
+    "run_finished_at_utc": "2026-04-13T14:23:42Z",
+    "billing_resolution": "h",
+    "query_start_utc": "2026-04-13T14:00:00Z",
+    "query_end_exclusive_utc": "2026-04-13T15:00:00Z",
+    "exact_cost_available_after_utc": "2026-04-13T15:10:00Z",
+    "actual_cost_usd": null,
+    "cost_report_path": null,
+    "publications_staging_bytes": 4160,
+    "references_staging_bytes": 4110
+  }
+}

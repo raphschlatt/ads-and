@@ -7,11 +7,11 @@ only need the `README.md` usage examples.
 
 The public command uses the bundled Trained NAND Model:
 
-```bash
-ads-and infer \
-  --publications-path data/ads/publications.parquet \
-  --references-path data/ads/references.parquet \
-  --output-dir outputs/ads_run \
+```powershell
+ads-and infer `
+  --publications-path data/ads/publications.parquet `
+  --references-path data/ads/references.parquet `
+  --output-dir outputs/ads_run `
   --runtime auto
 ```
 
@@ -22,6 +22,23 @@ from author_name_disambiguation import disambiguate_sources
 ```
 
 `--references-path` is optional. `--runtime` is `auto`, `gpu`, or `cpu`.
+
+Modal uses the same public path with `--backend modal`:
+
+```powershell
+ads-and infer `
+  --publications-path data/ads/publications.parquet `
+  --references-path data/ads/references.parquet `
+  --output-dir outputs/ads_run_modal `
+  --backend modal `
+  --runtime auto
+```
+
+Exact Modal costs stay a separate follow-up lookup:
+
+```powershell
+ads-and cost --output-dir outputs/ads_run_modal
+```
 
 ## ADS Full Candidate Run
 

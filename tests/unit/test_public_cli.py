@@ -5,14 +5,17 @@ from pathlib import Path
 
 import author_name_disambiguation
 from author_name_disambiguation import public_cli
+from author_name_disambiguation._modal_backend import ModalCostResult
 from author_name_disambiguation.infer_sources import InferSourcesResult
 
 
 def test_public_package_root_exports_inference_only():
     exported = set(author_name_disambiguation.__all__)
     assert "disambiguate_sources" in exported
+    assert "resolve_modal_cost" in exported
     assert "run_infer_sources" in exported
     assert "InferSourcesRequest" in exported
+    assert "ModalCostResult" in exported
     assert "evaluate_lspo_quality" not in exported
     assert "train_lspo_model" not in exported
     assert "precompute_source_embeddings" not in exported
@@ -21,7 +24,7 @@ def test_public_package_root_exports_inference_only():
 def test_public_cli_exposes_only_infer_command():
     parser = public_cli.build_parser()
     commands = set(parser._subparsers._group_actions[0].choices.keys())
-    assert commands == {"infer"}
+    assert commands == {"infer", "cost"}
 
 
 def test_public_cli_infer_parser_defaults():
@@ -38,11 +41,21 @@ def test_public_cli_infer_parser_defaults():
 
     assert args.command == "infer"
     assert args.references_path is None
+    assert args.backend == "local"
     assert args.dataset_id is None
     assert args.runtime == "auto"
     assert args.infer_stage == "full"
     assert args.progress is True
     assert args.progress_style == "compact"
+    assert args.json_output is False
+
+
+def test_public_cli_cost_parser_defaults():
+    parser = public_cli.build_parser()
+    args = parser.parse_args(["cost", "--output-dir", "out"])
+
+    assert args.command == "cost"
+    assert args.output_dir == "out"
     assert args.json_output is False
 
 
@@ -116,3 +129,24 @@ def test_public_cli_infer_emits_summary(monkeypatch, tmp_path: Path, capsys):
     output = capsys.readouterr().out
     assert "ADS inference complete" in output
     assert "mode=cpu" in output
+
+
+def test_public_cli_cost_emits_summary(monkeypatch, tmp_path: Path, capsys):
+    cost_report_path = tmp_path / "modal_cost_report.json"
+
+    def _fake_resolve_modal_cost(**_kwargs):
+        return ModalCostResult(
+            status="complete",
+            app_id="ap-test",
+            exact_cost_available_after_utc="2026-04-13T12:10:00Z",
+            actual_cost_usd=0.1234,
+            cost_report_path=cost_report_path,
+        )
+
+    monkeypatch.setattr("author_name_disambiguation.public_cli.resolve_modal_cost", _fake_resolve_modal_cost)
+
+    public_cli.main(["cost", "--output-dir", str(tmp_path)])
+
+    output = capsys.readouterr().out
+    assert "Modal cost lookup: complete" in output
+    assert "0.1234" in output

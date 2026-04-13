@@ -27,6 +27,8 @@ def test_release_artifacts_are_inference_only(tmp_path: Path):
         wheel_members = set(wheel.namelist())
     assert "author_name_disambiguation/public_cli.py" in wheel_members
     assert "author_name_disambiguation/public_api.py" in wheel_members
+    assert "author_name_disambiguation/_modal_backend.py" in wheel_members
+    assert "author_name_disambiguation/_modal_app.py" in wheel_members
     assert (
         "author_name_disambiguation/resources/model_bundles/fixed_model_baseline/bundle_v1/checkpoint.pt"
         in wheel_members
@@ -38,6 +40,7 @@ def test_release_artifacts_are_inference_only(tmp_path: Path):
     assert "author_name_disambiguation/resources/models/nand_best.yaml" not in wheel_members
     assert "author_name_disambiguation/resources/train_runs/full.yaml" not in wheel_members
     assert "author_name_disambiguation_research/__init__.py" not in wheel_members
+    assert "scripts/modal_mwe/client_mwe.py" not in wheel_members
 
     with tarfile.open(sdist_path, "r:gz") as sdist:
         sdist_members = set(sdist.getnames())

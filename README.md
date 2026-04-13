@@ -17,25 +17,31 @@ Python import path: `author_name_disambiguation`
 
 Use [uv](https://docs.astral.sh/uv/). Requires Python ≥ 3.11.
 
-```bash
+```powershell
 uv pip install ads-and
 ```
 
 If you don't have a GPU: Optional faster CPU inference via ONNX (still much slower than GPU):
 
-```bash
+```powershell
 uv pip install "ads-and[cpu_onnx]"
+```
+
+Optional Modal backend:
+
+```powershell
+uv pip install "ads-and[modal]"
 ```
 
 ## Usage
 
 **CLI**
 
-```bash
-ads-and infer \
-  --publications-path data/ads/publications.parquet \
-  --references-path data/ads/references.parquet \
-  --output-dir outputs/ads_run \
+```powershell
+ads-and infer `
+  --publications-path data/ads/publications.parquet `
+  --references-path data/ads/references.parquet `
+  --output-dir outputs/ads_run `
   --runtime auto
 ```
 
@@ -43,10 +49,27 @@ Add `--json` for a machine-readable run summary on stdout.
 
 `--runtime` options: `auto` (GPU if CUDA is available, else CPU), `gpu`, `cpu`.
 
+Modal uses the same command surface with an explicit backend switch:
+
+```powershell
+ads-and infer `
+  --publications-path data/ads/publications.parquet `
+  --references-path data/ads/references.parquet `
+  --output-dir outputs/ads_run_modal `
+  --backend modal `
+  --runtime auto
+```
+
+Exact Modal costs are a separate official lookup:
+
+```powershell
+ads-and cost --output-dir outputs/ads_run_modal
+```
+
 **Python**
 
 ```python
-from author_name_disambiguation import disambiguate_sources
+from author_name_disambiguation import disambiguate_sources, resolve_modal_cost
 
 result = disambiguate_sources(
     publications_path="data/ads/publications.parquet",
@@ -57,6 +80,17 @@ result = disambiguate_sources(
 
 print(result.publications_disambiguated_path)
 print(result.summary_path)
+
+modal_result = disambiguate_sources(
+    publications_path="data/ads/publications.parquet",
+    references_path="data/ads/references.parquet",
+    output_dir="outputs/ads_run_modal",
+    backend="modal",
+    runtime="auto",
+)
+
+# later, after the billing interval closes
+cost_result = resolve_modal_cost("outputs/ads_run_modal")
 ```
 
 ## Input schema
