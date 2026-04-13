@@ -89,6 +89,5 @@ def remote_disambiguate(
 @app.local_entrypoint()
 def main() -> None:
     print(
-        "Deploy this app with `modal deploy scripts/modal_mwe/modal_app.py` "
-        "and call it locally via scripts/modal_mwe/client_mwe.py."
+        "Call this app locally via `scripts/modal_mwe/client_mwe.py run ...`."
     )
