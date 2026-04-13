@@ -58,7 +58,7 @@ def _read_artifact(path: Path | None) -> bytes | None:
     return path.read_bytes()
 
 
-@app.function(gpu=DEFAULT_GPU, image=image, timeout=DEFAULT_TIMEOUT_SECONDS)
+@app.function(gpu=DEFAULT_GPU, cpu=8, image=image, timeout=DEFAULT_TIMEOUT_SECONDS)
 def remote_disambiguate(
     *,
     publications_parquet: bytes,
