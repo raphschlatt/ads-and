@@ -13,6 +13,7 @@ UserRuntime = Literal["auto", "gpu", "cpu"]
 UserInferStage = Literal["full", "incremental", "smoke", "mini", "mid"]
 ProgressStyle = Literal["compact", "verbose"]
 UserBackend = Literal["local", "modal"]
+UserModalGpu = Literal["t4", "l4"]
 
 
 def _derive_dataset_id(*, publications_path: str | Path, output_dir: str | Path, dataset_id: str | None) -> str:
@@ -59,6 +60,7 @@ def disambiguate_sources(
     output_dir: str | Path,
     backend: UserBackend = "local",
     runtime: UserRuntime = "auto",
+    modal_gpu: UserModalGpu | None = None,
     dataset_id: str | None = None,
     infer_stage: UserInferStage = "full",
     force: bool = False,
@@ -86,6 +88,7 @@ def disambiguate_sources(
             backend=resolved_backend,
             infer_stage=infer_stage,
             runtime_mode=resolved_runtime,
+            modal_gpu=modal_gpu,
             force=bool(force),
             progress=bool(progress),
             progress_handler=progress_handler,

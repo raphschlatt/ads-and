@@ -210,16 +210,31 @@ def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.Mo
             self.total_memory = total_memory
 
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA A100 80GB PCIe")
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(80 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
     assert effective == 384
 
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA L4")
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(24 * 1024**3))
+    requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
+    assert requested is None
+    assert effective == 256
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA A10G")
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(24 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
     assert effective == 192
 
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA L40S")
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(48 * 1024**3))
+    requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
+    assert requested is None
+    assert effective == 192
+
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA T4")
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(16 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
@@ -246,6 +261,7 @@ def test_resolve_device_to_host_flush_batch_count_prefers_larger_cuda_buffers(mo
             self.total_memory = total_memory
 
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA A100 80GB PCIe")
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(80 * 1024**3))
     assert embed_specter._resolve_device_to_host_flush_batch_count(
         torch,
@@ -257,11 +273,19 @@ def test_resolve_device_to_host_flush_batch_count_prefers_larger_cuda_buffers(mo
         device="cuda:0",
         effective_batch_size=256,
     ) == 12
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA L4")
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(24 * 1024**3))
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cuda:0",
+        effective_batch_size=256,
+    ) == 12
     assert embed_specter._resolve_device_to_host_flush_batch_count(
         torch,
         device="cuda:0",
         effective_batch_size=128,
     ) == 8
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _idx: "NVIDIA T4")
     assert embed_specter._resolve_device_to_host_flush_batch_count(
         torch,
         device="cuda:0",

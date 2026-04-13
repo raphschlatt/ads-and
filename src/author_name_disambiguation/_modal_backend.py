@@ -99,13 +99,21 @@ def _ceil_to_hour(value: datetime) -> datetime:
     return floored + timedelta(hours=1)
 
 
-def _build_modal_lookup(*, app_id: str, app_name: str, run_started_at: datetime, run_finished_at: datetime) -> dict[str, Any]:
+def _build_modal_lookup(
+    *,
+    app_id: str,
+    app_name: str,
+    gpu_type: str,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+) -> dict[str, Any]:
     query_start = _floor_to_hour(run_started_at)
     query_end_exclusive = _ceil_to_hour(run_finished_at)
     exact_cost_available_after = query_end_exclusive + timedelta(minutes=BILLING_BUFFER_MINUTES)
     return {
         "app_id": str(app_id),
         "app_name": str(app_name),
+        "gpu_type": str(gpu_type),
         "mode": "ephemeral_app_run",
         "transport": "modal_sdk_app_run",
         "run_started_at_utc": _format_utc(run_started_at),
@@ -295,6 +303,19 @@ def _resolve_modal_progress(request) -> bool:
     return caller_progress and caller_handler is None
 
 
+def _existing_modal_gpu_type(output_root: Path) -> str | None:
+    summary_path = output_root / SUMMARY_FILENAME
+    if not summary_path.exists():
+        return None
+    try:
+        summary = _load_json(summary_path)
+    except Exception:
+        return None
+    modal_meta = dict(summary.get("modal") or {})
+    value = str(modal_meta.get("gpu_type") or "").strip().upper()
+    return value or None
+
+
 def _validate_modal_request(request) -> None:
     publications_path = Path(request.publications_path).expanduser()
     references_path = None if request.references_path is None else Path(request.references_path).expanduser()
@@ -313,8 +334,9 @@ def _validate_modal_request(request) -> None:
 
 def run_modal_infer_sources(request):
     from author_name_disambiguation._modal_app import APP_NAME
+    from author_name_disambiguation._modal_app import _resolve_modal_gpu_type
     from author_name_disambiguation._modal_app import app as modal_app
-    from author_name_disambiguation._modal_app import remote_disambiguate
+    from author_name_disambiguation._modal_app import resolve_remote_disambiguate_fn
     from author_name_disambiguation.infer_sources import InferSourcesResult
 
     modal = _require_modal()
@@ -326,13 +348,27 @@ def run_modal_infer_sources(request):
     references_present = request.references_path is not None
     result_paths = _build_result_paths(output_root=output_root, references_present=references_present)
     stale_cost_report = output_root / COST_REPORT_FILENAME
+    requested_gpu_type = _resolve_modal_gpu_type(getattr(request, "modal_gpu", None))
 
     remote_progress = _resolve_modal_progress(request)
 
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
+        existing_gpu_type = _existing_modal_gpu_type(output_root)
+        if existing_gpu_type == requested_gpu_type:
+            if remote_progress:
+                print(
+                    f"ADS · Modal · reused existing infer outputs · gpu={requested_gpu_type}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return _existing_result(request, result_paths=result_paths)
         if remote_progress:
-            print("ADS · Modal · reused existing infer outputs", file=sys.stderr, flush=True)
-        return _existing_result(request, result_paths=result_paths)
+            print(
+                "ADS · Modal · existing outputs skipped due to gpu mismatch "
+                f"(requested={requested_gpu_type} existing={existing_gpu_type or 'unknown'})",
+                file=sys.stderr,
+                flush=True,
+            )
 
     if stale_cost_report.exists():
         stale_cost_report.unlink()
@@ -362,6 +398,7 @@ def run_modal_infer_sources(request):
         run_started_at = _utc_now()
         remote_result: dict[str, Any]
         app_id = ""
+        remote_disambiguate = resolve_remote_disambiguate_fn(requested_gpu_type)
         output_cm = modal.enable_output() if remote_progress else contextlib.nullcontext()
         with output_cm, modal_app.run() as running_app:
             app_id = str(getattr(running_app, "app_id", "") or "")
@@ -409,6 +446,7 @@ def run_modal_infer_sources(request):
     modal_lookup = _build_modal_lookup(
         app_id=app_id,
         app_name=APP_NAME,
+        gpu_type=requested_gpu_type,
         run_started_at=run_started_at,
         run_finished_at=run_finished_at,
     )

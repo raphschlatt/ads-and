@@ -118,6 +118,26 @@ def _resolve_cuda_total_memory_bytes(torch, device: str) -> int | None:
         return None
 
 
+def _resolve_cuda_device_name(torch, device: str) -> str | None:
+    if not str(device).startswith("cuda"):
+        return None
+    try:
+        device_obj = torch.device(device)
+        device_index = device_obj.index
+        if device_index is None and hasattr(torch.cuda, "current_device"):
+            device_index = int(torch.cuda.current_device())
+        if device_index is None:
+            device_index = 0
+        return str(torch.cuda.get_device_name(device_index) or "")
+    except Exception:
+        return None
+
+
+def _is_l4_gpu(device_name: str | None) -> bool:
+    normalized = " ".join(str(device_name or "").upper().split())
+    return normalized == "L4" or normalized.endswith(" L4")
+
+
 def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> tuple[int | None, int]:
     requested = None if batch_size is None else max(1, int(batch_size))
     if requested is not None:
@@ -126,10 +146,13 @@ def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> t
         return resolve_cpu_batch_size(batch_size)
 
     total_memory = _resolve_cuda_total_memory_bytes(torch, device)
+    device_name = _resolve_cuda_device_name(torch, device)
     if total_memory is None:
         return None, 64
     if total_memory >= 70 * 1024**3:
         return None, 384
+    if _is_l4_gpu(device_name) and total_memory >= 20 * 1024**3:
+        return None, 256
     if total_memory >= 24 * 1024**3:
         return None, 192
     if total_memory >= 12 * 1024**3:
@@ -148,7 +171,10 @@ def _resolve_device_to_host_flush_batch_count(
 
     batch_size = 0 if effective_batch_size is None else int(effective_batch_size)
     total_memory = _resolve_cuda_total_memory_bytes(torch, device)
+    device_name = _resolve_cuda_device_name(torch, device)
     if total_memory is not None and total_memory >= 70 * 1024**3 and batch_size >= 256:
+        return 12
+    if _is_l4_gpu(device_name) and batch_size >= 256:
         return 12
     if batch_size >= 256:
         return 10

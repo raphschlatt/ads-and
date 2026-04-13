@@ -24,6 +24,7 @@ def test_build_modal_lookup_same_hour_window() -> None:
     lookup = modal_backend._build_modal_lookup(
         app_id="ap-123",
         app_name="ads-and-modal",
+        gpu_type="L4",
         run_started_at=_utc(2026, 4, 13, 10, 5),
         run_finished_at=_utc(2026, 4, 13, 10, 32),
     )
@@ -32,12 +33,14 @@ def test_build_modal_lookup_same_hour_window() -> None:
     assert lookup["query_end_exclusive_utc"] == "2026-04-13T11:00:00Z"
     assert lookup["exact_cost_available_after_utc"] == "2026-04-13T11:10:00Z"
     assert lookup["billing_resolution"] == "h"
+    assert lookup["gpu_type"] == "L4"
 
 
 def test_build_modal_lookup_cross_hour_window() -> None:
     lookup = modal_backend._build_modal_lookup(
         app_id="ap-123",
         app_name="ads-and-modal",
+        gpu_type="T4",
         run_started_at=_utc(2026, 4, 13, 10, 55),
         run_finished_at=_utc(2026, 4, 13, 11, 2),
     )
@@ -45,6 +48,23 @@ def test_build_modal_lookup_cross_hour_window() -> None:
     assert lookup["query_start_utc"] == "2026-04-13T10:00:00Z"
     assert lookup["query_end_exclusive_utc"] == "2026-04-13T12:00:00Z"
     assert lookup["exact_cost_available_after_utc"] == "2026-04-13T12:10:00Z"
+
+
+def test_existing_modal_gpu_type_reads_summary(tmp_path) -> None:
+    _write_summary(
+        tmp_path,
+        {
+            "app_id": "ap-123",
+            "app_name": "ads-and-modal",
+            "gpu_type": "L4",
+            "billing_resolution": "h",
+            "query_start_utc": "2026-04-13T10:00:00Z",
+            "query_end_exclusive_utc": "2026-04-13T11:00:00Z",
+            "exact_cost_available_after_utc": "2026-04-13T11:10:00Z",
+        },
+    )
+
+    assert modal_backend._existing_modal_gpu_type(tmp_path) == "L4"
 
 
 def test_resolve_modal_actual_cost_not_yet_available(tmp_path, monkeypatch) -> None:
