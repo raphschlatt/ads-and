@@ -131,6 +131,44 @@ def test_public_cli_infer_emits_summary(monkeypatch, tmp_path: Path, capsys):
     assert "mode=cpu" in output
 
 
+def test_public_cli_infer_summary_includes_modal_block(tmp_path: Path):
+    summary = {
+        "go": True,
+        "runtime_mode": "gpu",
+        "resolved_device": "cuda:0",
+        "runtime_backend": "transformers",
+        "clustering_backend": "sklearn_cpu",
+        "counts": {"publications": 10, "references": 5, "mentions": 15, "clusters": 5, "authors_mapped": 5, "authors_total": 5},
+        "stage_seconds": {"total": 12.3},
+        "output_root": str(tmp_path),
+        "outputs": {
+            "publications_disambiguated_path": str(tmp_path / "pubs.parquet"),
+            "references_disambiguated_path": None,
+            "source_author_assignments_path": str(tmp_path / "assignments.parquet"),
+        },
+        "summary_path": str(tmp_path / "summary.json"),
+        "modal": {
+            "app_id": "ap-uM9ApHoH8Be0F6Ydvofw7A",
+            "app_name": "ads-and-modal",
+            "mode": "ephemeral_app_run",
+            "billing_resolution": "h",
+            "query_start_utc": "2026-04-13T14:00:00Z",
+            "query_end_exclusive_utc": "2026-04-13T15:00:00Z",
+            "exact_cost_available_after_utc": "2026-04-13T15:10:00Z",
+            "publications_staging_bytes": 4300,
+            "references_staging_bytes": 4100,
+        },
+    }
+    rendered = public_cli._build_infer_human_summary(summary)
+    assert "Modal: app=ads-and-modal (ephemeral_app_run)" in rendered
+    assert "app_id=ap-uM9ApHoH8Be0F6Ydvofw7A" in rendered
+    assert "staging=pubs " in rendered
+    assert "refs " in rendered
+    assert "billing window=2026-04-13T14:00:00Z → 2026-04-13T15:00:00Z (resolution h)" in rendered
+    assert "exact cost available after 2026-04-13T15:10:00Z" in rendered
+    assert "ads-and cost --output-dir" in rendered
+
+
 def test_public_cli_cost_emits_summary(monkeypatch, tmp_path: Path, capsys):
     cost_report_path = tmp_path / "modal_cost_report.json"
 

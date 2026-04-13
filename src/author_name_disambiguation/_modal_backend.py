@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,12 +13,10 @@ from typing import Any
 import pandas as pd
 
 from author_name_disambiguation.approaches.nand.export import export_source_mirrored_outputs
-from author_name_disambiguation.common.cli_ui import CliProgressHandler, get_active_ui
 from author_name_disambiguation.common.io_schema import save_parquet
 from author_name_disambiguation.common.pipeline_reports import load_json
 from author_name_disambiguation.data.prepare_ads import _read_ads_parquet_minimal
 from author_name_disambiguation.defaults import resolve_fixed_model_bundle_path
-from author_name_disambiguation.progress import ProgressReporter
 from author_name_disambiguation.source_inference import _required_outputs_exist
 
 
@@ -27,11 +26,6 @@ COST_REPORT_FILENAME = "modal_cost_report.json"
 SUMMARY_FILENAME = "summary.json"
 STAGE_METRICS_FILENAME = "05_stage_metrics_infer_sources.json"
 GO_NO_GO_FILENAME = "05_go_no_go_infer_sources.json"
-MODAL_PROGRESS_STAGES = {
-    "prepare": (1, "Prepare Modal Run"),
-    "remote": (2, "Run Remote Inference"),
-    "finalize": (3, "Finalize Local Outputs"),
-}
 
 
 @dataclass(slots=True)
@@ -307,7 +301,7 @@ def run_modal_infer_sources(request):
     from author_name_disambiguation._modal_app import remote_disambiguate
     from author_name_disambiguation.infer_sources import InferSourcesResult
 
-    _require_modal()
+    modal = _require_modal()
     _load_local_modal_env()
     _validate_modal_request(request)
 
@@ -317,34 +311,9 @@ def run_modal_infer_sources(request):
     result_paths = _build_result_paths(output_root=output_root, references_present=references_present)
     stale_cost_report = output_root / COST_REPORT_FILENAME
 
-    ui = get_active_ui()
-    reporter_handler = request.progress_handler
-    if reporter_handler is None and ui is not None:
-        reporter_handler = CliProgressHandler(ui)
-    reporter = ProgressReporter(handler=reporter_handler)
-
-    def _stage_start(stage_key: str) -> None:
-        stage_index, stage_label = MODAL_PROGRESS_STAGES[stage_key]
-        reporter.start_stage(
-            stage_index=stage_index,
-            stage_total=len(MODAL_PROGRESS_STAGES),
-            stage_key=stage_key,
-            stage_label=stage_label,
-        )
-
-    def _stage_info(message: str, *, payload: dict[str, Any] | None = None) -> None:
-        reporter.info(message, payload=payload)
-
-    def _stage_done(message: str, *, payload: dict[str, Any] | None = None, skipped: bool = False) -> None:
-        reporter.done(message, payload=payload, skipped=skipped)
-
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
-        _stage_start("prepare")
-        _stage_done("Reused existing infer outputs.", skipped=True)
-        existing = _existing_result(request, result_paths=result_paths)
-        summary_payload = load_json(existing.summary_path) if existing.summary_path and existing.summary_path.exists() else {}
-        reporter.run_done(payload=summary_payload, message=f"Run complete | run_id={existing.run_id}")
-        return existing
+        print("ADS · Modal · reused existing infer outputs", file=sys.stderr, flush=True)
+        return _existing_result(request, result_paths=result_paths)
 
     if stale_cost_report.exists():
         stale_cost_report.unlink()
@@ -364,18 +333,16 @@ def run_modal_infer_sources(request):
             )
         )
 
-        _stage_start("prepare")
-        _stage_info(
-            f"dataset={request.dataset_id} | infer_stage={request.infer_stage} | output_root={output_root}",
-            payload={"backend": "modal"},
+        print(
+            f"ADS · Modal · dataset={request.dataset_id} · infer_stage={request.infer_stage} · output_root={output_root}",
+            file=sys.stderr,
+            flush=True,
         )
-        _stage_done("Prepared Modal payload.")
 
         run_started_at = _utc_now()
         remote_result: dict[str, Any]
         app_id = ""
-        _stage_start("remote")
-        with modal_app.run() as running_app:
+        with modal.enable_output(), modal_app.run() as running_app:
             app_id = str(getattr(running_app, "app_id", "") or "")
             remote_result = remote_disambiguate.remote(
                 publications_parquet=publications_payload,
@@ -396,7 +363,6 @@ def run_modal_infer_sources(request):
             if not app_id:
                 app_id = str(getattr(running_app, "app_id", "") or "")
         run_finished_at = _utc_now()
-        _stage_done("Remote inference complete.", payload={"app_id": app_id, "app_name": APP_NAME})
 
     assignments_path = _write_bytes(result_paths["source_author_assignments"], remote_result.get("source_author_assignments"))
     author_entities_path = _write_bytes(result_paths["author_entities"], remote_result.get("author_entities"))
@@ -410,7 +376,6 @@ def run_modal_infer_sources(request):
     publications_disambiguated_path = result_paths["publications_disambiguated"]
     references_disambiguated_path = result_paths["references_disambiguated"]
 
-    _stage_start("finalize")
     export_source_mirrored_outputs(
         assignments=assignments,
         publications_path=request.publications_path,
@@ -442,8 +407,6 @@ def run_modal_infer_sources(request):
         modal_lookup=modal_lookup,
     )
     summary_path = _write_json(output_root / SUMMARY_FILENAME, summary)
-    _stage_done("Localized Modal outputs.")
-    reporter.run_done(payload=summary, message=f"Run complete | run_id={summary.get('run_id', '')}")
 
     return InferSourcesResult(
         run_id=str(summary.get("run_id") or remote_result.get("run_id") or ""),

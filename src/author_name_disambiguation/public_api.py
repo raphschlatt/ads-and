@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from author_name_disambiguation._modal_backend import ModalCostResult, resolve_modal_actual_cost
-from author_name_disambiguation.common.cli_ui import CliProgressHandler, CliUI, get_active_ui
+from author_name_disambiguation.common.cli_ui import CliUI, get_active_ui
 from author_name_disambiguation.defaults import resolve_fixed_model_bundle_path
 from author_name_disambiguation.infer_sources import InferSourcesResult, run_infer_sources
 from author_name_disambiguation.progress import ProgressHandler
@@ -74,12 +74,8 @@ def disambiguate_sources(
         dataset_id=dataset_id,
     )
     created_ui = None
-    if progress_handler is None and get_active_ui() is None:
-        total_steps = 3 if resolved_backend == "modal" else 8
-        created_ui = CliUI(total_steps=total_steps, progress=bool(progress), progress_style=str(progress_style))
-    resolved_progress_handler = progress_handler
-    if resolved_backend == "modal" and resolved_progress_handler is None and created_ui is not None:
-        resolved_progress_handler = CliProgressHandler(created_ui)
+    if resolved_backend != "modal" and progress_handler is None and get_active_ui() is None:
+        created_ui = CliUI(total_steps=8, progress=bool(progress), progress_style=str(progress_style))
     try:
         return run_infer_sources(
             publications_path=publications_path,
@@ -92,7 +88,7 @@ def disambiguate_sources(
             runtime_mode=resolved_runtime,
             force=bool(force),
             progress=bool(progress),
-            progress_handler=resolved_progress_handler,
+            progress_handler=progress_handler,
         )
     finally:
         if created_ui is not None:

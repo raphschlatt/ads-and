@@ -73,6 +73,20 @@ def _format_human_seconds(value: Any) -> str:
         return str(value)
 
 
+def _format_human_bytes(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        size = float(value)
+    except Exception:
+        return str(value)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
+
 def _build_infer_human_summary(summary: dict[str, Any]) -> str:
     counts = dict(summary.get("counts", {}) or {})
     stage_seconds = dict(summary.get("stage_seconds", {}) or {})
@@ -120,11 +134,25 @@ def _build_infer_human_summary(summary: dict[str, Any]) -> str:
     )
     modal_payload = dict(summary.get("modal", {}) or {})
     if modal_payload:
-        lines.append(
-            "Modal: "
-            f"app_id={modal_payload.get('app_id', 'n/a')} | "
-            f"exact_cost_after={modal_payload.get('exact_cost_available_after_utc', 'n/a')}"
+        app_name = modal_payload.get("app_name") or "ads-and-modal"
+        mode = modal_payload.get("mode") or "ephemeral_app_run"
+        staging_bits = [f"pubs {_format_human_bytes(modal_payload.get('publications_staging_bytes'))}"]
+        references_bytes = modal_payload.get("references_staging_bytes")
+        if references_bytes:
+            staging_bits.append(f"refs {_format_human_bytes(references_bytes)}")
+        lines.extend(
+            [
+                f"Modal: app={app_name} ({mode})",
+                f"       app_id={modal_payload.get('app_id', 'n/a')}",
+                f"       staging={' · '.join(staging_bits)}",
+                f"       billing window={modal_payload.get('query_start_utc', 'n/a')} → "
+                f"{modal_payload.get('query_end_exclusive_utc', 'n/a')} (resolution {modal_payload.get('billing_resolution', 'h')})",
+                f"       exact cost available after {modal_payload.get('exact_cost_available_after_utc', 'n/a')}"
+                " — run `ads-and cost --output-dir <run_output_dir>`",
+            ]
         )
+        if modal_payload.get("actual_cost_usd") is not None:
+            lines.append(f"       actual cost (USD)={modal_payload['actual_cost_usd']}")
     if warnings_list:
         lines.append("Warnings: " + ", ".join(str(w) for w in warnings_list))
     return "\n".join(lines)
