@@ -172,6 +172,28 @@ def test_generate_specter_embeddings_length_batches_and_cpu_auto_precision(monke
     assert meta["tokenizers_parallelism_setting"] == "true"
 
 
+def test_resolve_effective_precision_mode_uses_fp16_for_auto_on_legacy_cuda(monkeypatch: pytest.MonkeyPatch):
+    class _Cuda:
+        @staticmethod
+        def is_bf16_supported(*, including_emulation=True):
+            return bool(including_emulation)
+
+    torch_like = SimpleNamespace(cuda=_Cuda())
+
+    assert embed_specter._resolve_effective_precision_mode(torch_like, "auto", "cuda:0") == "amp_fp16"
+
+
+def test_resolve_effective_precision_mode_keeps_bf16_for_native_support(monkeypatch: pytest.MonkeyPatch):
+    class _Cuda:
+        @staticmethod
+        def is_bf16_supported(*, including_emulation=True):
+            return True
+
+    torch_like = SimpleNamespace(cuda=_Cuda())
+
+    assert embed_specter._resolve_effective_precision_mode(torch_like, "auto", "cuda:0") == "amp_bf16"
+
+
 def test_configure_hf_noise_preserves_tokenizers_parallelism(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("TOKENIZERS_PARALLELISM", raising=False)
     embed_specter._configure_hf_noise(True)
@@ -196,12 +218,17 @@ def test_resolve_specter_batch_size_uses_gpu_memory_tiers(monkeypatch: pytest.Mo
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(24 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
-    assert effective == 160
+    assert effective == 192
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(16 * 1024**3))
+    requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
+    assert requested is None
+    assert effective == 128
 
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _idx: _Props(8 * 1024**3))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cuda:0")
     assert requested is None
-    assert effective == 32
+    assert effective == 64
 
     monkeypatch.setattr(embed_specter, "resolve_cpu_batch_size", lambda _batch_size: (None, 16))
     requested, effective = embed_specter._resolve_specter_batch_size(torch, None, "cpu")
@@ -224,17 +251,22 @@ def test_resolve_device_to_host_flush_batch_count_prefers_larger_cuda_buffers(mo
         torch,
         device="cuda:0",
         effective_batch_size=384,
+    ) == 12
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cuda:0",
+        effective_batch_size=256,
+    ) == 12
+    assert embed_specter._resolve_device_to_host_flush_batch_count(
+        torch,
+        device="cuda:0",
+        effective_batch_size=128,
     ) == 8
     assert embed_specter._resolve_device_to_host_flush_batch_count(
         torch,
         device="cuda:0",
-        effective_batch_size=160,
+        effective_batch_size=64,
     ) == 6
-    assert embed_specter._resolve_device_to_host_flush_batch_count(
-        torch,
-        device="cuda:0",
-        effective_batch_size=32,
-    ) == 4
     assert embed_specter._resolve_device_to_host_flush_batch_count(
         torch,
         device="cpu",
