@@ -42,6 +42,7 @@ def test_public_cli_infer_parser_defaults():
     assert args.command == "infer"
     assert args.references_path is None
     assert args.backend == "local"
+    assert args.modal_gpu is None
     assert args.dataset_id is None
     assert args.runtime == "auto"
     assert args.infer_stage == "full"
@@ -131,6 +132,47 @@ def test_public_cli_infer_emits_summary(monkeypatch, tmp_path: Path, capsys):
     assert "mode=cpu" in output
 
 
+def test_public_cli_infer_passes_modal_gpu(monkeypatch, tmp_path: Path):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(json.dumps({"summary_path": str(summary_path), "output_root": str(tmp_path)}), encoding="utf-8")
+    captured = {}
+
+    def _fake_disambiguate_sources(**kwargs):
+        captured["kwargs"] = kwargs
+        return InferSourcesResult(
+            run_id="infer_sources_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=summary_path,
+        )
+
+    monkeypatch.setattr("author_name_disambiguation.public_cli.disambiguate_sources", _fake_disambiguate_sources)
+
+    public_cli.main(
+        [
+            "infer",
+            "--publications-path",
+            "publications.parquet",
+            "--output-dir",
+            str(tmp_path),
+            "--backend",
+            "modal",
+            "--modal-gpu",
+            "l4",
+            "--json",
+        ]
+    )
+
+    assert captured["kwargs"]["modal_gpu"] == "l4"
+
+
 def test_public_cli_infer_summary_includes_modal_block(tmp_path: Path):
     summary = {
         "go": True,
@@ -150,6 +192,7 @@ def test_public_cli_infer_summary_includes_modal_block(tmp_path: Path):
         "modal": {
             "app_id": "ap-uM9ApHoH8Be0F6Ydvofw7A",
             "app_name": "ads-and-modal",
+            "gpu_type": "L4",
             "mode": "ephemeral_app_run",
             "billing_resolution": "h",
             "query_start_utc": "2026-04-13T14:00:00Z",
@@ -160,13 +203,33 @@ def test_public_cli_infer_summary_includes_modal_block(tmp_path: Path):
         },
     }
     rendered = public_cli._build_infer_human_summary(summary)
-    assert "Modal: app=ads-and-modal (ephemeral_app_run)" in rendered
+    assert "Modal: app=ads-and-modal (ephemeral_app_run) | gpu=L4" in rendered
     assert "app_id=ap-uM9ApHoH8Be0F6Ydvofw7A" in rendered
     assert "staging=pubs " in rendered
     assert "refs " in rendered
     assert "billing window=2026-04-13T14:00:00Z → 2026-04-13T15:00:00Z (resolution h)" in rendered
     assert "exact cost available after 2026-04-13T15:10:00Z" in rendered
     assert "ads-and cost --output-dir" in rendered
+
+
+def test_public_cli_infer_parser_accepts_modal_gpu():
+    parser = public_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "infer",
+            "--publications-path",
+            "publications.parquet",
+            "--output-dir",
+            "out",
+            "--backend",
+            "modal",
+            "--modal-gpu",
+            "l4",
+        ]
+    )
+
+    assert args.backend == "modal"
+    assert args.modal_gpu == "l4"
 
 
 def test_public_cli_cost_emits_summary(monkeypatch, tmp_path: Path, capsys):

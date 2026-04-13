@@ -136,13 +136,18 @@ def _build_infer_human_summary(summary: dict[str, Any]) -> str:
     if modal_payload:
         app_name = modal_payload.get("app_name") or "ads-and-modal"
         mode = modal_payload.get("mode") or "ephemeral_app_run"
+        gpu_type = str(modal_payload.get("gpu_type") or "").strip()
         staging_bits = [f"pubs {_format_human_bytes(modal_payload.get('publications_staging_bytes'))}"]
         references_bytes = modal_payload.get("references_staging_bytes")
         if references_bytes:
             staging_bits.append(f"refs {_format_human_bytes(references_bytes)}")
         lines.extend(
             [
-                f"Modal: app={app_name} ({mode})",
+                (
+                    f"Modal: app={app_name} ({mode})"
+                    if not gpu_type
+                    else f"Modal: app={app_name} ({mode}) | gpu={gpu_type}"
+                ),
                 f"       app_id={modal_payload.get('app_id', 'n/a')}",
                 f"       staging={' · '.join(staging_bits)}",
                 f"       billing window={modal_payload.get('query_start_utc', 'n/a')} → "
@@ -187,6 +192,7 @@ def cmd_infer(args):
         output_dir=args.output_dir,
         backend=args.backend,
         runtime=args.runtime,
+        modal_gpu=args.modal_gpu,
         dataset_id=args.dataset_id,
         infer_stage=args.infer_stage,
         force=bool(args.force),
@@ -224,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--references-path", default=None)
     sp.add_argument("--output-dir", required=True)
     sp.add_argument("--backend", choices=["local", "modal"], default="local")
+    sp.add_argument("--modal-gpu", choices=["t4", "l4"], default=None)
     sp.add_argument("--dataset-id", default=None)
     sp.add_argument("--infer-stage", choices=["smoke", "mini", "mid", "full", "incremental"], default="full")
     sp.add_argument("--runtime", choices=["auto", "gpu", "cpu"], default="auto")

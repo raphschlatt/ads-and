@@ -16,6 +16,7 @@ PrecisionMode = Literal["fp32", "amp_bf16"]
 ClusterBackend = Literal["auto", "sklearn_cpu", "cuml_gpu"]
 SpecterRuntimeBackend = Literal["transformers", "onnx_fp32"]
 RuntimeMode = Literal["gpu", "cpu"]
+ModalGpu = Literal["t4", "l4"]
 
 
 @dataclass(slots=True)
@@ -37,6 +38,7 @@ class InferSourcesRequest:
     precision_mode: PrecisionMode = "fp32"
     specter_runtime_backend: SpecterRuntimeBackend | None = None
     cluster_backend: ClusterBackend | None = None
+    modal_gpu: ModalGpu | None = None
     force: bool = False
     progress: bool = True
     progress_handler: ProgressHandler | None = None
@@ -78,6 +80,17 @@ def _resolve_runtime_mode(
     return None
 
 
+def _resolve_modal_gpu(value: str | None) -> ModalGpu | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized not in {"t4", "l4"}:
+        raise ValueError(f"Unsupported modal_gpu={value!r}. Expected one of ['l4', 't4'].")
+    return normalized
+
+
 def _run_modal_infer_sources(request: InferSourcesRequest) -> InferSourcesResult:
     from author_name_disambiguation._modal_backend import run_modal_infer_sources
 
@@ -100,6 +113,7 @@ def _build_infer_request(
             specter_runtime_backend=kwargs.get("specter_runtime_backend"),
             device=str(kwargs.get("device", "auto")),
         )
+        kwargs["modal_gpu"] = _resolve_modal_gpu(kwargs.get("modal_gpu"))
         request = InferSourcesRequest(**kwargs)
     if not isinstance(request, InferSourcesRequest):
         raise TypeError("run_infer_sources expected an InferSourcesRequest instance.")
@@ -110,6 +124,7 @@ def _build_infer_request(
         specter_runtime_backend=request.specter_runtime_backend,
         device=request.device,
     )
+    resolved_modal_gpu = _resolve_modal_gpu(request.modal_gpu)
     if request.model_bundle is None:
         request = InferSourcesRequest(
             publications_path=request.publications_path,
@@ -129,11 +144,16 @@ def _build_infer_request(
             precision_mode=request.precision_mode,
             specter_runtime_backend=request.specter_runtime_backend,
             cluster_backend=request.cluster_backend,
+            modal_gpu=resolved_modal_gpu,
             force=request.force,
             progress=request.progress,
             progress_handler=request.progress_handler,
         )
-    elif resolved_backend != request.backend or resolved_runtime_mode != request.runtime_mode:
+    elif (
+        resolved_backend != request.backend
+        or resolved_runtime_mode != request.runtime_mode
+        or resolved_modal_gpu != request.modal_gpu
+    ):
         request = InferSourcesRequest(
             publications_path=request.publications_path,
             output_root=request.output_root,
@@ -152,6 +172,7 @@ def _build_infer_request(
             precision_mode=request.precision_mode,
             specter_runtime_backend=request.specter_runtime_backend,
             cluster_backend=request.cluster_backend,
+            modal_gpu=resolved_modal_gpu,
             force=request.force,
             progress=request.progress,
             progress_handler=request.progress_handler,

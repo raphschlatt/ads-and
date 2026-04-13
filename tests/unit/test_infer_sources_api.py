@@ -200,12 +200,14 @@ def test_run_infer_sources_dispatches_modal_backend(monkeypatch, tmp_path: Path)
         output_root=tmp_path / "out",
         dataset_id="ads_prod_current",
         backend="modal",
+        modal_gpu="l4",
     )
 
     assert result.run_id == "infer_sources_modal_test"
     captured_request = captured["request"]
     assert captured_request.backend == "modal"
     assert captured_request.runtime_mode == "gpu"
+    assert captured_request.modal_gpu == "l4"
 
 
 def test_disambiguate_sources_maps_modal_auto_runtime_to_gpu(monkeypatch, tmp_path: Path):
@@ -236,6 +238,7 @@ def test_disambiguate_sources_maps_modal_auto_runtime_to_gpu(monkeypatch, tmp_pa
         publications_path=tmp_path / "publications.parquet",
         output_dir=tmp_path / "out",
         backend="modal",
+        modal_gpu="t4",
         runtime="auto",
         progress=False,
     )
@@ -243,6 +246,7 @@ def test_disambiguate_sources_maps_modal_auto_runtime_to_gpu(monkeypatch, tmp_pa
     kwargs = captured["kwargs"]
     assert kwargs["backend"] == "modal"
     assert kwargs["runtime_mode"] == "gpu"
+    assert kwargs["modal_gpu"] == "t4"
 
 
 def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp_path: Path):

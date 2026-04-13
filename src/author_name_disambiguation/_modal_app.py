@@ -16,7 +16,8 @@ from author_name_disambiguation.source_inference import run_source_inference
 
 APP_NAME = "ads-and-modal"
 FUNCTION_NAME = "remote_disambiguate"
-DEFAULT_GPU = "T4"
+DEFAULT_GPU = "L4"
+SUPPORTED_GPU_TYPES = ("T4", "L4")
 DEFAULT_TIMEOUT_SECONDS = 60 * 60 * 24
 PACKAGE_ROOT = Path(__file__).resolve().parent
 RESOURCE_REMOTE_ROOT = "/root/author_name_disambiguation/resources"
@@ -58,8 +59,14 @@ def _read_artifact(path: Path | None) -> bytes | None:
     return path.read_bytes()
 
 
-@app.function(gpu=DEFAULT_GPU, cpu=8, image=image, timeout=DEFAULT_TIMEOUT_SECONDS)
-def remote_disambiguate(
+def _resolve_modal_gpu_type(value: str | None) -> str:
+    normalized = str(value or DEFAULT_GPU).strip().upper() or DEFAULT_GPU
+    if normalized not in SUPPORTED_GPU_TYPES:
+        raise ValueError(f"Unsupported modal GPU type {value!r}. Expected one of {list(SUPPORTED_GPU_TYPES)!r}.")
+    return normalized
+
+
+def _run_remote_disambiguate(
     *,
     publications_parquet: bytes,
     references_parquet: bytes | None = None,
@@ -128,3 +135,78 @@ def remote_disambiguate(
             "go_no_go": _read_artifact(result.go_no_go_path),
             "summary": json.dumps(summary_payload, ensure_ascii=False).encode("utf-8"),
         }
+
+
+@app.function(gpu=DEFAULT_GPU, cpu=8, image=image, timeout=DEFAULT_TIMEOUT_SECONDS)
+def remote_disambiguate(
+    *,
+    publications_parquet: bytes,
+    references_parquet: bytes | None = None,
+    dataset_id: str,
+    runtime_mode: str = "gpu",
+    infer_stage: str = "full",
+    uid_scope: str = "dataset",
+    uid_namespace: str | None = None,
+    device: str = "auto",
+    precision_mode: str = "fp32",
+    specter_runtime_backend: str | None = None,
+    cluster_backend: str | None = None,
+    force: bool = False,
+    progress: bool = True,
+) -> dict[str, Any]:
+    return _run_remote_disambiguate(
+        publications_parquet=publications_parquet,
+        references_parquet=references_parquet,
+        dataset_id=dataset_id,
+        runtime_mode=runtime_mode,
+        infer_stage=infer_stage,
+        uid_scope=uid_scope,
+        uid_namespace=uid_namespace,
+        device=device,
+        precision_mode=precision_mode,
+        specter_runtime_backend=specter_runtime_backend,
+        cluster_backend=cluster_backend,
+        force=force,
+        progress=progress,
+    )
+
+
+@app.function(gpu="T4", cpu=8, image=image, timeout=DEFAULT_TIMEOUT_SECONDS)
+def remote_disambiguate_t4(
+    *,
+    publications_parquet: bytes,
+    references_parquet: bytes | None = None,
+    dataset_id: str,
+    runtime_mode: str = "gpu",
+    infer_stage: str = "full",
+    uid_scope: str = "dataset",
+    uid_namespace: str | None = None,
+    device: str = "auto",
+    precision_mode: str = "fp32",
+    specter_runtime_backend: str | None = None,
+    cluster_backend: str | None = None,
+    force: bool = False,
+    progress: bool = True,
+) -> dict[str, Any]:
+    return _run_remote_disambiguate(
+        publications_parquet=publications_parquet,
+        references_parquet=references_parquet,
+        dataset_id=dataset_id,
+        runtime_mode=runtime_mode,
+        infer_stage=infer_stage,
+        uid_scope=uid_scope,
+        uid_namespace=uid_namespace,
+        device=device,
+        precision_mode=precision_mode,
+        specter_runtime_backend=specter_runtime_backend,
+        cluster_backend=cluster_backend,
+        force=force,
+        progress=progress,
+    )
+
+
+def resolve_remote_disambiguate_fn(gpu_type: str | None):
+    resolved_gpu_type = _resolve_modal_gpu_type(gpu_type)
+    if resolved_gpu_type == "T4":
+        return remote_disambiguate_t4
+    return remote_disambiguate

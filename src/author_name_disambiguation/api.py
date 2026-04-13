@@ -29,6 +29,7 @@ UserInferStage = Literal["full", "incremental", "smoke", "mini", "mid"]
 TrainStage = Literal["smoke", "mini", "mid", "full"]
 ProgressStyle = Literal["compact", "verbose"]
 UserBackend = Literal["local", "modal"]
+UserModalGpu = Literal["t4", "l4"]
 
 
 @dataclass(slots=True)
@@ -116,6 +117,7 @@ def disambiguate_sources(
     output_dir: str | Path,
     backend: UserBackend = "local",
     runtime: UserRuntime = "auto",
+    modal_gpu: UserModalGpu | None = None,
     dataset_id: str | None = None,
     force: bool = False,
     model_bundle: str | Path | None = None,
@@ -145,6 +147,7 @@ def disambiguate_sources(
             backend=resolved_backend,
             infer_stage=infer_stage,
             runtime_mode=resolved_runtime,
+            modal_gpu=modal_gpu,
             force=bool(force),
             progress=bool(progress),
             progress_handler=progress_handler,
