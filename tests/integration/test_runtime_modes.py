@@ -420,10 +420,6 @@ def test_runtime_mode_cpu_falls_back_from_onnx_to_transformers(monkeypatch, tmp_
             "effective_precision_mode": "fp32",
             "requested_batch_size": kwargs.get("batch_size"),
             "effective_batch_size": kwargs.get("batch_size"),
-            "column_present": False,
-            "precomputed_embedding_count": 0,
-            "recomputed_embedding_count": int(len(mentions)),
-            "used_precomputed_embeddings": False,
         }
         return arr, meta
 
@@ -466,10 +462,6 @@ def test_internal_backend_override_keeps_public_runtime_metadata_compact(monkeyp
             "resolved_device": "cpu",
             "fallback_reason": None,
             "effective_precision_mode": "fp32",
-            "column_present": False,
-            "precomputed_embedding_count": 0,
-            "recomputed_embedding_count": int(len(mentions)),
-            "used_precomputed_embeddings": False,
         }
         return arr, meta
 

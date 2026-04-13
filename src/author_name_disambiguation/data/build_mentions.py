@@ -100,7 +100,6 @@ def explode_records_to_mentions(
                 "block_key",
                 "aff",
                 "orcid",
-                "precomputed_embedding",
             ]
         )
 
@@ -122,7 +121,6 @@ def explode_records_to_mentions(
                 "block_key",
                 "aff",
                 "orcid",
-                "precomputed_embedding",
             ]
         )
 
@@ -144,7 +142,6 @@ def explode_records_to_mentions(
                 "block_key",
                 "aff",
                 "orcid",
-                "precomputed_embedding",
             ]
         )
 
@@ -174,8 +171,6 @@ def explode_records_to_mentions(
     exploded["aff"] = exploded["__aff_list"]
     if "orcid" not in exploded.columns:
         exploded["orcid"] = None
-    if "precomputed_embedding" not in exploded.columns:
-        exploded["precomputed_embedding"] = None
 
     return exploded[
         [
@@ -191,6 +186,5 @@ def explode_records_to_mentions(
             "block_key",
             "aff",
             "orcid",
-            "precomputed_embedding",
         ]
     ].reset_index(drop=True)

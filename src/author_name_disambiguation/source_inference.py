@@ -55,7 +55,7 @@ from author_name_disambiguation.common.uid_registry import assign_registry_uids,
 from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
-from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings, summarize_precomputed_embeddings
+from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
 from author_name_disambiguation.progress import ProgressReporter, activate_progress_reporter
 
 if TYPE_CHECKING:
@@ -93,11 +93,6 @@ def _write_consistency(output_path: Path, *, run_id: str, stage: str, extras: di
     if extras:
         payload.update(extras)
     return write_json(payload, output_path)
-
-
-def _summarize_precomputed_frame(frame: pd.DataFrame) -> dict[str, Any]:
-    values = frame["precomputed_embedding"].tolist() if "precomputed_embedding" in frame.columns else None
-    return summarize_precomputed_embeddings(values, total_count=int(len(frame)))
 
 
 def _select_specter_source_records(*, canonical_records: pd.DataFrame, mentions: pd.DataFrame) -> pd.DataFrame:
@@ -1015,15 +1010,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     save_parquet(mentions, dirs["interim"] / "mentions.parquet", index=False)
     specter_source_records = _select_specter_source_records(canonical_records=canonical_records, mentions=mentions)
 
-    precomputed_embeddings = {
-        "publications": _summarize_precomputed_frame(publications),
-        "references": _summarize_precomputed_frame(references),
-        "canonical_records": _summarize_precomputed_frame(canonical_records),
-        "specter_sources": _summarize_precomputed_frame(specter_source_records),
-        "mentions_full": _summarize_precomputed_frame(full_mentions),
-        "mentions": _summarize_precomputed_frame(mentions),
-    }
-
     write_json(
         {
             "run_id": run_id,
@@ -1038,7 +1024,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "ads_mentions": int(len(mentions)),
             "infer_stage": infer_stage,
             "subset_ratio": float(len(mentions) / max(1, len(full_mentions))),
-            "precomputed_embeddings": precomputed_embeddings,
         },
         input_summary_path,
     )
@@ -1065,7 +1050,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     preflight["host_profile"] = host_profile
     preflight["resolved_runtime_policy"] = resolved_runtime_policy
     preflight["safety_fallbacks"] = safety_fallbacks
-    preflight["precomputed_embeddings"] = precomputed_embeddings
     write_json(preflight, preflight_path)
     consistency_paths.append(
         _write_consistency(
@@ -1076,11 +1060,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         )
     )
     _stage_info(
-        f"precomputed_embedding column present={_yes_no(precomputed_embeddings['specter_sources']['column_present'])}"
-    )
-    _stage_info(
         f"specter_sources={_format_count(len(specter_source_records))} | "
-        f"specter_recompute={_format_count(precomputed_embeddings['specter_sources']['recomputed_embedding_count'])} | "
         f"pair_upper_bound={_format_count(preflight['pair_upper_bound'])}"
     )
     if preflight.get("exact_infeasible_reason"):
@@ -1165,7 +1145,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     _stage_info(
         f"cache={'reuse-if-valid' if text_cache_requested else 'miss'} | "
         f"sources={_format_count(len(specter_source_records))} | "
-        f"precomputed={_format_count(precomputed_embeddings['specter_sources']['precomputed_embedding_count'])} | "
         f"batch_size={specter_batch_size_label} | device={str(effective_request_device)} | "
         f"backend={specter_runtime_backend} | "
         f"precision={specter_precision_mode}"
@@ -1185,7 +1164,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
                 batch_size=specter_batch_size,
                 device=str(effective_request_device),
                 precision_mode=specter_precision_mode,
-                prefer_precomputed=True,
                 use_stub_if_missing=False,
                 show_progress=progress_enabled,
                 quiet_libraries=True,
@@ -1272,7 +1250,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         f"{_format_count(len(specter_source_records))} source texts prepared for {_format_count(len(mentions))} mentions in "
         f"{_format_elapsed(text_elapsed)} ({_format_rate(len(specter_source_records), text_elapsed)}) | "
         f"cache={'hit' if text_runtime_meta.get('cache_hit') else 'miss'} | "
-        f"precomputed={_format_count(text_runtime_meta.get('precomputed_embedding_count') or 0)} | "
         f"device={resolved_text_device or 'n/a'}",
         elapsed_seconds=text_elapsed,
     )
@@ -1787,8 +1764,14 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         references_path=request.references_path,
         publications_output_path=result_paths["publications_disambiguated"],
         references_output_path=result_paths["references_disambiguated"],
-        publications_frame=publications,
-        references_frame=references,
+        publications_frame=(
+            None if Path(request.publications_path).suffix.lower() == ".parquet" else publications
+        ),
+        references_frame=(
+            None
+            if request.references_path is None or Path(request.references_path).suffix.lower() == ".parquet"
+            else references
+        ),
         return_runtime_meta=True,
     )
     if isinstance(source_export_result, tuple) and len(source_export_result) == 2:
@@ -1848,7 +1831,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "host_profile": host_profile,
         "resolved_runtime_policy": resolved_runtime_policy,
         "safety_fallbacks": safety_fallbacks,
-        "precomputed_embeddings": precomputed_embeddings,
         "uid_resolution": uid_mode_meta,
     }
     write_json(cluster_used_payload, cluster_cfg_used_path)
@@ -1863,7 +1845,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "clustering": cluster_runtime_meta,
         "export": export_runtime_meta,
     }
-    context_payload["precomputed_embeddings"] = precomputed_embeddings
     context_payload["safety_fallbacks"] = safety_fallbacks
     write_json(context_payload, context_path)
     consistency_paths.append(
@@ -1923,7 +1904,6 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "clustering": cluster_runtime_meta,
             "export": export_runtime_meta,
         },
-        precomputed_embeddings=precomputed_embeddings,
         storage_mode=str(preflight.get("storage_mode") or "out_of_core_exact"),
         scratch_dir=str(preflight.get("scratch_dir")) if preflight.get("scratch_dir") is not None else None,
         scratch_free_bytes=preflight.get("scratch_free_bytes"),

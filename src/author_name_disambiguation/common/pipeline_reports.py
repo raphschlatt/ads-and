@@ -488,7 +488,6 @@ def build_infer_stage_metrics(
     pair_upper_bound: int | None = None,
     source_export_qc: Mapping[str, Any] | None = None,
     runtime: Mapping[str, Any] | None = None,
-    precomputed_embeddings: Mapping[str, Any] | None = None,
     storage_mode: str | None = None,
     scratch_dir: str | None = None,
     scratch_free_bytes: int | None = None,
@@ -499,7 +498,6 @@ def build_infer_stage_metrics(
     eps_meta = dict(eps_meta or {})
     source_export_qc = dict(source_export_qc or {})
     runtime = dict(runtime or {})
-    precomputed_embeddings = dict(precomputed_embeddings or {})
     pubs_qc = dict(source_export_qc.get("publications", {}) or {})
     refs_qc = dict(source_export_qc.get("references", {}) or {})
 
@@ -601,7 +599,6 @@ def build_infer_stage_metrics(
             "references_present": bool(source_export_qc.get("references_present")) if source_export_qc else None,
         },
         "runtime": runtime,
-        "precomputed_embeddings": precomputed_embeddings,
     }
 
 

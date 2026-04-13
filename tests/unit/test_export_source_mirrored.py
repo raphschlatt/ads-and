@@ -202,13 +202,13 @@ def test_export_source_mirrored_outputs_supports_parquet(tmp_path: Path):
 
     pd.DataFrame(
         [
-            {"Bibcode": "bib1", "Author": ["Doe J", "Roe A"], "Title_en": "T1"},
-            {"Bibcode": "bib2", "Author": ["Doe J."], "Title_en": "T2"},
+            {"Bibcode": "bib1", "Author": ["Doe J", "Roe A"], "Title_en": "T1", "DOI": "10.1/a", "Keywords": ["x"]},
+            {"Bibcode": "bib2", "Author": ["Doe J."], "Title_en": "T2", "DOI": "10.1/b", "Keywords": ["y"]},
         ]
     ).to_parquet(pubs_path, index=False)
     pd.DataFrame(
         [
-            {"Bibcode": "bib3", "Author": ["Ref X", "Ref Y"], "Title_en": "R1"},
+            {"Bibcode": "bib3", "Author": ["Ref X", "Ref Y"], "Title_en": "R1", "PDF_URL": "https://example.test/ref.pdf"},
         ]
     ).to_parquet(refs_path, index=False)
 
@@ -224,7 +224,10 @@ def test_export_source_mirrored_outputs_supports_parquet(tmp_path: Path):
     refs_out_df = pd.read_parquet(refs_out)
     assert list(pubs_out_df.loc[0, "AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
     assert list(pubs_out_df.loc[0, "AuthorDisplayName"]) == ["Doe J", "Roe A"]
+    assert pubs_out_df.loc[0, "DOI"] == "10.1/a"
+    assert list(pubs_out_df.loc[0, "Keywords"]) == ["x"]
     assert list(refs_out_df.loc[0, "AuthorUID"]) == ["set::blk.r.0", "set::src.reference.0.1"]
+    assert refs_out_df.loc[0, "PDF_URL"] == "https://example.test/ref.pdf"
 
 
 def test_export_source_mirrored_outputs_reuses_in_memory_parquet_frames(tmp_path: Path):

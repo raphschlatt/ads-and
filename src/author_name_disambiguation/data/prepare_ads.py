@@ -8,9 +8,29 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from author_name_disambiguation.common.io_schema import MENTION_REQUIRED_COLUMNS, save_parquet, validate_columns
 from author_name_disambiguation.data.build_mentions import explode_records_to_mentions, parse_year, split_author_field
+
+
+_ADS_PARQUET_PROJECTION_CANDIDATES = [
+    "Bibcode",
+    "bibcode",
+    "Author",
+    "author",
+    "Title_en",
+    "Title",
+    "title",
+    "Abstract_en",
+    "Abstract",
+    "abstract",
+    "Year",
+    "year",
+    "Affiliation",
+    "Affilliation",
+    "aff",
+]
 
 
 def _iter_jsonl(path: Path):
@@ -115,18 +135,6 @@ def _pick_optional_list_or_scalar(record: dict[str, Any], keys: Iterable[str]) -
     return None
 
 
-def _pick_embedding(record: dict[str, Any]) -> list[float] | None:
-    for key in ("precomputed_embedding", "embedding"):
-        value = record.get(key)
-        if value is None:
-            continue
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
-            values = [float(item) for item in value]
-            if values:
-                return values
-    return None
-
-
 def _is_present_value(value: Any) -> bool:
     if value is None:
         return False
@@ -147,15 +155,6 @@ def _normalize_optional_list_or_scalar_value(value: Any) -> Any:
         return [None if item is None else str(item).strip() for item in value]
     text = str(value).strip()
     return text or None
-
-
-def _normalize_embedding_value(value: Any) -> list[float] | None:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, dict)):
-        values = [float(item) for item in value]
-        return values or None
-    return None
 
 
 def _coalesce_text_columns(frame: pd.DataFrame, keys: Iterable[str]) -> pd.Series:
@@ -189,6 +188,16 @@ def _coalesce_object_columns(frame: pd.DataFrame, keys: Iterable[str]) -> pd.Ser
     return result
 
 
+def _read_ads_parquet_minimal(path: Path) -> pd.DataFrame:
+    parquet_file = pq.ParquetFile(path)
+    available = set(parquet_file.schema_arrow.names)
+    projected_columns = [column for column in _ADS_PARQUET_PROJECTION_CANDIDATES if column in available]
+    if projected_columns:
+        return pd.read_parquet(path, columns=projected_columns)
+    row_count = int(parquet_file.metadata.num_rows) if parquet_file.metadata is not None else 0
+    return pd.DataFrame(index=pd.RangeIndex(row_count))
+
+
 def _normalize_ads_parquet_frame(raw_frame: pd.DataFrame, source_type: str) -> pd.DataFrame:
     bibcode = _coalesce_text_columns(raw_frame, ["Bibcode", "bibcode"])
     authors_raw = _coalesce_object_columns(raw_frame, ["Author", "author"])
@@ -198,9 +207,6 @@ def _normalize_ads_parquet_frame(raw_frame: pd.DataFrame, source_type: str) -> p
     year = _coalesce_object_columns(raw_frame, ["Year", "year"]).map(parse_year)
     aff = _coalesce_object_columns(raw_frame, ["Affiliation", "Affilliation", "aff"]).map(
         _normalize_optional_list_or_scalar_value
-    )
-    precomputed_embedding = _coalesce_object_columns(raw_frame, ["precomputed_embedding", "embedding"]).map(
-        _normalize_embedding_value
     )
 
     out = pd.DataFrame(
@@ -213,7 +219,6 @@ def _normalize_ads_parquet_frame(raw_frame: pd.DataFrame, source_type: str) -> p
             "authors": authors,
             "source_type": str(source_type),
             "source_row_idx": np.arange(len(raw_frame), dtype=np.int64),
-            "precomputed_embedding": precomputed_embedding,
         }
     )
     out = out[out["bibcode"].astype(str).str.strip() != ""].copy()
@@ -245,7 +250,6 @@ def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str,
         "authors": authors,
         "source_type": source_type,
         "source_row_idx": source_row_idx,
-        "precomputed_embedding": _pick_embedding(record),
     }
 
 
@@ -265,7 +269,7 @@ def load_ads_records(
     raw_source: pd.DataFrame | None = None
 
     if resolved.suffix.lower() == ".parquet":
-        raw_source = pd.read_parquet(resolved)
+        raw_source = _read_ads_parquet_minimal(resolved)
         read_seconds = perf_counter() - read_started_at
         normalize_started_at = perf_counter()
         out = _normalize_ads_parquet_frame(raw_source, source_type=source_type)
@@ -291,7 +295,6 @@ def load_ads_records(
                 "authors",
                 "source_type",
                 "source_row_idx",
-                "precomputed_embedding",
             ],
         )
         mode = "record_iter"
@@ -318,7 +321,6 @@ def _empty_canonical_records_frame() -> pd.DataFrame:
             "authors",
             "source_type",
             "source_row_idx",
-            "precomputed_embedding",
             "canonical_record_id",
             "canonical_source_type",
             "canonical_source_row_idx",
@@ -353,7 +355,6 @@ def _finalize_deduplicated_group(accumulator: dict[str, Any]) -> dict[str, Any]:
         "authors": accumulator["authors"],
         "source_type": source_type,
         "source_row_idx": accumulator["source_row_idx"],
-        "precomputed_embedding": accumulator["precomputed_embedding"],
         "canonical_source_type": accumulator["canonical_source_type"],
         "canonical_source_row_idx": accumulator["canonical_source_row_idx"],
     }
@@ -382,7 +383,7 @@ def deduplicate_ads_records(
         return (empty, meta) if return_meta else empty
 
     all_records = all_records.sort_values(["bibcode", "_priority", "source_row_idx"], kind="stable").reset_index(drop=True)
-    fields = ["title", "abstract", "year", "aff", "precomputed_embedding", "authors"]
+    fields = ["title", "abstract", "year", "aff", "authors"]
     bibcodes = all_records["bibcode"].astype(str).tolist()
     source_types = all_records["source_type"].astype(str).tolist()
     source_row_indices = all_records["source_row_idx"].astype(np.int64).tolist()
@@ -420,7 +421,6 @@ def deduplicate_ads_records(
                 "authors": None,
                 "source_type": source_type,
                 "source_row_idx": source_row_idx,
-                "precomputed_embedding": None,
                 "canonical_source_type": source_type,
                 "canonical_source_row_idx": source_row_idx,
                 "has_publication": source_type == "publication",

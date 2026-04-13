@@ -34,6 +34,7 @@ def _write_dataset(tmp_path: Path, *, with_references: bool = True) -> tuple[Pat
                 "Abstract_en": "Abstract 1",
                 "Year": 2020,
                 "Affiliation": ["Inst A", "Inst B"],
+                "DOI": "10.1/pub-1",
             },
             {
                 "Bibcode": "bib2",
@@ -42,6 +43,7 @@ def _write_dataset(tmp_path: Path, *, with_references: bool = True) -> tuple[Pat
                 "Abstract_en": "Abstract 2",
                 "Year": 2021,
                 "Affiliation": ["Inst C"],
+                "Keywords": ["kw-a"],
             },
         ]
     ).to_parquet(pubs_path, index=False)
@@ -56,6 +58,7 @@ def _write_dataset(tmp_path: Path, *, with_references: bool = True) -> tuple[Pat
                     "Abstract_en": "Abstract 3",
                     "Year": 2022,
                     "Affiliation": ["Inst R1", "Inst R2"],
+                    "PDF_URL": "https://example.test/ref-3.pdf",
                 }
             ]
         ).to_parquet(refs_path, index=False)
@@ -267,10 +270,6 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
                 "mean_sequence_length_observed": 0.0,
                 "device_to_host_flushes": 0,
                 "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
-                "column_present": False,
-                "precomputed_embedding_count": 0,
-                "recomputed_embedding_count": len(mentions),
-                "used_precomputed_embeddings": False,
             }
             return (arr, meta) if _kwargs.get("return_meta") else arr
         arr = np.ones((len(mentions), 768), dtype=np.float32)
@@ -301,10 +300,6 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "mean_sequence_length_observed": 1.0,
             "device_to_host_flushes": max(0, len(mentions)),
             "tokenizers_parallelism_setting": os.environ.get("TOKENIZERS_PARALLELISM", "<unset>"),
-            "column_present": False,
-            "precomputed_embedding_count": 0,
-            "recomputed_embedding_count": len(mentions),
-            "used_precomputed_embeddings": False,
         }
         return (arr, meta) if _kwargs.get("return_meta") else arr
 
@@ -662,6 +657,9 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert "AuthorUID" in pubs_df.columns
     assert "AuthorDisplayName" in pubs_df.columns
     assert "AuthorUID" in refs_df.columns
+    assert pubs_df.loc[0, "DOI"] == "10.1/pub-1"
+    assert list(pubs_df.loc[1, "Keywords"]) == ["kw-a"]
+    assert refs_df.loc[0, "PDF_URL"] == "https://example.test/ref-3.pdf"
     assert pubs_df.loc[0, "AuthorUID"][0].startswith("my_ads_2026::")
     assert refs_df.loc[0, "AuthorUID"][1].startswith("my_ads_2026::blk.r.1")
     assert "author_display_name" in entities.columns
@@ -728,7 +726,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert preflight["runtime"]["pair_building"]["wall_seconds"] >= 0.0
     assert preflight["runtime"]["pair_building"]["sort_parquet_seconds"] >= 0.0
     assert preflight["runtime"]["clustering"]["cpu_workers_effective"] == 4
-    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_frame_reuse"
+    assert preflight["runtime"]["export"]["mirror_mode"] == "parquet_reread"
     assert stage_metrics["host_profile"]["torch"]["gpu_name"] == "NVIDIA A100 80GB PCIe"
     assert stage_metrics["resolved_runtime_policy"]["cluster_backend_effective"] == "sklearn_cpu"
     assert [item["component"] for item in stage_metrics["safety_fallbacks"]] == [
@@ -806,7 +804,6 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["clustering"]["union_impl"] == "python"
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] >= 0.0
     assert stage_metrics["storage_mode"] == "out_of_core_exact"
-    assert stage_metrics["precomputed_embeddings"]["mentions"]["precomputed_embedding_count"] == 0
     assert "START Bootstrap" in captured.err
     assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err
     assert "START Load inputs" in captured.err

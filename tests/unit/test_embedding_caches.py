@@ -198,10 +198,6 @@ def test_get_or_create_specter_embeddings_rebuilds_invalid_cache(tmp_path: Path,
             "cuda_probe_error": None,
             "model_to_cuda_error": None,
             "effective_precision_mode": None,
-            "column_present": False,
-            "precomputed_embedding_count": 0,
-            "recomputed_embedding_count": len(mentions),
-            "used_precomputed_embeddings": False,
         }
         return (arr, meta) if return_meta else arr
 
@@ -219,31 +215,81 @@ def test_get_or_create_specter_embeddings_rebuilds_invalid_cache(tmp_path: Path,
     assert np.load(cache_path).shape == (2, 768)
 
 
-def test_generate_specter_embeddings_uses_precomputed_vectors_directly():
-    vec_a = np.linspace(0.0, 1.0, num=768, dtype=np.float32)
-    vec_b = np.linspace(1.0, 2.0, num=768, dtype=np.float32)
-    mentions = pd.DataFrame(
+def test_generate_specter_embeddings_ignores_precomputed_columns(monkeypatch: pytest.MonkeyPatch):
+    mentions_with_extra = pd.DataFrame(
         {
             "title": ["Paper 1", "Paper 2"],
             "abstract": ["Abstract 1", "Abstract 2"],
-            "precomputed_embedding": [vec_a.tolist(), vec_b.tolist()],
+            "precomputed_embedding": [list(np.linspace(0.0, 1.0, num=768, dtype=np.float32))] * 2,
             "canonical_record_id": [0, 1],
         }
     )
+    mentions_without_extra = mentions_with_extra.drop(columns=["precomputed_embedding"])
 
-    out, meta = embed_specter.generate_specter_embeddings(
-        mentions=mentions,
-        prefer_precomputed=True,
+    def _load(*_args, **_kwargs):
+        class _Tokenizer:
+            def __call__(self, chunk, **__kwargs):
+                batch = len(chunk)
+                return {
+                    "input_ids": np.ones((batch, 4), dtype=np.int64),
+                    "attention_mask": np.ones((batch, 4), dtype=np.int64),
+                }
+
+        class _Model:
+            def to(self, *_args, **_kwargs):
+                return self
+
+            def eval(self):
+                return self
+
+        return _Tokenizer(), _Model()
+
+    monkeypatch.setattr(embed_specter, "_load_specter_components", _load)
+    monkeypatch.setattr(embed_specter, "export_specter_onnx", lambda **_kwargs: Path("/tmp/fake.onnx"))
+
+    class _Session:
+        def get_inputs(self):
+            return [SimpleNamespace(name="input_ids"), SimpleNamespace(name="attention_mask")]
+
+        def run(self, _unused, ort_inputs):
+            batch = len(ort_inputs["input_ids"])
+            arr = np.zeros((batch, 4, 768), dtype=np.float32)
+            arr[:, 0, :] = 1.0
+            return [arr]
+
+    monkeypatch.setattr(embed_specter, "build_onnx_session", lambda **_kwargs: _Session())
+    monkeypatch.setattr(
+        embed_specter,
+        "resolve_torch_device",
+        lambda *_args, **_kwargs: (
+            "cpu",
+            {
+                "fallback_reason": None,
+                "torch_version": "fake",
+                "torch_cuda_version": None,
+                "torch_cuda_available": False,
+                "cuda_probe_error": None,
+                "model_to_cuda_error": None,
+            },
+        ),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", type("Torch", (), {"__version__": "fake"})())
+
+    out_with_extra, meta_with_extra = embed_specter.generate_specter_embeddings(
+        mentions=mentions_with_extra,
+        runtime_backend="onnx_fp32",
+        return_meta=True,
+    )
+    out_without_extra, meta_without_extra = embed_specter.generate_specter_embeddings(
+        mentions=mentions_without_extra,
+        runtime_backend="onnx_fp32",
         return_meta=True,
     )
 
-    assert out.shape == (2, 768)
-    np.testing.assert_allclose(out[0], vec_a)
-    np.testing.assert_allclose(out[1], vec_b)
-    assert meta["generation_mode"] == "precomputed_only"
-    assert meta["precomputed_embedding_count"] == 2
-    assert meta["recomputed_embedding_count"] == 0
-    assert meta["used_precomputed_embeddings"] is True
+    assert out_with_extra.shape == (2, 768)
+    np.testing.assert_allclose(out_with_extra, out_without_extra)
+    assert meta_with_extra["generation_mode"] == "model_only"
+    assert meta_without_extra["generation_mode"] == "model_only"
 
 
 def test_generate_chars2vec_embeddings_defaults_to_historical_batch_32(monkeypatch: pytest.MonkeyPatch):

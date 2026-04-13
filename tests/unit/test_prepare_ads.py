@@ -26,7 +26,6 @@ def _write_ads_dataset(tmp_path: Path, suffix: str) -> tuple[Path, Path]:
             "Abstract_en": "Abstract 1",
             "Year": 2020,
             "Affiliation": ["Inst A", "Inst B"],
-            "precomputed_embedding": [0.1, 0.2],
         },
         {
             "Bibcode": "bib2",
@@ -108,6 +107,62 @@ def test_prepare_ads_source_data_can_return_runtime_and_raw_sources(tmp_path: Pa
     assert result["runtime"]["explode_mentions_seconds"] >= 0.0
 
 
+def test_prepare_ads_source_data_projects_parquet_to_relevant_columns(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    refs_path = tmp_path / "references.parquet"
+    pd.DataFrame(
+        [
+            {
+                "Bibcode": "bib1",
+                "Author": ["Doe J"],
+                "Title_en": "Paper 1",
+                "Abstract_en": "Abstract 1",
+                "Year": 2020,
+                "Affiliation": ["Inst A"],
+                "Keywords": ["kw1"],
+                "DOI": "10.1/example",
+                "PDF_URL": "https://example.test/paper.pdf",
+            }
+        ]
+    ).to_parquet(pubs_path, index=False)
+    pd.DataFrame(
+        [
+            {
+                "Bibcode": "bib2",
+                "Author": ["Ref X"],
+                "Title_en": "Paper 2",
+                "Abstract_en": "Abstract 2",
+                "Year": 2021,
+                "Affiliation": ["Inst B"],
+                "full_text": "ignored",
+            }
+        ]
+    ).to_parquet(refs_path, index=False)
+
+    result = prepare_ads_source_data(
+        pubs_path,
+        refs_path,
+        return_raw_sources=True,
+    )
+
+    assert set(result["raw_publications"].columns) == {
+        "Bibcode",
+        "Author",
+        "Title_en",
+        "Abstract_en",
+        "Year",
+        "Affiliation",
+    }
+    assert set(result["raw_references"].columns) == {
+        "Bibcode",
+        "Author",
+        "Title_en",
+        "Abstract_en",
+        "Year",
+        "Affiliation",
+    }
+
+
 def test_prepare_ads_source_data_propagates_canonical_record_id_to_mentions(tmp_path: Path):
     pubs_path, refs_path = _write_ads_dataset(tmp_path, ".parquet")
 
@@ -160,7 +215,7 @@ def _legacy_deduplicate_ads_records(publications: pd.DataFrame, references: pd.D
         default="ads",
     )
 
-    for field in ["title", "abstract", "year", "aff", "precomputed_embedding", "authors"]:
+    for field in ["title", "abstract", "year", "aff", "authors"]:
         candidate = all_records[field]
         valid = candidate.notna() if field == "year" else candidate.map(_is_present_value)
         first_valid = candidate.where(valid, None).groupby(all_records["bibcode"], sort=False).transform("first")
@@ -178,7 +233,6 @@ def _legacy_deduplicate_ads_records(publications: pd.DataFrame, references: pd.D
             "authors",
             "source_type",
             "source_row_idx",
-            "precomputed_embedding",
             "canonical_source_type",
             "canonical_source_row_idx",
         ]
@@ -199,7 +253,6 @@ def test_deduplicate_ads_records_matches_legacy_semantics_on_mixed_inputs():
                 "authors": ["Pub A"],
                 "source_type": "publication",
                 "source_row_idx": 4,
-                "precomputed_embedding": None,
             },
             {
                 "bibcode": "pub-only",
@@ -210,7 +263,6 @@ def test_deduplicate_ads_records_matches_legacy_semantics_on_mixed_inputs():
                 "authors": ["Pub B"],
                 "source_type": "publication",
                 "source_row_idx": 1,
-                "precomputed_embedding": [0.1, 0.2],
             },
         ]
     )
@@ -225,7 +277,6 @@ def test_deduplicate_ads_records_matches_legacy_semantics_on_mixed_inputs():
                 "authors": ["Ref A"],
                 "source_type": "reference",
                 "source_row_idx": 2,
-                "precomputed_embedding": [0.5, 0.6],
             },
             {
                 "bibcode": "ref-only",
@@ -236,7 +287,6 @@ def test_deduplicate_ads_records_matches_legacy_semantics_on_mixed_inputs():
                 "authors": ["Ref B"],
                 "source_type": "reference",
                 "source_row_idx": 9,
-                "precomputed_embedding": None,
             },
         ]
     )

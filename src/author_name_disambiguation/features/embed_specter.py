@@ -50,18 +50,6 @@ def _to_text(title: str, abstract: str) -> str:
     return build_source_text(title, abstract)
 
 
-def _coerce_precomputed_embedding(item: Any, dim: int = _SPECTER_DIM) -> np.ndarray | None:
-    if item is None or isinstance(item, (str, bytes, dict)):
-        return None
-    try:
-        arr = np.asarray(item, dtype=np.float32)
-    except Exception:
-        return None
-    if arr.ndim != 1 or arr.shape[0] != dim:
-        return None
-    return arr
-
-
 def _resolve_device(torch, device: str) -> str:
     resolved, _ = resolve_torch_device(torch, device, runtime_label="SPECTER embeddings")
     return resolved
@@ -292,32 +280,6 @@ def _flush_pending_cls_batches(
     pending_indices.clear()
 
 
-def summarize_precomputed_embeddings(
-    values: Iterable | None,
-    *,
-    total_count: int,
-    dim: int = _SPECTER_DIM,
-) -> dict[str, Any]:
-    if values is None:
-        return {
-            "column_present": False,
-            "precomputed_embedding_count": 0,
-            "recomputed_embedding_count": int(total_count),
-            "used_precomputed_embeddings": False,
-        }
-    items = list(values)
-    count = 0
-    for item in items:
-        if _coerce_precomputed_embedding(item, dim=dim) is not None:
-            count += 1
-    return {
-        "column_present": True,
-        "precomputed_embedding_count": int(count),
-        "recomputed_embedding_count": int(max(0, total_count - count)),
-        "used_precomputed_embeddings": bool(count > 0),
-    }
-
-
 def _configure_hf_noise(quiet_libraries: bool) -> None:
     if not quiet_libraries:
         return
@@ -419,7 +381,6 @@ def generate_specter_embeddings(
     max_length: int = 256,
     device: str = "auto",
     precision_mode: str = "auto",
-    prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
     show_progress: bool = False,
     quiet_libraries: bool = False,
@@ -430,21 +391,6 @@ def generate_specter_embeddings(
     titles = mentions["title"].fillna("").astype(str).tolist()
     abstracts = mentions["abstract"].fillna("").astype(str).tolist()
     texts = [_to_text(t, a) for t, a in zip(titles, abstracts)]
-
-    precomputed_values = mentions["precomputed_embedding"].tolist() if "precomputed_embedding" in mentions.columns else None
-    precomputed_summary = summarize_precomputed_embeddings(
-        precomputed_values if prefer_precomputed else None,
-        total_count=len(texts),
-        dim=_SPECTER_DIM,
-    )
-    precomputed_vectors = (
-        [_coerce_precomputed_embedding(item, dim=_SPECTER_DIM) for item in list(precomputed_values or [])]
-        if prefer_precomputed and precomputed_values is not None
-        else []
-    )
-    valid_indices = [idx for idx, item in enumerate(precomputed_vectors) if item is not None]
-    valid_index_set = set(valid_indices)
-    missing_indices = [idx for idx in range(len(texts)) if idx not in valid_index_set]
 
     if len(texts) == 0:
         empty = np.zeros((0, _SPECTER_DIM), dtype=np.float32)
@@ -463,30 +409,8 @@ def generate_specter_embeddings(
                 cuda_probe_error=None,
                 model_to_cuda_error=None,
             ),
-            **precomputed_summary,
         }
         return (empty, meta) if return_meta else empty
-
-    if precomputed_summary["precomputed_embedding_count"] == len(texts):
-        emb = np.vstack([item for item in precomputed_vectors if item is not None]).astype(np.float32)
-        meta = {
-            "generation_mode": "precomputed_only",
-            **_base_runtime_meta(
-                requested_device=str(device),
-                resolved_device=None,
-                effective_precision_mode=None,
-                requested_batch_size=None if batch_size is None else int(batch_size),
-                effective_batch_size=None,
-                fallback_reason=None,
-                torch_version=None,
-                torch_cuda_version=None,
-                torch_cuda_available=None,
-                cuda_probe_error=None,
-                model_to_cuda_error=None,
-            ),
-            **precomputed_summary,
-        }
-        return (emb, meta) if return_meta else emb
 
     requested_device = str(device)
     runtime_backend_clean = str(runtime_backend or "transformers").strip().lower() or "transformers"
@@ -494,19 +418,12 @@ def generate_specter_embeddings(
         import torch
     except Exception as exc:
         if not use_stub_if_missing:
-            raise RuntimeError(
-                "SPECTER embedding generation requires `torch` and `transformers`, or precomputed 768-dim embeddings."
-            ) from exc
+            raise RuntimeError("SPECTER embedding generation requires `torch` and `transformers`.") from exc
         out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
-        for idx, item in enumerate(precomputed_vectors):
-            if item is not None:
-                out[idx] = item
-        for idx in missing_indices:
+        for idx in range(len(texts)):
             out[idx] = _hash_stub_embedding(texts[idx], dim=_SPECTER_DIM)
         meta = {
-            "generation_mode": "precomputed_plus_stub"
-            if precomputed_summary["precomputed_embedding_count"]
-            else "stub_only",
+            "generation_mode": "stub_only",
             **_base_runtime_meta(
                 requested_device=str(device),
                 resolved_device=None,
@@ -520,7 +437,6 @@ def generate_specter_embeddings(
                 cuda_probe_error=repr(exc),
                 model_to_cuda_error=None,
             ),
-            **precomputed_summary,
         }
         return (out, meta) if return_meta else out
 
@@ -566,9 +482,9 @@ def generate_specter_embeddings(
         model.to("cpu")
         model.eval()
         onnx_path = build_onnx_cache_path(output_path=onnx_cache_path, model_name=model_name, max_length=max_length)
-        sample_text = next((str(texts[idx]) for idx in missing_indices if str(texts[idx]).strip()), "")
+        sample_text = next((str(text) for text in texts if str(text).strip()), "")
         if not sample_text:
-            sample_text = next((str(text) for text in texts if str(text).strip()), "SPECTER export sample text")
+            sample_text = "SPECTER export sample text"
         onnx_path = export_specter_onnx(
             tokenizer=tokenizer,
             model=model,
@@ -589,11 +505,7 @@ def generate_specter_embeddings(
     runtime_meta["effective_precision_mode"] = effective_precision_mode
 
     out = np.zeros((len(texts), _SPECTER_DIM), dtype=np.float32)
-    for idx, item in enumerate(precomputed_vectors):
-        if item is not None:
-            out[idx] = item
-
-    vectors_for_indices = missing_indices if precomputed_summary["precomputed_embedding_count"] else list(range(len(texts)))
+    vectors_for_indices = list(range(len(texts)))
     if str(device).startswith("cpu") and vectors_for_indices:
         ordered = compute_token_length_order(
             [texts[idx] for idx in vectors_for_indices],
@@ -796,10 +708,7 @@ def generate_specter_embeddings(
 
     meta.update(
         {
-            "generation_mode": "precomputed_plus_model"
-            if precomputed_summary["precomputed_embedding_count"]
-            else "model_only",
-            **precomputed_summary,
+            "generation_mode": "model_only",
         }
     )
     return (out.astype(np.float32), meta) if return_meta else out.astype(np.float32)
@@ -818,7 +727,6 @@ def get_or_create_specter_embeddings(
     max_length: int = 256,
     device: str = "auto",
     precision_mode: str = "auto",
-    prefer_precomputed: bool = True,
     use_stub_if_missing: bool = False,
     show_progress: bool = False,
     quiet_libraries: bool = False,
@@ -826,12 +734,6 @@ def get_or_create_specter_embeddings(
     return_meta: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
     output = Path(output_path)
-    precomputed_values = mentions["precomputed_embedding"].tolist() if "precomputed_embedding" in mentions.columns else None
-    precomputed_summary = summarize_precomputed_embeddings(
-        precomputed_values if prefer_precomputed else None,
-        total_count=int(len(mentions)),
-        dim=_SPECTER_DIM,
-    )
     if output.exists() and not force_recompute:
         cached = load_validated_npy(
             output,
@@ -854,7 +756,6 @@ def get_or_create_specter_embeddings(
                     cuda_probe_error=None,
                     model_to_cuda_error=None,
                 ),
-                **precomputed_summary,
             }
             meta["cache_hit"] = True
             return (cached, meta) if return_meta else cached
@@ -870,7 +771,6 @@ def get_or_create_specter_embeddings(
         max_length=max_length,
         device=device,
         precision_mode=precision_mode,
-        prefer_precomputed=prefer_precomputed,
         use_stub_if_missing=use_stub_if_missing,
         show_progress=show_progress,
         quiet_libraries=quiet_libraries,

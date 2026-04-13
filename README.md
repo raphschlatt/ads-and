@@ -71,7 +71,6 @@ print(result.summary_path)
 | `Abstract_en` or `Abstract` | no — but strongly recommended | `str` | `"We model the galaxy population..."` |
 | `Affiliation` | no | `str` (ADS format) or `list[str]` (per-author) | `"AA(Durham Univ, Dept of Physics); AB(...)"` |
 | `Year` | no | `int` | `2000` |
-| `precomputed_embedding` | no | `list[float]` | `[0.12, -0.34, 0.07, ...]` — must be [SPECTER](https://huggingface.co/allenai/specter) embeddings for full quality |
 
 Records missing `Bibcode` or `Author` are skipped. Records missing both `Title` and `Abstract` will be processed but with meaningfully reduced disambiguation quality, since the model relies heavily on textual context to distinguish authors.
 

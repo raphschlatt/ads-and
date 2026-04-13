@@ -8,8 +8,6 @@ DEFAULT_TEXT_MODEL_NAME = "allenai/specter"
 DEFAULT_TEXT_BACKEND = "transformers"
 DEFAULT_TEXT_MAX_LENGTH = 256
 DEFAULT_TEXT_POOLING = "cls_first_token"
-CANONICAL_TEXT_EMBEDDING_FIELD = "precomputed_embedding"
-LEGACY_TEXT_EMBEDDING_FIELDS = ("embedding",)
 
 
 def build_source_text(title: str, abstract: str) -> str:
@@ -25,8 +23,6 @@ def build_text_embedding_contract(model_cfg: Mapping[str, Any] | None = None) ->
     return {
         "family": "specter",
         "provider": "huggingface",
-        "field_name": CANONICAL_TEXT_EMBEDDING_FIELD,
-        "legacy_field_names": list(LEGACY_TEXT_EMBEDDING_FIELDS),
         "model_name": str(rep_cfg.get("text_model_name", DEFAULT_TEXT_MODEL_NAME)),
         "text_backend": str(rep_cfg.get("text_backend", DEFAULT_TEXT_BACKEND)),
         "text_adapter_name": rep_cfg.get("text_adapter_name"),
@@ -41,8 +37,9 @@ def build_text_embedding_contract(model_cfg: Mapping[str, Any] | None = None) ->
             "truncation": True,
             "max_length": int(rep_cfg.get("max_length", DEFAULT_TEXT_MAX_LENGTH)),
         },
+        "caller_supplied_embeddings_supported": False,
         "compatibility_note": (
-            "The active NAND bundle expects SPECTER-compatible document embeddings. "
+            "The active NAND bundle computes its own SPECTER document embeddings from title and abstract. "
             "Equal dimensionality alone is not a compatibility guarantee."
         ),
     }
