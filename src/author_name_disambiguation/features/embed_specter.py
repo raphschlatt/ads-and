@@ -70,16 +70,18 @@ def _resolve_effective_precision_mode(torch, precision_mode: str, device: str) -
             warnings.warn("precision_mode=amp_bf16 requested on non-CUDA device; falling back to fp32.", RuntimeWarning)
         return "fp32"
 
-    is_supported = True
+    is_native_bf16_supported = False
     try:
         if hasattr(torch.cuda, "is_bf16_supported"):
-            is_supported = bool(torch.cuda.is_bf16_supported())
+            is_native_bf16_supported = bool(torch.cuda.is_bf16_supported(including_emulation=False))
     except Exception:
-        is_supported = False
+        is_native_bf16_supported = False
 
     if mode == "auto":
-        return "amp_bf16" if is_supported else "fp32"
-    if not is_supported:
+        # On legacy CUDA GPUs like T4, PyTorch can report emulated BF16 support.
+        # That path is not a good default for SPECTER inference throughput.
+        return "amp_bf16" if is_native_bf16_supported else "amp_fp16"
+    if not is_native_bf16_supported:
         warnings.warn("CUDA BF16 is not supported in this environment; falling back to fp32.", RuntimeWarning)
         return "fp32"
     return "amp_bf16"
@@ -89,6 +91,10 @@ def _autocast_context(torch, precision_mode: str):
     if str(precision_mode) == "amp_bf16":
         if hasattr(torch, "autocast"):
             return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+        return nullcontext()
+    if str(precision_mode) == "amp_fp16":
+        if hasattr(torch, "autocast"):
+            return torch.autocast(device_type="cuda", dtype=torch.float16)
         return nullcontext()
     return nullcontext()
 
@@ -121,14 +127,14 @@ def _resolve_specter_batch_size(torch, batch_size: int | None, device: str) -> t
 
     total_memory = _resolve_cuda_total_memory_bytes(torch, device)
     if total_memory is None:
-        return None, 32
+        return None, 64
     if total_memory >= 70 * 1024**3:
         return None, 384
     if total_memory >= 24 * 1024**3:
-        return None, 160
+        return None, 192
     if total_memory >= 12 * 1024**3:
-        return None, 80
-    return None, 32
+        return None, 128
+    return None, 64
 
 
 def _resolve_device_to_host_flush_batch_count(
@@ -143,8 +149,12 @@ def _resolve_device_to_host_flush_batch_count(
     batch_size = 0 if effective_batch_size is None else int(effective_batch_size)
     total_memory = _resolve_cuda_total_memory_bytes(torch, device)
     if total_memory is not None and total_memory >= 70 * 1024**3 and batch_size >= 256:
-        return 8
+        return 12
+    if batch_size >= 256:
+        return 10
     if batch_size >= 128:
+        return 8
+    if batch_size >= 64:
         return 6
     return 4
 
