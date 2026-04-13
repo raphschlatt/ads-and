@@ -1,0 +1,14 @@
+{
+  "run_id": "infer_sources_20260413T154341Z_40c30f30",
+  "run_stage": "infer_sources",
+  "dataset_id": "out",
+  "references_present": true,
+  "publications_rows": 2,
+  "references_rows": 1,
+  "canonical_records": 3,
+  "specter_sources": 3,
+  "ads_mentions_full": 5,
+  "ads_mentions": 5,
+  "infer_stage": "smoke",
+  "subset_ratio": 1.0
+}
