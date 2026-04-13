@@ -73,6 +73,7 @@ def remote_disambiguate(
     specter_runtime_backend: str | None = None,
     cluster_backend: str | None = None,
     force: bool = False,
+    progress: bool = True,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="ads_and_modal_") as tmp_dir:
         tmp_root = Path(tmp_dir)
@@ -81,7 +82,9 @@ def remote_disambiguate(
         publications_path = _write_bytes(input_root / "publications.parquet", publications_parquet)
         references_path = _write_bytes(input_root / "references.parquet", references_parquet)
 
-        ui = CliUI(total_steps=8, progress=True, progress_style="compact")
+        want_progress = bool(progress)
+        ui = CliUI(total_steps=8, progress=True, progress_style="compact") if want_progress else None
+        handler = CliProgressHandler(ui) if ui is not None else None
         try:
             result = run_source_inference(
                 InferSourcesRequest(
@@ -99,12 +102,13 @@ def remote_disambiguate(
                     specter_runtime_backend=None if specter_runtime_backend is None else str(specter_runtime_backend),
                     cluster_backend=None if cluster_backend is None else str(cluster_backend),
                     force=bool(force),
-                    progress=True,
-                    progress_handler=CliProgressHandler(ui),
+                    progress=want_progress,
+                    progress_handler=handler,
                 )
             )
         finally:
-            ui.close()
+            if ui is not None:
+                ui.close()
 
         summary_payload = (
             json.loads(result.summary_path.read_text(encoding="utf-8"))
