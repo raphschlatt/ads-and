@@ -1,0 +1,89 @@
+{
+  "orcid_leakage_groups": 0,
+  "lspo_pairs": 0,
+  "ads_pairs": 1,
+  "split_label_counts": [
+    {
+      "split": "train",
+      "pairs": 0,
+      "labeled_pairs": 0,
+      "pos": 0,
+      "neg": 0
+    },
+    {
+      "split": "val",
+      "pairs": 0,
+      "labeled_pairs": 0,
+      "pos": 0,
+      "neg": 0
+    },
+    {
+      "split": "test",
+      "pairs": 0,
+      "labeled_pairs": 0,
+      "pos": 0,
+      "neg": 0
+    },
+    {
+      "split": "inference",
+      "pairs": 0,
+      "labeled_pairs": 0,
+      "pos": 0,
+      "neg": 0
+    },
+    {
+      "split": "mixed",
+      "pairs": 0,
+      "labeled_pairs": 0,
+      "pos": 0,
+      "neg": 0
+    }
+  ],
+  "split_balance": {
+    "status": "not_applicable"
+  },
+  "lspo_pair_build": {},
+  "ads_pair_build": {
+    "exclude_same_bibcode": true,
+    "same_publication_pairs_skipped": 0,
+    "balance_train": false,
+    "pairs_written": 1,
+    "chunk_rows": 200000,
+    "output_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\local_smoke\\out\\processed\\pairs.parquet",
+    "cpu_sharding_mode": "auto",
+    "cpu_sharding_enabled": false,
+    "cpu_workers_requested": "auto",
+    "cpu_workers_effective": 1,
+    "cpu_limit_detected": 16,
+    "cpu_limit_source": "os.cpu_count",
+    "cpu_min_pairs_per_worker": 1000000,
+    "ram_budget_bytes": null,
+    "total_pairs_est": 1,
+    "group_blocks_seconds": 0.0034536000166554004,
+    "partition_shards_seconds": 0.0,
+    "oversize_sequential_seconds": 0.0,
+    "worker_submit_seconds": 0.0,
+    "worker_collect_seconds": 0.0,
+    "merge_shards_seconds": 0.0,
+    "final_readback_seconds": 0.0,
+    "worker_compute_seconds_total": 0.0035019000060856342,
+    "worker_flush_seconds_total": 0.011015399999450892,
+    "top_slow_blocks": [
+      {
+        "block_key": "d.j",
+        "block_size": 2,
+        "pair_weight": 1,
+        "pairs_written": 1,
+        "same_publication_pairs_skipped": 0,
+        "wall_seconds": 0.0035019000060856342
+      }
+    ],
+    "block_size_histogram": {
+      "2": 1
+    },
+    "manifest_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\local_smoke\\out\\processed\\pairs_manifest.json",
+    "storage_mode": "out_of_core_exact",
+    "wall_seconds": 0.02775209999526851,
+    "sort_parquet_seconds": 0.2839603000029456
+  }
+}

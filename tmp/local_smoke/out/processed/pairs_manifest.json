@@ -1,0 +1,12 @@
+{
+  "parquet_path": "C:\\Users\\rapha\\Documents\\Studium\\Promotionsstudium\\MPIWG\\2_Notebooks\\Author_Name_Disambiguation\\tmp\\local_smoke\\out\\processed\\pairs.parquet",
+  "group_key": "block_key",
+  "row_count": 1,
+  "block_count": 1,
+  "blocks": [
+    {
+      "block_key": "d.j",
+      "row_count": 1
+    }
+  ]
+}
