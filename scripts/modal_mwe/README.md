@@ -1,12 +1,7 @@
 # Modal Smoke Helper
 
-Die echte Modal-Logik sitzt jetzt im Paket.
-
-Dieses Verzeichnis bleibt nur fuer:
-
-- ein kleines Testset
-- einen Smoke-Test in `pwsh`
-- einen duennen Kompatibilitaets-Wrapper fuer alte `run`/`cost`-Aufrufe
+Smoke-Test-Harness fuer das in-Package-Modal-Backend. Baut mit `build_testset.py`
+Mini-Parquet-Inputs und ruft dann direkt `ads-and infer --backend modal` auf.
 
 ## Auth
 
@@ -21,7 +16,7 @@ Entweder:
 .\scripts\modal_mwe\smoke_test.ps1
 ```
 
-Das Script baut ein kleines Testset und nutzt dann den echten Paketpfad:
+Das Script baut ein kleines Testset und ruft dann den echten Paketpfad:
 
 ```powershell
 uv run --extra modal ads-and infer --backend modal ...

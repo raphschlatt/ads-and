@@ -8,6 +8,7 @@ from typing import Any
 
 import modal
 
+from author_name_disambiguation.common.cli_ui import CliProgressHandler, CliUI
 from author_name_disambiguation.defaults import resolve_fixed_model_bundle_path
 from author_name_disambiguation.infer_sources import InferSourcesRequest
 from author_name_disambiguation.source_inference import run_source_inference
@@ -32,7 +33,7 @@ def _base_runtime_requirements() -> list[str]:
 image = modal.Image.debian_slim(python_version="3.11")
 if modal.is_local():
     image = (
-        image.pip_install(*_base_runtime_requirements(), "modal>=1.4,<2")
+        image.uv_pip_install(*_base_runtime_requirements(), "modal>=1.4,<2")
         .add_local_python_source("author_name_disambiguation")
         .add_local_dir(
             str(PACKAGE_ROOT / "resources"),
@@ -80,25 +81,30 @@ def remote_disambiguate(
         publications_path = _write_bytes(input_root / "publications.parquet", publications_parquet)
         references_path = _write_bytes(input_root / "references.parquet", references_parquet)
 
-        result = run_source_inference(
-            InferSourcesRequest(
-                publications_path=publications_path,
-                references_path=references_path,
-                output_root=output_root,
-                dataset_id=str(dataset_id),
-                model_bundle=resolve_fixed_model_bundle_path(),
-                uid_scope=str(uid_scope),
-                uid_namespace=None if uid_namespace is None else str(uid_namespace),
-                infer_stage=str(infer_stage),
-                runtime_mode=str(runtime_mode),
-                device=str(device),
-                precision_mode=str(precision_mode),
-                specter_runtime_backend=None if specter_runtime_backend is None else str(specter_runtime_backend),
-                cluster_backend=None if cluster_backend is None else str(cluster_backend),
-                force=bool(force),
-                progress=False,
+        ui = CliUI(total_steps=8, progress=True, progress_style="compact")
+        try:
+            result = run_source_inference(
+                InferSourcesRequest(
+                    publications_path=publications_path,
+                    references_path=references_path,
+                    output_root=output_root,
+                    dataset_id=str(dataset_id),
+                    model_bundle=resolve_fixed_model_bundle_path(),
+                    uid_scope=str(uid_scope),
+                    uid_namespace=None if uid_namespace is None else str(uid_namespace),
+                    infer_stage=str(infer_stage),
+                    runtime_mode=str(runtime_mode),
+                    device=str(device),
+                    precision_mode=str(precision_mode),
+                    specter_runtime_backend=None if specter_runtime_backend is None else str(specter_runtime_backend),
+                    cluster_backend=None if cluster_backend is None else str(cluster_backend),
+                    force=bool(force),
+                    progress=True,
+                    progress_handler=CliProgressHandler(ui),
+                )
             )
-        )
+        finally:
+            ui.close()
 
         summary_payload = (
             json.loads(result.summary_path.read_text(encoding="utf-8"))

@@ -34,6 +34,14 @@ ads-and infer `
   --runtime auto
 ```
 
+The Modal backend emits the same eight `[NN/08]` stage lines as the local
+path (`bootstrap → load_inputs → preflight → name_embeddings →
+text_embeddings → pair_inference → clustering → export`), streamed live
+from the Modal container via `modal.enable_output()`. The terminal output
+matches the local run bit-for-bit, with one extra `Modal:` block appended
+to the final human summary (app id, staging bytes, billing window, and
+the timestamp after which `ads-and cost` can resolve exact charges).
+
 Exact Modal costs stay a separate follow-up lookup:
 
 ```powershell
