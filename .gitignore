@@ -15,3 +15,6 @@ data/interim/
 data/processed/
 data/subsets/cache/
 data/subsets/manifests/*.parquet
+
+# Local smoke-test scratch outputs (developer-machine artifacts)
+tmp/

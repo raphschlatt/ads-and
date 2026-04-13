@@ -3,12 +3,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from author_name_disambiguation.api import (
     disambiguate_sources,
     evaluate_lspo_quality,
     resolve_modal_cost,
     train_lspo_model,
 )
+from author_name_disambiguation import _modal_backend
 from author_name_disambiguation._modal_backend import ModalCostResult
 from author_name_disambiguation.infer_sources import InferSourcesRequest, InferSourcesResult, run_infer_sources
 
@@ -411,3 +414,35 @@ def test_resolve_modal_cost_delegates_to_backend(monkeypatch, tmp_path: Path):
     result = resolve_modal_cost(tmp_path)
 
     assert result is expected
+
+
+def _make_modal_request(*, tmp_path: Path, progress: bool, handler=None) -> InferSourcesRequest:
+    return InferSourcesRequest(
+        publications_path=tmp_path / "pubs.parquet",
+        output_root=tmp_path / "out",
+        dataset_id="smoke",
+        backend="modal",
+        runtime_mode="gpu",
+        progress=progress,
+        progress_handler=handler,
+    )
+
+
+def test_resolve_modal_progress_default_enables_remote_output(tmp_path: Path):
+    request = _make_modal_request(tmp_path=tmp_path, progress=True)
+    assert _modal_backend._resolve_modal_progress(request) is True
+
+
+def test_resolve_modal_progress_quiet_mode_disables_remote_output(tmp_path: Path):
+    request = _make_modal_request(tmp_path=tmp_path, progress=False)
+    assert _modal_backend._resolve_modal_progress(request) is False
+
+
+def test_resolve_modal_progress_warns_and_disables_when_handler_set(tmp_path: Path):
+    class _Handler:
+        def on_event(self, event):  # pragma: no cover - not invoked
+            pass
+
+    request = _make_modal_request(tmp_path=tmp_path, progress=True, handler=_Handler())
+    with pytest.warns(RuntimeWarning, match="progress_handler is ignored"):
+        assert _modal_backend._resolve_modal_progress(request) is False

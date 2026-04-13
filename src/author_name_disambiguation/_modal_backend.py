@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import tempfile
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -279,6 +281,20 @@ def _localize_summary(
     return localized
 
 
+def _resolve_modal_progress(request) -> bool:
+    caller_progress = bool(getattr(request, "progress", True))
+    caller_handler = getattr(request, "progress_handler", None)
+    if caller_handler is not None:
+        warnings.warn(
+            "progress_handler is ignored on the modal backend; the remote container cannot "
+            "stream structured progress events to a client-side handler. Use backend='local' "
+            "for custom progress handlers.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return caller_progress and caller_handler is None
+
+
 def _validate_modal_request(request) -> None:
     publications_path = Path(request.publications_path).expanduser()
     references_path = None if request.references_path is None else Path(request.references_path).expanduser()
@@ -311,8 +327,11 @@ def run_modal_infer_sources(request):
     result_paths = _build_result_paths(output_root=output_root, references_present=references_present)
     stale_cost_report = output_root / COST_REPORT_FILENAME
 
+    remote_progress = _resolve_modal_progress(request)
+
     if not request.force and _required_outputs_exist(output_root, references_present=references_present):
-        print("ADS · Modal · reused existing infer outputs", file=sys.stderr, flush=True)
+        if remote_progress:
+            print("ADS · Modal · reused existing infer outputs", file=sys.stderr, flush=True)
         return _existing_result(request, result_paths=result_paths)
 
     if stale_cost_report.exists():
@@ -333,16 +352,18 @@ def run_modal_infer_sources(request):
             )
         )
 
-        print(
-            f"ADS · Modal · dataset={request.dataset_id} · infer_stage={request.infer_stage} · output_root={output_root}",
-            file=sys.stderr,
-            flush=True,
-        )
+        if remote_progress:
+            print(
+                f"ADS · Modal · dataset={request.dataset_id} · infer_stage={request.infer_stage} · output_root={output_root}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         run_started_at = _utc_now()
         remote_result: dict[str, Any]
         app_id = ""
-        with modal.enable_output(), modal_app.run() as running_app:
+        output_cm = modal.enable_output() if remote_progress else contextlib.nullcontext()
+        with output_cm, modal_app.run() as running_app:
             app_id = str(getattr(running_app, "app_id", "") or "")
             remote_result = remote_disambiguate.remote(
                 publications_parquet=publications_payload,
@@ -359,6 +380,7 @@ def run_modal_infer_sources(request):
                 ),
                 cluster_backend=None if request.cluster_backend is None else str(request.cluster_backend),
                 force=bool(request.force),
+                progress=remote_progress,
             )
             if not app_id:
                 app_id = str(getattr(running_app, "app_id", "") or "")
