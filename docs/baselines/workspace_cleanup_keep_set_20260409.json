@@ -1,42 +1,47 @@
 {
-  "generated_utc": "2026-04-09T00:00:00Z",
-  "purpose": "Explicit local workspace keep-set for the 2026-04-09 cleanup wave.",
+  "generated_utc": "2026-04-14T00:00:00Z",
+  "purpose": "Canonical local workspace keep-set after the 2026-04-14 deep cleanup pass.",
   "source_documents": [
     "docs/baselines/infer_ads_active.json",
     "docs/baselines/lspo_quality_operational.json",
-    "docs/experiments/infer_cold_path_wave_20260408.md"
+    "docs/training_workflow.md"
   ],
   "keep_data_paths": [
-    "data/raw/ads/ads_full_run_20260305",
+    "data/raw/ads/publ_final.parquet",
+    "data/raw/ads/queried_publications_lang_translated_openai_tokenized_specter2_100.jsonl",
+    "data/raw/ads/queried_references_lang_translated_openai_tokenized.json",
+    "data/raw/ads/refs_final.parquet",
     "data/raw/lspo/LSPO_v1.parquet",
-    "data/interim/lspo_mentions.parquet",
-    "data/cache/_shared/subsets/lspo_mentions_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.parquet",
-    "data/cache/_shared/subsets/subset_full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342.meta.json",
-    "data/cache/_shared/embeddings/lspo_chars2vec_cpu_4b7bfbd51bb9.npy",
-    "data/cache/_shared/embeddings/lspo_specter_4b7bfbd51bb9.npy",
-    "data/cache/_shared/pairs/lspo_mentions_split_266b4f62be53.parquet",
-    "data/cache/_shared/pairs/lspo_pairs_266b4f62be53.parquet",
-    "data/cache/_shared/pairs/split_balance_266b4f62be53.json",
-    "data/cache/_shared/pairs/pairs_qc_train_266b4f62be53.json"
+    "data/interim/ads_mentions.parquet",
+    "data/interim/lspo_mentions.parquet"
   ],
   "keep_artifact_paths": [
-    "artifacts/models/full_20260218T111506Z_cli02681429",
-    "artifacts/checkpoints/full_20260218T111506Z_cli02681429",
-    "artifacts/metrics/full_20260218T111506Z_cli02681429",
-    "artifacts/exports/bench_full_v22_fix2",
-    "artifacts/exports/ads_full_chars2vec_cpu_ab_20260407",
-    "artifacts/exports/ads_full_package_auto_20260407",
-    "artifacts/exports/ads_full_arrow_fastpath_20260408_v1",
-    "artifacts/exports/ads_full_export_reuse_20260408_v1",
-    "artifacts/exports/ads_cpu_only_smoke_20260408",
-    "artifacts/exports/ads_cpu_only_smoke_onnx_20260408"
+    "artifacts/models/SHA256.txt",
+    "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1",
+    "artifacts/models/full_20260218T111506Z_cli02681429_bundle_v1.tar.gz",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429_metrics_eval_pack.tar.gz",
+    "artifacts/exports/ads_prod_current_modal_full",
+    "artifacts/exports/ads_prod_current_modal_full_l4_v1"
   ],
   "keep_local_paths": [
     ".venv"
   ],
+  "purgeable_patterns": [
+    "tmp/**",
+    "data/interim/_tmp_*",
+    "artifacts/*/replace_with_run_id_from_00/**",
+    "artifacts/checkpoints/smoke_*",
+    "artifacts/clusters/smoke_*",
+    "artifacts/embeddings/smoke_*",
+    "artifacts/metrics/smoke_*",
+    "artifacts/pair_scores/smoke_*",
+    "**/__pycache__/**",
+    "**/*.pyc"
+  ],
   "notes": [
-    "The historical ADS baseline remains full in this cleanup wave.",
-    "Intermediate exact-graph validation runs are not retained in the local keep-set.",
-    "Anything outside this keep-set is eligible for local removal after tracked docs and tests are updated."
+    "No data/cache/_shared keep-paths are listed because no shared cache files are currently present in this workspace.",
+    "The preserved model baseline is the canonical local bundle directory plus the portable bundle tarball.",
+    "The preserved metrics baseline is only the portable metrics eval pack tarball; a runnable local metrics/checkpoint tree is not currently present in this workspace.",
+    "Anything outside this keep-set is eligible for local removal after validation."
   ]
 }
