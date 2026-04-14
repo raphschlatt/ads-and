@@ -34,6 +34,13 @@ ads-and infer `
   --runtime auto
 ```
 
+In this repo, Modal is just a remote backend for the same ADS inference path.
+The local client stages projected ADS parquet inputs to the remote container,
+runs the bundled infer workflow on managed GPU hardware, and copies the
+finished outputs back into `--output-dir`. Configure `MODAL_TOKEN_ID` and
+`MODAL_TOKEN_SECRET` in your environment or a repo-root `.env` before using
+`--backend modal`.
+
 The Modal backend emits the same eight `[NN/08]` stage lines as the local
 path (`bootstrap → load_inputs → preflight → name_embeddings →
 text_embeddings → pair_inference → clustering → export`), streamed live
@@ -47,6 +54,9 @@ Exact Modal costs stay a separate follow-up lookup:
 ```powershell
 ads-and cost --output-dir outputs/ads_run_modal
 ```
+
+Run `ads-and cost` only after the billing interval has closed; the infer
+summary records the timestamp after which exact cost lookup becomes available.
 
 ## ADS Full Candidate Run
 
@@ -96,8 +106,8 @@ The run writes disambiguated sources plus operational reports under
 - `author_entities.parquet`
 - `mention_clusters.parquet`
 - `summary.json`
-- `05_stage_metrics_infer_sources.json`
-- `05_go_no_go_infer_sources.json`
+- `05_stage_metrics_infer_sources.json` (diagnostic metrics)
+- `05_go_no_go_infer_sources.json` (diagnostic validation summary)
 
 ## ADS Inference Baseline Comparison
 

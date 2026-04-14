@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from author_name_disambiguation import _modal_backend as modal_backend
 
 
@@ -69,6 +71,7 @@ def test_existing_modal_gpu_type_reads_summary(tmp_path) -> None:
 
 def test_resolve_modal_actual_cost_not_yet_available(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(modal_backend, "_require_modal", lambda: object())
+    monkeypatch.setattr(modal_backend, "_require_modal_credentials", lambda: None)
     _write_summary(
         tmp_path,
         {
@@ -94,6 +97,7 @@ def test_resolve_modal_actual_cost_not_yet_available(tmp_path, monkeypatch) -> N
 
 def test_resolve_modal_actual_cost_complete(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(modal_backend, "_require_modal", lambda: object())
+    monkeypatch.setattr(modal_backend, "_require_modal_credentials", lambda: None)
     _write_summary(
         tmp_path,
         {
@@ -153,6 +157,7 @@ def test_resolve_modal_actual_cost_complete(tmp_path, monkeypatch) -> None:
 
 def test_resolve_modal_actual_cost_unsupported(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(modal_backend, "_require_modal", lambda: object())
+    monkeypatch.setattr(modal_backend, "_require_modal_credentials", lambda: None)
     _write_summary(
         tmp_path,
         {
@@ -179,3 +184,19 @@ def test_resolve_modal_actual_cost_unsupported(tmp_path, monkeypatch) -> None:
     assert result.actual_cost_usd is None
     assert result.cost_report_path is None
     assert "Team and Enterprise" in str(result.reason)
+
+
+def test_resolve_modal_actual_cost_errors_when_summary_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(modal_backend, "_require_modal", lambda: object())
+    monkeypatch.setattr(modal_backend, "_require_modal_credentials", lambda: None)
+
+    with pytest.raises(RuntimeError, match="No modal summary found"):
+        modal_backend.resolve_modal_actual_cost(output_dir=tmp_path, now_utc=_utc(2026, 4, 13, 11, 15))
+
+
+def test_require_modal_credentials_names_missing_env_vars(monkeypatch) -> None:
+    monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+
+    with pytest.raises(RuntimeError, match="MODAL_TOKEN_ID, MODAL_TOKEN_SECRET"):
+        modal_backend._require_modal_credentials()

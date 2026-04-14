@@ -594,7 +594,139 @@ def test_cli_run_cluster_test_report_fails_when_lspo_raw_missing(monkeypatch, tm
     _apply_fast_mocks(monkeypatch)
 
     parser = cli.build_parser()
-    with pytest.raises(FileNotFoundError, match="LSPO parquet is required"):
+    with pytest.raises(FileNotFoundError, match="LSPO raw source not found for research workflow"):
+        _run_report(parser, cfg, model_run_id=model_run_id)
+
+
+def test_cli_run_cluster_test_report_accepts_h5_when_parquet_missing(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_h5 = Path(cfg["paths_payload"]["data"]["raw_lspo_h5"])
+    raw_lspo_h5.parent.mkdir(parents=True, exist_ok=True)
+    raw_lspo_h5.write_text("stub", encoding="utf-8")
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
+    _apply_fast_mocks(monkeypatch)
+
+    parser = cli.build_parser()
+    _run_report(parser, cfg, model_run_id=model_run_id)
+
+    assert (cfg["metrics_dir"] / model_run_id / "06_clustering_test_report.json").exists()
+
+
+def test_cli_run_cluster_test_report_fails_when_metrics_dir_missing(tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    parser = cli.build_parser()
+
+    with pytest.raises(FileNotFoundError, match="Missing mandatory train metrics directory"):
+        _run_report(parser, cfg, model_run_id="full_20260218T111506Z_cli02681429")
+
+
+def test_cli_run_cluster_test_report_fails_when_context_missing(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
+    _apply_fast_mocks(monkeypatch)
+    (cfg["metrics_dir"] / model_run_id / "00_context.json").unlink()
+
+    parser = cli.build_parser()
+    with pytest.raises(FileNotFoundError, match="Missing mandatory train artifact for clustering report"):
+        _run_report(parser, cfg, model_run_id=model_run_id)
+
+
+def test_cli_run_cluster_test_report_fails_when_train_manifest_missing(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
+    _apply_fast_mocks(monkeypatch)
+    (cfg["metrics_dir"] / model_run_id / "03_train_manifest.json").unlink()
+
+    parser = cli.build_parser()
+    with pytest.raises(FileNotFoundError, match="Missing mandatory train artifact for clustering report"):
+        _run_report(parser, cfg, model_run_id=model_run_id)
+
+
+def test_cli_run_cluster_test_report_fails_when_clustering_config_missing(monkeypatch, tmp_path: Path):
+    cfg = _make_configs(tmp_path)
+    lspo_df = _toy_lspo_mentions()
+
+    raw_lspo_parquet = Path(cfg["paths_payload"]["data"]["raw_lspo_parquet"])
+    raw_lspo_parquet.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(raw_lspo_parquet, index=False)
+
+    interim_lspo = Path(cfg["paths_payload"]["data"]["interim_dir"]) / "lspo_mentions.parquet"
+    interim_lspo.parent.mkdir(parents=True, exist_ok=True)
+    lspo_df.to_parquet(interim_lspo, index=False)
+
+    source_fp = compute_lspo_source_fp(interim_lspo)
+    subset_identity = compute_subset_identity(run_cfg=cfg["run_payload"], source_fp=source_fp, sampler_version="v3")
+    model_run_id = "full_20260218T111506Z_cli02681429"
+    _write_train_artifacts(
+        tmp_path,
+        cfg,
+        model_run_id,
+        subset_cache_key=subset_identity.subset_tag,
+        lspo_source_fingerprint=source_fp,
+        lspo_source_fingerprint_scheme=LSPO_SOURCE_FP_SCHEME,
+    )
+    _apply_fast_mocks(monkeypatch)
+    (cfg["metrics_dir"] / model_run_id / "04_clustering_config_used.json").unlink()
+
+    parser = cli.build_parser()
+    with pytest.raises(FileNotFoundError, match="Missing mandatory train artifact for clustering report"):
         _run_report(parser, cfg, model_run_id=model_run_id)
 
 
@@ -627,7 +759,7 @@ def test_cli_run_cluster_test_report_fails_on_missing_checkpoint(monkeypatch, tm
     ckpt.unlink()
 
     parser = cli.build_parser()
-    with pytest.raises(FileNotFoundError, match="Checkpoint for seed=2 does not exist"):
+    with pytest.raises(FileNotFoundError, match="Missing mandatory checkpoint for seed=2"):
         _run_report(parser, cfg, model_run_id=model_run_id)
 
 

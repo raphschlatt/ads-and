@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from author_name_disambiguation import cli
 from author_name_disambiguation.api import LspoQualityResult, LspoTrainingResult
 from author_name_disambiguation.infer_sources import InferSourcesResult
@@ -193,7 +195,7 @@ def test_quality_and_train_cli_print_human_summaries(monkeypatch, tmp_path: Path
     (tmp_path / "05_go_no_go_full.json").write_text(json.dumps({"go": True, "warnings": []}), encoding="utf-8")
 
     parser = cli.build_parser()
-    quality_args = parser.parse_args(["quality-lspo", "--no-progress"])
+    quality_args = parser.parse_args(["quality-lspo", "--model-run-id", "full_demo", "--no-progress"])
     quality_args.func(quality_args)
     quality_out = capsys.readouterr().out
     assert "LSPO Quality Run complete" in quality_out
@@ -203,6 +205,75 @@ def test_quality_and_train_cli_print_human_summaries(monkeypatch, tmp_path: Path
     train_args.func(train_args)
     train_out = capsys.readouterr().out
     assert "LSPO Training Run complete" in train_out
+
+
+def test_quality_lspo_rejects_missing_target(tmp_path: Path):
+    parser = cli.build_parser()
+    args = parser.parse_args(["quality-lspo", "--no-progress"])
+
+    with pytest.raises(ValueError, match="quality-lspo requires an explicit target"):
+        args.func(args)
+
+
+def test_doctor_command_prints_checklist_and_json(tmp_path: Path, capsys):
+    parser = cli.build_parser()
+
+    missing_args = parser.parse_args(["doctor"])
+    with pytest.raises(SystemExit, match="1"):
+        missing_args.func(missing_args)
+    missing_out = capsys.readouterr().out
+    assert "Research doctor: missing_prerequisites" in missing_out
+    assert "Packaged fixed bundle:" in missing_out
+    assert "infer-only" in missing_out
+    assert "Quality target: Pass --model-run-id <run_id>" in missing_out
+
+    raw_h5 = tmp_path / "data" / "raw" / "lspo" / "LSPO_v1.h5"
+    raw_h5.parent.mkdir(parents=True, exist_ok=True)
+    raw_h5.write_text("stub", encoding="utf-8")
+    metrics_dir = tmp_path / "artifacts" / "metrics" / "full_demo"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    (metrics_dir / "00_context.json").write_text(
+        json.dumps({"run_stage": "full", "pipeline_scope": "train"}),
+        encoding="utf-8",
+    )
+    (metrics_dir / "03_train_manifest.json").write_text(
+        json.dumps(
+            {
+                "best_threshold": 0.5,
+                "runs": [{"seed": 1, "checkpoint": str(tmp_path / "artifacts" / "checkpoints" / "full_demo" / "seed1.pt")}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (metrics_dir / "04_clustering_config_used.json").write_text(
+        json.dumps({"cluster_config_used": {"eps": 0.35}}),
+        encoding="utf-8",
+    )
+    (metrics_dir / "05_stage_metrics_full.json").write_text(json.dumps({"subset_cache_key": "abc"}), encoding="utf-8")
+    checkpoint = tmp_path / "artifacts" / "checkpoints" / "full_demo" / "seed1.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text("checkpoint", encoding="utf-8")
+
+    ok_args = parser.parse_args(
+        [
+            "doctor",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--artifacts-root",
+            str(tmp_path / "artifacts"),
+            "--raw-lspo-h5",
+            str(raw_h5),
+            "--model-run-id",
+            "full_demo",
+            "--json",
+        ]
+    )
+    ok_args.func(ok_args)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert payload["raw_lspo"]["selected_source"] == "h5"
+    assert payload["quality_target"]["provided"] is True
+    assert payload["mandatory_train_artifacts"][0]["exists"] is True
 
 
 def test_module_entrypoints_do_not_emit_runpy_warning():

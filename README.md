@@ -48,6 +48,9 @@ ads-and infer `
 Add `--json` for a machine-readable run summary on stdout.
 
 `--runtime` options: `auto` (GPU if CUDA is available, else CPU), `gpu`, `cpu`.
+Advanced infer flags such as `--infer-stage`, `--dataset-id`, and
+`--modal-gpu` are documented in
+[`docs/inference_workflow.md`](docs/inference_workflow.md).
 
 Modal uses the same command surface with an explicit backend switch:
 
@@ -60,11 +63,19 @@ ads-and infer `
   --runtime auto
 ```
 
+Modal runs the same ADS inference path remotely on managed GPU hardware. The
+local client stages projected ADS parquet inputs to the remote job and copies
+the finished outputs back into `output-dir`. Configure `MODAL_TOKEN_ID` and
+`MODAL_TOKEN_SECRET` in your environment or a repo-root `.env` before using
+`--backend modal`.
+
 Exact Modal costs are a separate official lookup:
 
 ```powershell
 ads-and cost --output-dir outputs/ads_run_modal
 ```
+
+This is a follow-up lookup after the run, once the billing window has closed.
 
 **Python**
 
@@ -120,8 +131,8 @@ All files are written under `output_dir`:
 | `author_entities.parquet` | inferred author entities |
 | `mention_clusters.parquet` | mention-to-cluster mapping |
 | `summary.json` | high-level run summary |
-| `05_stage_metrics_infer_sources.json` | per-stage runtime and diagnostic metrics |
-| `05_go_no_go_infer_sources.json` | run validation summary |
+| `05_stage_metrics_infer_sources.json` | diagnostic per-stage runtime and validation metrics |
+| `05_go_no_go_infer_sources.json` | diagnostic run validation summary |
 
 The two disambiguated parquets preserve all input columns and append:
 
@@ -133,6 +144,11 @@ The two disambiguated parquets preserve all input columns and append:
 Both columns are parallel lists in the same order as the input `Author` column. Each UID is stable across runs for the same registry. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
 
 ## Further Details
+
+Inference is out of the box because the bundled fixed model ships inside the
+package. Repo-only research workflows require user-supplied LSPO raw data
+from the original source release; both parquet and HDF5 inputs are supported
+for LSPO preparation and evaluation.
 
 - [Inference workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/inference_workflow.md)
 - [Training workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/training_workflow.md)

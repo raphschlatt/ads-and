@@ -59,7 +59,12 @@ from author_name_disambiguation.common.subset_artifacts import (
 )
 from author_name_disambiguation.common.subset_builder import build_stage_subset, write_subset_manifest
 from author_name_disambiguation.data.prepare_lspo import prepare_lspo_mentions
-from author_name_disambiguation.defaults import DEFAULT_ARTIFACTS_ROOT, DEFAULT_DATA_ROOT, DEFAULT_RAW_LSPO_PARQUET
+from author_name_disambiguation.defaults import (
+    DEFAULT_ARTIFACTS_ROOT,
+    DEFAULT_DATA_ROOT,
+    DEFAULT_RAW_LSPO_PARQUET,
+    resolve_fixed_model_bundle_path,
+)
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
@@ -72,10 +77,51 @@ from author_name_disambiguation.workflow_helpers import (
 SUBSET_CACHE_VERSION = "v3"
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
 _CLUSTER_OVERRIDE_EPS_FIELDS = ("eps", "selected_eps", "eps_mode")
+
+
 def _resolved_path(value: str | Path | None) -> Path | None:
     if value is None:
         return None
     return Path(value).expanduser().resolve()
+
+
+def _quality_train_artifact_help(*, model_run_id: str, metrics_dir: Path) -> str:
+    return (
+        f"Mandatory local train artifacts for model_run_id={model_run_id} live under {metrics_dir} and include "
+        "`00_context.json`, `03_train_manifest.json`, `04_clustering_config_used.json`, "
+        "`05_stage_metrics_<run_stage>.json`, plus every checkpoint referenced by `03_train_manifest.json`. "
+        "Reconstructable later from raw LSPO plus train metadata: LSPO mentions, subset/split/pairs, embeddings, "
+        "and the final `06_clustering_test_report*` outputs."
+    )
+
+
+def _raise_missing_quality_artifact(*, model_run_id: str, metrics_dir: Path, detail: str) -> None:
+    raise FileNotFoundError(
+        f"{detail} {_quality_train_artifact_help(model_run_id=model_run_id, metrics_dir=metrics_dir)} "
+        "Next step: run `train-lspo` for this model run, then rerun `quality-lspo --model-run-id <run_id>`."
+    )
+
+
+def _resolve_research_lspo_sources(data_cfg: dict[str, Any]) -> tuple[Path, Path | None]:
+    raw_lspo_parquet = Path(str(data_cfg["raw_lspo_parquet"]))
+    raw_lspo_h5_val = data_cfg.get("raw_lspo_h5")
+    raw_lspo_h5 = Path(str(raw_lspo_h5_val)) if raw_lspo_h5_val else None
+    parquet_exists = raw_lspo_parquet.exists()
+    h5_exists = raw_lspo_h5 is not None and raw_lspo_h5.exists()
+    if not parquet_exists and not h5_exists:
+        raise FileNotFoundError(
+            "LSPO raw source not found for research workflow. "
+            f"Checked parquet={raw_lspo_parquet}"
+            + ("" if raw_lspo_h5 is None else f" and h5={raw_lspo_h5}")
+            + ". Provide either --raw-lspo-parquet or --raw-lspo-h5. "
+            "The Zenodo LSPO release can be used through --raw-lspo-h5."
+        )
+    if raw_lspo_h5 is not None and not h5_exists:
+        warnings.warn(
+            f"Optional LSPO H5 path is configured but missing: {raw_lspo_h5}",
+            RuntimeWarning,
+        )
+    return raw_lspo_parquet, raw_lspo_h5
 
 
 def _load_train_run_cfg(run_stage: str, override_path: str | Path | None) -> tuple[dict[str, Any], str | None]:
@@ -1854,6 +1900,216 @@ def _build_train_human_summary(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _doctor_marker(ok: bool) -> str:
+    return "[ok]" if ok else "[missing]"
+
+
+def _build_doctor_payload(args) -> dict[str, Any]:
+    paths = _build_public_workspace_paths(args)
+    data_cfg = dict(paths["data"])
+    art_cfg = dict(paths["artifacts"])
+
+    raw_lspo_parquet = Path(str(data_cfg["raw_lspo_parquet"]))
+    raw_lspo_h5_val = data_cfg.get("raw_lspo_h5")
+    raw_lspo_h5 = Path(str(raw_lspo_h5_val)) if raw_lspo_h5_val else None
+    parquet_exists = raw_lspo_parquet.exists()
+    h5_exists = raw_lspo_h5 is not None and raw_lspo_h5.exists()
+    selected_source = "parquet" if parquet_exists else ("h5" if h5_exists else None)
+
+    fixed_bundle_path = resolve_fixed_model_bundle_path().resolve()
+    model_run_id = str(getattr(args, "model_run_id", "") or "").strip() or None
+    metrics_dir = None if model_run_id is None else (Path(str(art_cfg["metrics_dir"])) / model_run_id)
+
+    mandatory_train_artifacts: list[dict[str, Any]] = []
+    checkpoint_artifacts: list[dict[str, Any]] = []
+    missing = selected_source is None or model_run_id is None
+
+    if metrics_dir is not None:
+        metrics_dir_exists = metrics_dir.exists()
+        mandatory_train_artifacts.append(
+            {
+                "name": "metrics_dir",
+                "path": str(metrics_dir),
+                "exists": metrics_dir_exists,
+                "required": True,
+            }
+        )
+        missing = missing or not metrics_dir_exists
+
+        context_path = metrics_dir / "00_context.json"
+        train_manifest_path = metrics_dir / "03_train_manifest.json"
+        cluster_used_path = metrics_dir / "04_clustering_config_used.json"
+        required_paths = [
+            ("00_context.json", context_path),
+            ("03_train_manifest.json", train_manifest_path),
+            ("04_clustering_config_used.json", cluster_used_path),
+        ]
+        for name, path in required_paths:
+            exists = path.exists()
+            mandatory_train_artifacts.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "exists": exists,
+                    "required": True,
+                }
+            )
+            missing = missing or not exists
+
+        run_stage = None
+        if context_path.exists():
+            try:
+                context_payload = load_json(context_path)
+                run_stage_value = str(context_payload.get("run_stage", "")).strip()
+                run_stage = run_stage_value or None
+            except Exception:
+                run_stage = None
+        stage_metrics_path = (
+            metrics_dir / f"05_stage_metrics_{run_stage}.json"
+            if run_stage is not None
+            else metrics_dir / "05_stage_metrics_<run_stage>.json"
+        )
+        stage_metrics_exists = stage_metrics_path.exists() if run_stage is not None else False
+        mandatory_train_artifacts.append(
+            {
+                "name": "05_stage_metrics_<run_stage>.json" if run_stage is None else stage_metrics_path.name,
+                "path": str(stage_metrics_path),
+                "exists": stage_metrics_exists,
+                "required": True,
+            }
+        )
+        missing = missing or not stage_metrics_exists
+
+        if train_manifest_path.exists():
+            try:
+                train_manifest = load_json(train_manifest_path)
+                seed_runs = _resolve_train_seed_runs(train_manifest)
+            except Exception as exc:
+                checkpoint_artifacts.append(
+                    {
+                        "seed": None,
+                        "checkpoint": str(train_manifest_path),
+                        "exists": False,
+                        "required": True,
+                        "error": str(exc),
+                    }
+                )
+                missing = True
+            else:
+                for row in seed_runs:
+                    checkpoint_path = Path(row["checkpoint"])
+                    exists = checkpoint_path.exists()
+                    checkpoint_artifacts.append(
+                        {
+                            "seed": int(row["seed"]),
+                            "checkpoint": str(checkpoint_path),
+                            "exists": exists,
+                            "required": True,
+                        }
+                    )
+                    missing = missing or not exists
+
+    return {
+        "status": "ok" if not missing else "missing_prerequisites",
+        "model_run_id": model_run_id,
+        "raw_lspo": {
+            "parquet_path": str(raw_lspo_parquet),
+            "parquet_exists": parquet_exists,
+            "h5_path": None if raw_lspo_h5 is None else str(raw_lspo_h5),
+            "h5_exists": h5_exists,
+            "selected_source": selected_source,
+            "supported_inputs": ["parquet", "h5"],
+            "note": "The Zenodo LSPO release can be used through --raw-lspo-h5.",
+        },
+        "packaged_fixed_bundle": {
+            "path": str(fixed_bundle_path),
+            "exists": fixed_bundle_path.exists(),
+            "usage": "infer-only",
+        },
+        "quality_target": {
+            "provided": model_run_id is not None,
+            "mode": None if model_run_id is None else "model_run_id",
+            "note": (
+                "Pass --model-run-id <run_id> for a local LSPO training run."
+                if model_run_id is None
+                else f"Inspecting local train artifacts for model_run_id={model_run_id}."
+            ),
+        },
+        "mandatory_train_artifacts": mandatory_train_artifacts,
+        "checkpoint_artifacts": checkpoint_artifacts,
+        "reconstructable_after_prereqs": [
+            "data/interim/lspo_mentions.parquet",
+            "subset / split / pair artifacts",
+            "shared embeddings",
+            "06_clustering_test_report.{json,csv,md}",
+        ],
+    }
+
+
+def _build_doctor_human_summary(payload: dict[str, Any]) -> str:
+    raw_lspo = dict(payload.get("raw_lspo", {}) or {})
+    packaged_bundle = dict(payload.get("packaged_fixed_bundle", {}) or {})
+    quality_target = dict(payload.get("quality_target", {}) or {})
+    mandatory_train_artifacts = list(payload.get("mandatory_train_artifacts", []) or [])
+    checkpoint_artifacts = list(payload.get("checkpoint_artifacts", []) or [])
+    lines = [
+        f"Research doctor: {payload.get('status', 'n/a')}",
+        (
+            f"{_doctor_marker(bool(raw_lspo.get('selected_source')))} LSPO raw source: "
+            f"{raw_lspo.get('selected_source') or 'none'}"
+        ),
+        f"    parquet: {raw_lspo.get('parquet_path', 'n/a')}",
+    ]
+    h5_path = raw_lspo.get("h5_path")
+    if h5_path is not None:
+        lines.append(f"    h5: {h5_path}")
+    lines.extend(
+        [
+            f"    note: {raw_lspo.get('note', 'n/a')}",
+            (
+                f"{_doctor_marker(bool(packaged_bundle.get('exists')))} Packaged fixed bundle: "
+                f"{packaged_bundle.get('path', 'n/a')} ({packaged_bundle.get('usage', 'n/a')})"
+            ),
+            (
+                f"{_doctor_marker(bool(quality_target.get('provided')))} Quality target: "
+                f"{quality_target.get('note', 'n/a')}"
+            ),
+        ]
+    )
+    if mandatory_train_artifacts:
+        lines.append("Mandatory train artifacts:")
+        for item in mandatory_train_artifacts:
+            lines.append(f"  {_doctor_marker(bool(item.get('exists')))} {item.get('path')}")
+    if checkpoint_artifacts:
+        lines.append("Checkpoint artifacts:")
+        for item in checkpoint_artifacts:
+            seed = item.get("seed")
+            prefix = "seed=?"
+            if seed is not None:
+                prefix = f"seed={seed}"
+            suffix = ""
+            if item.get("error"):
+                suffix = f" | error={item['error']}"
+            lines.append(f"  {_doctor_marker(bool(item.get('exists')))} {prefix} {item.get('checkpoint')}{suffix}")
+    lines.append(
+        "Reconstructable after raw LSPO + train metadata: "
+        + ", ".join(str(x) for x in payload.get("reconstructable_after_prereqs", []))
+    )
+    return "\n".join(lines)
+
+
+def cmd_doctor(args):
+    payload = _build_doctor_payload(args)
+    _emit_simple_output(
+        payload=payload,
+        human_summary=_build_doctor_human_summary(payload),
+        json_output=bool(getattr(args, "json_output", False)),
+    )
+    if payload.get("status") != "ok":
+        raise SystemExit(1)
+    return payload
+
+
 def cmd_run_infer_sources(args):
     ui = CliUI(total_steps=8, progress=args.progress, progress_style=getattr(args, "progress_style", "compact"))
     try:
@@ -2060,7 +2316,11 @@ def cmd_run_cluster_test_report(args):
         model_run_id = str(args.model_run_id)
         metrics_dir = Path(str(art_cfg["metrics_dir"])) / model_run_id
         if not metrics_dir.exists():
-            raise FileNotFoundError(f"Train metrics directory not found for model_run_id={model_run_id}: {metrics_dir}")
+            _raise_missing_quality_artifact(
+                model_run_id=model_run_id,
+                metrics_dir=metrics_dir,
+                detail=f"Missing mandatory train metrics directory for model_run_id={model_run_id}: {metrics_dir}.",
+            )
         report_tag = _sanitize_report_tag(args.report_tag)
         if args.cluster_config_override and report_tag is None:
             raise ValueError("--cluster-config-override requires --report-tag to avoid overwriting baseline 06_* reports.")
@@ -2070,7 +2330,11 @@ def cmd_run_cluster_test_report(args):
         cluster_used_path = metrics_dir / "04_clustering_config_used.json"
         for p in [context_path, train_manifest_path, cluster_used_path]:
             if not p.exists():
-                raise FileNotFoundError(f"Missing required train artifact for clustering report: {p}")
+                _raise_missing_quality_artifact(
+                    model_run_id=model_run_id,
+                    metrics_dir=metrics_dir,
+                    detail=f"Missing mandatory train artifact for clustering report: {p}.",
+                )
 
         context_payload = load_json(context_path)
         if str(context_payload.get("pipeline_scope", "")).strip().lower() != "train":
@@ -2084,8 +2348,10 @@ def cmd_run_cluster_test_report(args):
 
         stage_metrics_path = metrics_dir / f"05_stage_metrics_{run_stage}.json"
         if not stage_metrics_path.exists():
-            raise FileNotFoundError(
-                f"Missing stage metrics for run_stage={run_stage}: {stage_metrics_path}"
+            _raise_missing_quality_artifact(
+                model_run_id=model_run_id,
+                metrics_dir=metrics_dir,
+                detail=f"Missing mandatory stage metrics for run_stage={run_stage}: {stage_metrics_path}.",
             )
         stage_metrics = load_json(stage_metrics_path)
         expected_subset_cache_key = str(stage_metrics.get("subset_cache_key", "")).strip()
@@ -2111,7 +2377,11 @@ def cmd_run_cluster_test_report(args):
         for row in seed_runs:
             ckpt = Path(row["checkpoint"])
             if not ckpt.exists():
-                raise FileNotFoundError(f"Checkpoint for seed={row['seed']} does not exist: {ckpt}")
+                _raise_missing_quality_artifact(
+                    model_run_id=model_run_id,
+                    metrics_dir=metrics_dir,
+                    detail=f"Missing mandatory checkpoint for seed={row['seed']}: {ckpt}.",
+                )
 
         cluster_used_payload = load_json(cluster_used_path)
         selected_eps = _resolve_selected_eps(cluster_used_payload, source_path=cluster_used_path)
@@ -2132,18 +2402,7 @@ def cmd_run_cluster_test_report(args):
         min_samples = int(base_cluster_cfg.get("min_samples", 1))
         metric = str(base_cluster_cfg.get("metric", "precomputed"))
 
-        raw_lspo_parquet = Path(str(data_cfg["raw_lspo_parquet"]))
-        if not raw_lspo_parquet.exists():
-            raise FileNotFoundError(
-                f"LSPO parquet is required for report generation but was not found: {raw_lspo_parquet}"
-            )
-        raw_lspo_h5_val = data_cfg.get("raw_lspo_h5")
-        raw_lspo_h5 = Path(str(raw_lspo_h5_val)) if raw_lspo_h5_val else None
-        if raw_lspo_h5 is not None and not raw_lspo_h5.exists():
-            warnings.warn(
-                f"Optional LSPO H5 path is configured but missing: {raw_lspo_h5}",
-                RuntimeWarning,
-            )
+        raw_lspo_parquet, raw_lspo_h5 = _resolve_research_lspo_sources(data_cfg)
 
         run_cfg = dict(context_payload.get("run_config_payload") or {})
         run_cfg_path = context_payload.get("run_config")
@@ -2556,8 +2815,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--data-root", required=True)
         sp.add_argument("--artifacts-root", required=True)
         if include_raw_lspo:
-            sp.add_argument("--raw-lspo-parquet", required=True)
-            sp.add_argument("--raw-lspo-h5", default=None)
+            sp.add_argument(
+                "--raw-lspo-parquet",
+                required=True,
+                help="Primary LSPO raw source path. If this parquet is absent, --raw-lspo-h5 can supply the Zenodo HDF5 release instead.",
+            )
+            sp.add_argument(
+                "--raw-lspo-h5",
+                default=None,
+                help="Optional LSPO raw HDF5 path. Supported for the Zenodo release and used when the parquet path is absent.",
+            )
 
     def _add_train_stage_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--run-stage", required=True, choices=["smoke", "mini", "mid", "full"])
@@ -2576,16 +2843,24 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--score-batch-size", type=int, default=8192)
         _add_progress_and_logging_args(sp)
 
-    sp = sub.add_parser("run-train-stage")
+    sp = sub.add_parser("run-train-stage", help="Operator command: execute a full LSPO training stage.")
     _add_train_stage_args(sp)
     sp.set_defaults(func=cmd_run_train_stage)
 
-    sp = sub.add_parser("train-lspo")
+    sp = sub.add_parser("train-lspo", help="Train a new LSPO model run from user-supplied LSPO raw data.")
     sp.add_argument("--run-stage", choices=["smoke", "mini", "mid", "full"], default="full")
     sp.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     sp.add_argument("--artifacts-root", default=str(DEFAULT_ARTIFACTS_ROOT))
-    sp.add_argument("--raw-lspo-parquet", default=str(DEFAULT_RAW_LSPO_PARQUET))
-    sp.add_argument("--raw-lspo-h5", default=None)
+    sp.add_argument(
+        "--raw-lspo-parquet",
+        default=str(DEFAULT_RAW_LSPO_PARQUET),
+        help="Primary LSPO raw source path. If this parquet is absent, --raw-lspo-h5 can supply the Zenodo HDF5 release instead.",
+    )
+    sp.add_argument(
+        "--raw-lspo-h5",
+        default=None,
+        help="Optional LSPO raw HDF5 path. Supported for the Zenodo release and used when the parquet path is absent.",
+    )
     sp.add_argument("--run-id", default=None)
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default=None)
@@ -2639,7 +2914,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_compare_infer_baseline)
 
-    sp = sub.add_parser("run-cluster-test-report")
+    sp = sub.add_parser("run-cluster-test-report", help="Operator command: rebuild LSPO quality reports for a local trained run.")
     sp.add_argument("--model-run-id", required=True)
     _add_public_workspace_args(sp, include_raw_lspo=True)
     sp.add_argument("--device", default="auto")
@@ -2652,13 +2927,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_progress_and_logging_args(sp)
     sp.set_defaults(func=cmd_run_cluster_test_report)
 
-    sp = sub.add_parser("quality-lspo")
+    sp = sub.add_parser(
+        "quality-lspo",
+        help="Evaluate LSPO quality for a local trained run. The packaged fixed bundle is infer-only.",
+    )
     sp.add_argument("--model-run-id", default=None)
     sp.add_argument("--model-bundle", default=None)
     sp.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
     sp.add_argument("--artifacts-root", default=str(DEFAULT_ARTIFACTS_ROOT))
-    sp.add_argument("--raw-lspo-parquet", default=str(DEFAULT_RAW_LSPO_PARQUET))
-    sp.add_argument("--raw-lspo-h5", default=None)
+    sp.add_argument(
+        "--raw-lspo-parquet",
+        default=str(DEFAULT_RAW_LSPO_PARQUET),
+        help="Primary LSPO raw source path. If this parquet is absent, --raw-lspo-h5 can supply the Zenodo HDF5 release instead.",
+    )
+    sp.add_argument(
+        "--raw-lspo-h5",
+        default=None,
+        help="Optional LSPO raw HDF5 path. Supported for the Zenodo release and used when the parquet path is absent.",
+    )
     sp.add_argument("--device", default="auto")
     sp.add_argument("--precision-mode", choices=["fp32", "amp_bf16"], default="fp32")
     sp.add_argument("--score-batch-size", type=int, default=8192)
@@ -2667,6 +2953,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_progress_and_logging_args(sp)
     _add_json_output_arg(sp)
     sp.set_defaults(func=cmd_quality_lspo)
+
+    sp = sub.add_parser(
+        "doctor",
+        help="Check repo-only LSPO prerequisites for training or quality evaluation without downloading or regenerating data.",
+    )
+    sp.add_argument("--data-root", default=str(DEFAULT_DATA_ROOT))
+    sp.add_argument("--artifacts-root", default=str(DEFAULT_ARTIFACTS_ROOT))
+    sp.add_argument(
+        "--raw-lspo-parquet",
+        default=str(DEFAULT_RAW_LSPO_PARQUET),
+        help="Primary LSPO raw source path. If this parquet is absent, --raw-lspo-h5 can supply the Zenodo HDF5 release instead.",
+    )
+    sp.add_argument(
+        "--raw-lspo-h5",
+        default=None,
+        help="Optional LSPO raw HDF5 path. Supported for the Zenodo release and used when the parquet path is absent.",
+    )
+    sp.add_argument("--model-run-id", default=None)
+    _add_json_output_arg(sp)
+    sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("export-model-bundle")
     sp.add_argument("--model-run-id", required=True)
