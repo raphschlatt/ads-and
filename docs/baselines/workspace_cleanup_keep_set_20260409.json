@@ -28,7 +28,15 @@
   ],
   "purgeable_patterns": [
     "tmp/**",
+    "notebooks/**",
+    ".pytest_cache/**",
     "data/interim/_tmp_*",
+    "data/subsets/cache/replace_with_run_id_from_00/**",
+    "data/subsets/cache/smoke_*",
+    "data/subsets/cache/smoke_test_*",
+    "data/subsets/manifests/replace_with_run_id_from_00_*",
+    "data/subsets/manifests/smoke_*",
+    "data/subsets/manifests/smoke_test_*",
     "artifacts/*/replace_with_run_id_from_00/**",
     "artifacts/checkpoints/smoke_*",
     "artifacts/clusters/smoke_*",
@@ -36,12 +44,17 @@
     "artifacts/metrics/smoke_*",
     "artifacts/pair_scores/smoke_*",
     "**/__pycache__/**",
-    "**/*.pyc"
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.pyd"
   ],
   "notes": [
     "No data/cache/_shared keep-paths are listed because no shared cache files are currently present in this workspace.",
     "The preserved model baseline is the canonical local bundle directory plus the portable bundle tarball.",
     "The preserved metrics baseline is only the portable metrics eval pack tarball; a runnable local metrics/checkpoint tree is not currently present in this workspace.",
+    "The notebooks/ tree is treated as a deadend in the current workspace snapshot and is purgeable.",
+    "data/subsets is a real workspace path, but smoke and placeholder contents under cache/ and manifests/ are purgeable local residue.",
+    "Run tests before final acceptance, then purge regenerated .pytest_cache and tests/__pycache__ again so the workspace ends clean.",
     "Anything outside this keep-set is eligible for local removal after validation."
   ]
 }
