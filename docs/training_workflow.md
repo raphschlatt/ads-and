@@ -39,7 +39,6 @@ python -m author_name_disambiguation_research run-cluster-test-report \
   --model-run-id <local-train-run-id> \
   --data-root data \
   --artifacts-root artifacts \
-  --raw-lspo-parquet data/raw/lspo/LSPO_v1.parquet \
   --raw-lspo-h5 data/raw/lspo/LSPO_v1.h5 \
   --report-tag <experiment-tag>
 ```
@@ -60,6 +59,15 @@ python -m author_name_disambiguation_research quality-lspo \
   --report-tag <experiment-tag>
 ```
 
+If you only have the Zenodo HDF5 source locally:
+
+```bash
+python -m author_name_disambiguation_research quality-lspo \
+  --model-run-id <local-train-run-id> \
+  --raw-lspo-h5 data/raw/lspo/LSPO_v1.h5 \
+  --report-tag <experiment-tag>
+```
+
 ## Model-Training Experiment
 
 Use `run-train-stage` only when the experiment intentionally changes weights,
@@ -74,8 +82,15 @@ python -m author_name_disambiguation_research run-train-stage \
   --raw-lspo-parquet data/raw/lspo/LSPO_v1.parquet
 ```
 
-If you are working from the Zenodo HDF5 release instead, add
-`--raw-lspo-h5 data/raw/lspo/LSPO_v1.h5`.
+If you are working from the Zenodo HDF5 release instead, use:
+
+```bash
+python -m author_name_disambiguation_research run-train-stage \
+  --run-stage full \
+  --data-root data \
+  --artifacts-root artifacts \
+  --raw-lspo-h5 data/raw/lspo/LSPO_v1.h5
+```
 
 `run-train-stage` prepares LSPO mentions, subsets, splits, pairs, embeddings,
 checkpoints, threshold metadata, stage metrics, and go/no-go reports. It does

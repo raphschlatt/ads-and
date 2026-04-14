@@ -30,8 +30,6 @@ def test_run_train_stage_parser_defaults():
             "/tmp/data",
             "--artifacts-root",
             "/tmp/artifacts",
-            "--raw-lspo-parquet",
-            "/tmp/data/raw/lspo/mock.parquet",
         ]
     )
 
@@ -39,7 +37,7 @@ def test_run_train_stage_parser_defaults():
     assert args.run_stage == "smoke"
     assert args.data_root == "/tmp/data"
     assert args.artifacts_root == "/tmp/artifacts"
-    assert args.raw_lspo_parquet == "/tmp/data/raw/lspo/mock.parquet"
+    assert args.raw_lspo_parquet is None
     assert args.raw_lspo_h5 is None
     assert args.progress is True
     assert args.progress_style == "compact"
@@ -103,6 +101,26 @@ def test_run_train_stage_parser_overrides():
     assert args.progress is False
     assert args.progress_style == "compact"
     assert args.quiet_libs is False
+
+
+def test_run_train_stage_parser_accepts_h5_only():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-train-stage",
+            "--run-stage",
+            "mini",
+            "--data-root",
+            "/tmp/data",
+            "--artifacts-root",
+            "/tmp/artifacts",
+            "--raw-lspo-h5",
+            "/tmp/data/raw/lspo/mock.h5",
+        ]
+    )
+
+    assert args.raw_lspo_parquet is None
+    assert args.raw_lspo_h5 == "/tmp/data/raw/lspo/mock.h5"
 
 
 def test_run_infer_sources_parser_defaults():
@@ -339,15 +357,13 @@ def test_run_cluster_test_report_parser_defaults():
             "/tmp/data",
             "--artifacts-root",
             "/tmp/artifacts",
-            "--raw-lspo-parquet",
-            "/tmp/data/raw/lspo/mock.parquet",
         ]
     )
     assert args.command == "run-cluster-test-report"
     assert args.model_run_id == "full_2026abc"
     assert args.data_root == "/tmp/data"
     assert args.artifacts_root == "/tmp/artifacts"
-    assert args.raw_lspo_parquet == "/tmp/data/raw/lspo/mock.parquet"
+    assert args.raw_lspo_parquet is None
     assert args.raw_lspo_h5 is None
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
@@ -359,6 +375,26 @@ def test_run_cluster_test_report_parser_defaults():
     assert args.progress is True
     assert args.quiet_libs is True
     assert args.func is cli.cmd_run_cluster_test_report
+
+
+def test_run_cluster_test_report_parser_accepts_h5_only():
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run-cluster-test-report",
+            "--model-run-id",
+            "full_2026abc",
+            "--data-root",
+            "/tmp/data",
+            "--artifacts-root",
+            "/tmp/artifacts",
+            "--raw-lspo-h5",
+            "/tmp/data/raw/lspo/mock.h5",
+        ]
+    )
+
+    assert args.raw_lspo_parquet is None
+    assert args.raw_lspo_h5 == "/tmp/data/raw/lspo/mock.h5"
 
 
 def test_run_cluster_test_report_parser_overrides():
