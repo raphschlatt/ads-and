@@ -52,7 +52,8 @@ Advanced infer flags such as `--infer-stage`, `--dataset-id`, and
 `--modal-gpu` are documented in
 [`docs/inference_workflow.md`](docs/inference_workflow.md).
 
-Modal uses the same command surface with an explicit backend switch:
+Modal uses the same command surface with [Modal](https://modal.com/) as a
+managed remote GPU backend:
 
 ```powershell
 ads-and infer `
@@ -60,14 +61,17 @@ ads-and infer `
   --references-path data/ads/references.parquet `
   --output-dir outputs/ads_run_modal `
   --backend modal `
-  --runtime auto
+  --runtime gpu `
+  --modal-gpu l4
 ```
 
-Modal runs the same ADS inference path remotely on managed GPU hardware. The
-local client stages projected ADS parquet inputs to the remote job and copies
-the finished outputs back into `output-dir`. Configure `MODAL_TOKEN_ID` and
-`MODAL_TOKEN_SECRET` in your environment or a repo-root `.env` before using
-`--backend modal`.
+Current repo config is `--backend modal --runtime gpu --modal-gpu l4`. The
+local client uploads the ADS parquet inputs, Modal runs the same bundled infer
+workflow remotely, and the finished outputs are copied back into `output-dir`.
+Current `L4` rule of thumb: about `$0.00085` and `~2.5s` per `1,000` ADS entries.
+Configure
+`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` in your environment or a repo-root
+`.env` before using `--backend modal`.
 
 Exact Modal costs are a separate official lookup:
 
