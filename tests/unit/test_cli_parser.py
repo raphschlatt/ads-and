@@ -3,6 +3,12 @@ import pytest
 from author_name_disambiguation import cli
 
 
+def _norm_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.replace("\\", "/")
+
+
 def test_build_parser_exposes_workspace_commands():
     parser = cli.build_parser()
     commands = set(parser._subparsers._group_actions[0].choices.keys())
@@ -248,7 +254,7 @@ def test_quality_lspo_parser_defaults():
     assert args.model_bundle is None
     assert args.data_root == "data"
     assert args.artifacts_root == "artifacts"
-    assert args.raw_lspo_parquet == "data/raw/lspo/LSPO_v1.parquet"
+    assert _norm_path(args.raw_lspo_parquet) == "data/raw/lspo/LSPO_v1.parquet"
     assert args.raw_lspo_h5 is None
     assert args.device == "auto"
     assert args.precision_mode == "fp32"
@@ -270,7 +276,7 @@ def test_train_lspo_parser_defaults():
     assert args.run_stage == "full"
     assert args.data_root == "data"
     assert args.artifacts_root == "artifacts"
-    assert args.raw_lspo_parquet == "data/raw/lspo/LSPO_v1.parquet"
+    assert _norm_path(args.raw_lspo_parquet) == "data/raw/lspo/LSPO_v1.parquet"
     assert args.raw_lspo_h5 is None
     assert args.run_id is None
     assert args.device == "auto"
@@ -290,7 +296,7 @@ def test_doctor_parser_defaults():
     assert args.command == "doctor"
     assert args.data_root == "data"
     assert args.artifacts_root == "artifacts"
-    assert args.raw_lspo_parquet == "data/raw/lspo/LSPO_v1.parquet"
+    assert _norm_path(args.raw_lspo_parquet) == "data/raw/lspo/LSPO_v1.parquet"
     assert args.raw_lspo_h5 is None
     assert args.model_run_id is None
     assert args.json_output is False
