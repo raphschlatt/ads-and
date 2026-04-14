@@ -249,7 +249,18 @@ def test_disambiguate_sources_maps_modal_auto_runtime_to_gpu(monkeypatch, tmp_pa
     assert kwargs["modal_gpu"] == "t4"
 
 
-def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp_path: Path):
+def test_evaluate_lspo_quality_requires_explicit_target(tmp_path: Path):
+    with pytest.raises(ValueError, match="quality-lspo requires an explicit target"):
+        evaluate_lspo_quality(
+            data_root=tmp_path / "data",
+            artifacts_root=tmp_path / "artifacts",
+            raw_lspo_parquet=tmp_path / "LSPO_v1.parquet",
+            progress=False,
+            progress_style="verbose",
+        )
+
+
+def test_evaluate_lspo_quality_passes_through_explicit_model_run_id(monkeypatch, tmp_path: Path):
     captured = {}
     report_path = tmp_path / "report.json"
     report_path.write_text(
@@ -282,12 +293,14 @@ def test_evaluate_lspo_quality_defaults_to_fixed_model_baseline(monkeypatch, tmp
         data_root=tmp_path / "data",
         artifacts_root=tmp_path / "artifacts",
         raw_lspo_parquet=tmp_path / "LSPO_v1.parquet",
+        model_run_id="full_demo",
         progress=False,
         progress_style="verbose",
     )
 
-    assert result.model_run_id == "full_20260218T111506Z_cli02681429"
+    assert result.model_run_id == "full_demo"
     args = captured["args"]
+    assert args.model_run_id == "full_demo"
     assert args.allow_legacy_lspo_compat is True
     assert args.progress is False
     assert args.progress_style == "verbose"

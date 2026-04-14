@@ -21,7 +21,17 @@ def load_lspo_raw(parquet_path: str | Path, h5_path: str | Path | None = None) -
         if h5_candidate.exists():
             return pd.read_hdf(h5_candidate)
 
-    raise FileNotFoundError(f"LSPO raw file not found. Checked: {checked}")
+    raise FileNotFoundError(
+        "LSPO raw source not found. "
+        f"Checked parquet={parquet_candidate}"
+        + (
+            ""
+            if h5_path is None
+            else f" and h5={Path(h5_path).expanduser().resolve()}"
+        )
+        + ". Provide either --raw-lspo-parquet or --raw-lspo-h5. "
+        "The Zenodo LSPO release can be used through --raw-lspo-h5."
+    )
 
 
 def normalize_lspo_mentions(raw_df: pd.DataFrame) -> pd.DataFrame:

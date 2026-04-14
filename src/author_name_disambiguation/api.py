@@ -12,7 +12,6 @@ from author_name_disambiguation.defaults import (
     DEFAULT_ARTIFACTS_ROOT,
     DEFAULT_DATA_ROOT,
     DEFAULT_RAW_LSPO_PARQUET,
-    FIXED_MODEL_BASELINE_RUN_ID,
     resolve_fixed_model_bundle_path,
 )
 from author_name_disambiguation.infer_sources import InferSourcesResult, run_infer_sources
@@ -94,19 +93,30 @@ def _resolve_user_backend(backend: UserBackend) -> UserBackend:
     return cast(UserBackend, normalized)
 
 
-def _derive_model_run_id(*, model_run_id: str | None, model_bundle: str | Path | None) -> str:
+def _derive_quality_model_run_id(*, model_run_id: str | None, model_bundle: str | Path | None) -> str:
     if model_run_id is not None and str(model_run_id).strip():
         return str(model_run_id).strip()
     if model_bundle is None:
-        return FIXED_MODEL_BASELINE_RUN_ID
+        raise ValueError(
+            "quality-lspo requires an explicit target. Pass --model-run-id <run_id> for a local LSPO training run, "
+            "or --model-bundle pointing to artifacts/models/<run_id>/bundle_v1 alongside the matching local "
+            "artifacts tree. The packaged fixed model bundle shipped with ads-and is infer-only. Next step: run "
+            "`train-lspo`."
+        )
     bundle_path = Path(model_bundle).expanduser().resolve()
+    if bundle_path == resolve_fixed_model_bundle_path().resolve():
+        raise ValueError(
+            "quality-lspo cannot run directly against the packaged fixed model bundle. The packaged bundle is "
+            "infer-only. Pass --model-run-id <run_id> for a local LSPO training run, or point --model-bundle at "
+            "artifacts/models/<run_id>/bundle_v1 for a run whose metrics and checkpoints are available locally."
+        )
     if bundle_path.name == "bundle_v1":
         parent_name = bundle_path.parent.name.strip()
         if parent_name:
             return parent_name
     raise ValueError(
-        "model_run_id is required unless model_bundle points to artifacts/models/<run_id>/bundle_v1 "
-        "or the packaged Fixed Model Baseline is used."
+        "quality-lspo requires --model-run-id, or --model-bundle pointing to "
+        "artifacts/models/<run_id>/bundle_v1 for a local LSPO training run."
     )
 
 
@@ -179,7 +189,7 @@ def evaluate_lspo_quality(
     progress_style: ProgressStyle = "compact",
     quiet_libs: bool = True,
 ) -> LspoQualityResult:
-    resolved_model_run_id = _derive_model_run_id(model_run_id=model_run_id, model_bundle=model_bundle)
+    resolved_model_run_id = _derive_quality_model_run_id(model_run_id=model_run_id, model_bundle=model_bundle)
     args = SimpleNamespace(
         model_run_id=resolved_model_run_id,
         data_root=str(Path(data_root).expanduser()),

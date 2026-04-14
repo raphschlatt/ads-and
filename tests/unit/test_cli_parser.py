@@ -10,6 +10,7 @@ def test_build_parser_exposes_workspace_commands():
         "infer",
         "quality-lspo",
         "train-lspo",
+        "doctor",
         "run-train-stage",
         "run-infer-sources",
         "compare-infer-baseline",
@@ -264,6 +265,20 @@ def test_train_lspo_parser_defaults():
     assert args.func is cli.cmd_train_lspo
 
 
+def test_doctor_parser_defaults():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor"])
+
+    assert args.command == "doctor"
+    assert args.data_root == "data"
+    assert args.artifacts_root == "artifacts"
+    assert args.raw_lspo_parquet == "data/raw/lspo/LSPO_v1.parquet"
+    assert args.raw_lspo_h5 is None
+    assert args.model_run_id is None
+    assert args.json_output is False
+    assert args.func is cli.cmd_doctor
+
+
 def test_simple_commands_accept_verbose_progress_and_json():
     parser = cli.build_parser()
 
@@ -288,6 +303,9 @@ def test_simple_commands_accept_verbose_progress_and_json():
     train_args = parser.parse_args(["train-lspo", "--verbose-progress", "--json"])
     assert train_args.progress_style == "verbose"
     assert train_args.json_output is True
+
+    doctor_args = parser.parse_args(["doctor", "--json"])
+    assert doctor_args.json_output is True
 
 
 def test_export_model_bundle_parser():

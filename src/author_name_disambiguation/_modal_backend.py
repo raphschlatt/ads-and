@@ -68,6 +68,17 @@ def _load_local_modal_env(env_path: str | Path | None = None) -> None:
             os.environ[key] = cleaned
 
 
+def _require_modal_credentials() -> None:
+    missing = [key for key in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET") if not str(os.environ.get(key) or "").strip()]
+    if missing:
+        missing_list = ", ".join(missing)
+        raise RuntimeError(
+            "Modal credentials are not configured. Set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET in your environment "
+            "or a repo-root `.env`, then rerun `ads-and infer --backend modal` or `ads-and cost --output-dir ...`. "
+            f"Missing: {missing_list}."
+        )
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -341,6 +352,7 @@ def run_modal_infer_sources(request):
 
     modal = _require_modal()
     _load_local_modal_env()
+    _require_modal_credentials()
     _validate_modal_request(request)
 
     output_root = Path(request.output_root).expanduser().resolve()
@@ -486,13 +498,21 @@ def run_modal_infer_sources(request):
 def resolve_modal_actual_cost(*, output_dir: str | Path, now_utc: datetime | None = None) -> ModalCostResult:
     _require_modal()
     _load_local_modal_env()
+    _require_modal_credentials()
     summary_path = Path(output_dir).expanduser().resolve() / SUMMARY_FILENAME
+    if not summary_path.exists():
+        raise RuntimeError(
+            f"No modal summary found at {summary_path}. Run `ads-and infer --backend modal --output-dir {Path(output_dir).expanduser().resolve()}` first."
+        )
     summary = _load_json(summary_path)
     modal_meta = dict(summary.get("modal") or {})
     app_id = str(modal_meta.get("app_id") or "").strip()
     exact_cost_available_after_utc = str(modal_meta.get("exact_cost_available_after_utc") or "").strip()
     if not app_id or not exact_cost_available_after_utc:
-        raise RuntimeError(f"Missing modal lookup metadata in {summary_path}. Run `ads-and infer --backend modal` first.")
+        raise RuntimeError(
+            f"{summary_path} does not look like a completed modal-backed infer output directory. "
+            "Run `ads-and infer --backend modal` first, then rerun `ads-and cost --output-dir <same_output_dir>`."
+        )
 
     now_value = _utc_now() if now_utc is None else now_utc.astimezone(timezone.utc)
     available_after = _parse_utc(exact_cost_available_after_utc)
