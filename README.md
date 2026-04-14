@@ -27,7 +27,7 @@ If you don't have a GPU: Optional faster CPU inference via ONNX (still much slow
 uv pip install "ads-and[cpu_onnx]"
 ```
 
-Optional Modal backend:
+Optional [Modal](https://modal.com/) backend (you need a modal account):
 
 ```powershell
 uv pip install "ads-and[modal]"
@@ -53,7 +53,7 @@ Advanced infer flags such as `--infer-stage`, `--dataset-id`, and
 [`docs/inference_workflow.md`](docs/inference_workflow.md).
 
 Modal uses the same command surface with [Modal](https://modal.com/) as a
-managed remote GPU backend:
+managed remote GPU backend (you need a modal account):
 
 ```powershell
 ads-and infer `
@@ -65,7 +65,7 @@ ads-and infer `
   --modal-gpu l4
 ```
 
-Current repo config is `--backend modal --runtime gpu --modal-gpu l4`. The
+Current repo default is `--backend modal --runtime gpu --modal-gpu l4`. The
 local client uploads the ADS parquet inputs, Modal runs the same bundled infer
 workflow remotely, and the finished outputs are copied back into `output-dir`.
 Current `L4` rule of thumb: about `$0.00085` and `~2.5s` per `1,000` ADS entries.
