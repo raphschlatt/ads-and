@@ -1,6 +1,8 @@
 {
   "manifest_scope": "lspo_quality_operational",
   "manifest_version": 1,
+  "status": "historical_reference_only",
+  "usage_note": "This manifest documents a historical/advisory LSPO baseline reference. New research runs should train locally from user-supplied LSPO raw data and then run quality-lspo against that local train run. See docs/training_workflow.md.",
   "generated_utc": "2026-04-07T00:00:00Z",
   "baseline_run_id": "full_20260218T111506Z_cli02681429",
   "report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json",
