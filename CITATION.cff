@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 title: "ads-and: ADS Author Name Disambiguation"
-message: "If you use this package, please cite the software entry below and the NAND paper under preferred-citation."
+message: "If you use ads-and, cite the software entry below. Cite the original NAND paper and LSPO dataset separately when you discuss the underlying method or benchmark."
 type: software
 authors:
   - family-names: "Schlattmann"
@@ -11,23 +11,23 @@ url: "https://github.com/raphschlatt/Author_Name_Disambiguation"
 license: "BSD-3-Clause"
 version: "0.1.0"
 date-released: "2026-04-09"
-preferred-citation:
-  type: article
-  title: "Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature"
-  authors:
-    - family-names: "Amado Olivo"
-      given-names: "Vicente"
-    - family-names: "Kerzendorf"
-      given-names: "Wolfgang"
-    - family-names: "Lu"
-      given-names: "Bangjing"
-    - family-names: "Shields"
-      given-names: "Joshua V."
-    - family-names: "Flörs"
-      given-names: "Andreas"
-    - family-names: "Chen"
-      given-names: "Nutan"
-  journal: "Publications of the Astronomical Society of the Pacific"
-  doi: "10.1088/1538-3873/ae1e2d"
-  url: "https://doi.org/10.1088/1538-3873/ae1e2d"
-  year: 2025
+references:
+  - type: article
+    title: "Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature"
+    authors:
+      - family-names: "Amado Olivo"
+        given-names: "Vicente"
+      - family-names: "Kerzendorf"
+        given-names: "Wolfgang"
+      - family-names: "Lu"
+        given-names: "Bangjing"
+      - family-names: "Shields"
+        given-names: "Joshua V."
+      - family-names: "Flörs"
+        given-names: "Andreas"
+      - family-names: "Chen"
+        given-names: "Nutan"
+    journal: "Publications of the Astronomical Society of the Pacific"
+    doi: "10.1088/1538-3873/ae1e2d"
+    url: "https://doi.org/10.1088/1538-3873/ae1e2d"
+    year: 2025

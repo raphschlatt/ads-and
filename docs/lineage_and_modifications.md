@@ -125,4 +125,5 @@ This repository is distributed under BSD-3-Clause.
 The imported NAND README states BSD-3-Clause licensing for the upstream
 project. LSPO is attributed through its Zenodo record and remains separately
 licensed by its dataset terms, reported there as CC BY 4.0. Users should cite
-the software entry in `CITATION.cff` and the NAND paper listed in `README.md`.
+the software entry in `CITATION.cff`; cite the original NAND paper and LSPO
+dataset separately when discussing the underlying method or benchmark.
