@@ -9,7 +9,7 @@ authors:
 repository-code: "https://github.com/raphschlatt/ads-and"
 url: "https://github.com/raphschlatt/ads-and"
 license: "BSD-3-Clause"
-version: "0.1.1"
+version: "0.1.2"
 date-released: "2026-04-22"
 references:
   - type: article
