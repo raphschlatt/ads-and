@@ -3,7 +3,6 @@
 [![PyPI](https://img.shields.io/pypi/v/ads-and.svg)](https://pypi.org/project/ads-and/)
 [![Python](https://img.shields.io/pypi/pyversions/ads-and.svg)](https://pypi.org/project/ads-and/)
 [![License](https://img.shields.io/pypi/l/ads-and.svg)](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/LICENSE)
-[![nightly smoke](https://github.com/raphschlatt/Author_Name_Disambiguation/actions/workflows/nightly-train-infer-smoke.yml/badge.svg)](https://github.com/raphschlatt/Author_Name_Disambiguation/actions/workflows/nightly-train-infer-smoke.yml)
 
 `ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. It is scoped to the ADS column schema and is not a general-purpose AND toolkit for arbitrary metadata.
 
