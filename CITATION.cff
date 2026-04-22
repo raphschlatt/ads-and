@@ -9,8 +9,8 @@ authors:
 repository-code: "https://github.com/raphschlatt/Author_Name_Disambiguation"
 url: "https://github.com/raphschlatt/Author_Name_Disambiguation"
 license: "BSD-3-Clause"
-version: "0.1.0"
-date-released: "2026-04-09"
+version: "0.1.1"
+date-released: "2026-04-22"
 preferred-citation:
   type: article
   title: "Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature"
