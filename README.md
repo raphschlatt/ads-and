@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/ads-and.svg)](https://pypi.org/project/ads-and/)
 [![License](https://img.shields.io/pypi/l/ads-and.svg)](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/LICENSE)
 
-`ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. It is scoped to the ADS column schema and is not a general-purpose AND toolkit for arbitrary metadata.
+`ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs.
 
 The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package, no external bundle is required.
 
@@ -162,8 +162,7 @@ Both columns are parallel lists in the same order as the input `Author` column. 
 
 ## Further Details
 
-Inference is out of the box because the bundled fixed model ships inside the
-package. Repo-only research workflows require user-supplied LSPO raw data
+The bundled fixed model ships inside the package. Repo-only research workflows require user-supplied LSPO raw data
 from the original source release; both parquet and HDF5 inputs are supported
 for LSPO preparation and evaluation.
 
@@ -173,10 +172,15 @@ for LSPO preparation and evaluation.
 
 ## Citation
 
-If you use `ads-and`, cite the software entry in [`CITATION.cff`](CITATION.cff) and the underlying NAND paper:
+Cite `ads-and` as software via [`CITATION.cff`](CITATION.cff). Cite the original NAND paper if you discuss the underlying method or baseline
 
 > Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
 
+and cite LSPO separately if you discuss the benchmark or dataset.
+
+>Amado Olivo, V. (2024). LSPO: A Large-Scale Physics ORCiD-Linked Dataset for Author Name Disambiguation (Version 1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.11489161
+
 Resources:
-- NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
+- Original NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>
+- Original NAND paper: <https://doi.org/10.1088/1538-3873/ae1e2d>
 - LSPO dataset: <https://doi.org/10.5281/zenodo.11489161>
