@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import logging
 import os
 import re
 import sys
@@ -50,6 +51,28 @@ def _should_filter_library_stderr_line(line: str) -> bool:
     if text == "":
         return False
     return any(pattern.match(text) for pattern in _KNOWN_TF_STDERR_PATTERNS)
+
+
+@contextmanager
+def _silence_known_python_loggers(*, enabled: bool) -> None:
+    # TF emits deprecation notices (e.g. `tf.reset_default_graph is deprecated`)
+    # through Python's logging module, which writes to sys.stderr. Under Jupyter
+    # sys.stderr is replaced by an IPython stream that bypasses fd 2, so the
+    # fd-level filter below cannot intercept these lines — we silence the
+    # loggers directly instead.
+    if not enabled:
+        yield
+        return
+    saved: dict[str, int] = {}
+    for name in ("tensorflow", "absl"):
+        lg = logging.getLogger(name)
+        saved[name] = lg.level
+        lg.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)
 
 
 @contextmanager
@@ -451,32 +474,33 @@ def generate_chars2vec_embeddings(
             os.environ["ABSL_LOG_LEVEL"] = "3"
             os.environ["KERAS_BACKEND"] = "tensorflow"
 
-        with _filter_known_library_stderr(enabled=quiet_libraries):
-            if force_cpu:
-                tensorflow_force_cpu_error = _force_tensorflow_cpu()
-            else:
-                tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
-            import chars2vec  # type: ignore
+        with _silence_known_python_loggers(enabled=quiet_libraries):
+            with _filter_known_library_stderr(enabled=quiet_libraries):
+                if force_cpu:
+                    tensorflow_force_cpu_error = _force_tensorflow_cpu()
+                else:
+                    tf_memory_growth_enabled, tf_memory_growth_error = _configure_tensorflow_memory_growth()
+                import chars2vec  # type: ignore
 
-            model_load_started_at = perf_counter()
-            model = chars2vec.load_model(model_name)
-            model_load_seconds = float(perf_counter() - model_load_started_at)
-            setattr(model, "keras", chars2vec.keras)
-            tensorflow_runtime = probe_tensorflow_runtime(force_cpu=force_cpu)
-        if force_cpu and int((tensorflow_runtime or {}).get("tensorflow_visible_gpu_count") or 0) > 0:
-            raise RuntimeError("force_cpu requested for chars2vec but TensorFlow still reports visible GPUs.")
-        cleanup_error = None
-        try:
-            emb, vectorize_meta = _vectorize_words_silently(
-                model,
-                names,
-                batch_size=batch_size,
-                execution_mode=execution_mode,
-                tensorflow_runtime=tensorflow_runtime,
-                show_progress=show_progress if execution_mode == "predict" else False,
-            )
-        finally:
-            cleanup_error = _cleanup_tensorflow_runtime(model)
+                model_load_started_at = perf_counter()
+                model = chars2vec.load_model(model_name)
+                model_load_seconds = float(perf_counter() - model_load_started_at)
+                setattr(model, "keras", chars2vec.keras)
+                tensorflow_runtime = probe_tensorflow_runtime(force_cpu=force_cpu)
+            if force_cpu and int((tensorflow_runtime or {}).get("tensorflow_visible_gpu_count") or 0) > 0:
+                raise RuntimeError("force_cpu requested for chars2vec but TensorFlow still reports visible GPUs.")
+            cleanup_error = None
+            try:
+                emb, vectorize_meta = _vectorize_words_silently(
+                    model,
+                    names,
+                    batch_size=batch_size,
+                    execution_mode=execution_mode,
+                    tensorflow_runtime=tensorflow_runtime,
+                    show_progress=show_progress if execution_mode == "predict" else False,
+                )
+            finally:
+                cleanup_error = _cleanup_tensorflow_runtime(model)
         emb = np.asarray(emb, dtype=np.float32)
         if emb.ndim != 2 or emb.shape[1] != _CHARS2VEC_DIM:
             raise ValueError(f"Unexpected chars2vec output shape: {emb.shape}")
