@@ -145,7 +145,7 @@ def disambiguate_sources(
     )
     resolved_bundle = resolve_fixed_model_bundle_path() if model_bundle is None else Path(model_bundle).expanduser()
     created_ui = None
-    if resolved_backend != "modal" and progress_handler is None and get_active_ui() is None:
+    if bool(progress) and resolved_backend != "modal" and progress_handler is None and get_active_ui() is None:
         created_ui = CliUI(total_steps=8, progress=bool(progress), progress_style=str(progress_style))
     try:
         return run_infer_sources(

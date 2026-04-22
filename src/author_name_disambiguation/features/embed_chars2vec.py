@@ -31,6 +31,7 @@ _KNOWN_TF_STDERR_PATTERNS = (
     re.compile(r".*\bgpu_device\.cc:\d+\].*Created device .*", re.IGNORECASE),
     re.compile(r".*\bread_numa_node\b.*", re.IGNORECASE),
     re.compile(r".*\bcpu_feature_guard\b.*", re.IGNORECASE),
+    re.compile(r".*\btf\.reset_default_graph\b.*deprecated.*", re.IGNORECASE),
 )
 
 

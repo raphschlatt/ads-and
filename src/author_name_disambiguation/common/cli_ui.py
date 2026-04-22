@@ -50,11 +50,16 @@ class CliUI:
         self.total_steps = int(max(1, total_steps))
         self.current_step = 0
         self._state: _StepState | None = None
+        self._warnings: list[str] = []
+        self._warning_set: set[str] = set()
+        self._notebook_environment = _is_notebook_environment()
         normalized_style = str(progress_style or "compact").strip().lower() or "compact"
         if normalized_style not in {"compact", "verbose"}:
             normalized_style = "compact"
         self.progress_style = normalized_style
-        show_bar = bool(progress) and _supports_live_progress() and self.progress_style == "verbose"
+        self._mode = "silent" if not bool(progress) else self.progress_style
+        show_bar = bool(progress) and bool(sys.stderr.isatty() or self._notebook_environment)
+        leave_bar = bool(self._mode == "compact" or self._notebook_environment)
         if _tqdm is None or not show_bar:
             self._bar = _NullProgressBar()
         else:
@@ -63,10 +68,10 @@ class CliUI:
                 disable=False,
                 dynamic_ncols=True,
                 unit="step",
-                leave=False,
+                leave=leave_bar,
             )
         self._active_token = _ACTIVE_UI.set(self)
-        self._nested_progress_token = _NESTED_PROGRESS_ENABLED.set(bool(progress))
+        self._nested_progress_token = _NESTED_PROGRESS_ENABLED.set(self._mode == "verbose")
 
     def _prefix(self) -> str:
         step_idx = self.current_step if self.current_step > 0 else 1
@@ -83,6 +88,10 @@ class CliUI:
         print(line, file=sys.stderr, flush=True)
 
     def _emit(self, level: str, message: str) -> None:
+        if self._mode == "silent":
+            return
+        if self._mode == "compact" and level != "FAIL":
+            return
         line = f"{self._prefix()} {level} {message}"
         self._write_line(line)
 
@@ -99,7 +108,15 @@ class CliUI:
         self._emit("INFO", message)
 
     def warn(self, message: str) -> None:
-        self._emit("WARN", message)
+        text = str(message)
+        if self._mode == "silent":
+            return
+        if self._mode == "compact":
+            if text not in self._warning_set:
+                self._warning_set.add(text)
+                self._warnings.append(text)
+            return
+        self._emit("WARN", text)
 
     def done(self, message: str = "Done.") -> None:
         if self._state and self._state.active:
@@ -134,6 +151,8 @@ class CliUI:
 
     def close(self) -> None:
         self._bar.close()
+        if self._mode == "compact" and self._warnings:
+            print("Warnings: " + " | ".join(self._warnings), file=sys.stderr, flush=True)
         _NESTED_PROGRESS_ENABLED.reset(self._nested_progress_token)
         _ACTIVE_UI.reset(self._active_token)
 
@@ -276,8 +295,8 @@ class _LoopProgress:
             self._plain_prefix = ""
 
         show_bar = self.enabled and not self._suppress_output and _supports_live_progress()
-        leave_bar = bool(self._compact_mode and not self._suppress_output)
-        if _tqdm is None or self._suppress_output:
+        leave_bar = bool((self._compact_mode or _is_notebook_environment()) and not self._suppress_output)
+        if _tqdm is None or not self.enabled or self._suppress_output:
             self._bar = _NullProgressBar()
         else:
             self._bar = _tqdm(

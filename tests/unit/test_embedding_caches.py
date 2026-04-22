@@ -759,4 +759,7 @@ def test_chars2vec_stderr_filter_only_suppresses_known_startup_lines():
     assert embed_chars2vec._should_filter_library_stderr_line(
         "I0000 00:00:1773084365.774281   21635 gpu_device.cc:2020] Created device /job:localhost/replica:0/task:0/device:GPU:0"
     )
+    assert embed_chars2vec._should_filter_library_stderr_line(
+        "WARNING:tensorflow:From keras/src/backend/common/global_state.py:82: The name tf.reset_default_graph is deprecated."
+    )
     assert not embed_chars2vec._should_filter_library_stderr_line("RuntimeError: chars2vec embedding generation failed")
