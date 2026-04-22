@@ -43,9 +43,9 @@ uv pip install "ads-and[modal]"
 
 ```powershell
 ads-and infer `
-  --publications-path data/ads/publications.parquet `
-  --references-path data/ads/references.parquet `
-  --output-dir outputs/ads_run `
+  --publications-path path/to/publications.parquet `
+  --references-path path/to/references.parquet `
+  --output-dir path/to/output-dir `
   --runtime auto
 ```
 
@@ -61,9 +61,9 @@ managed remote GPU backend (you need a modal account):
 
 ```powershell
 ads-and infer `
-  --publications-path data/ads/publications.parquet `
-  --references-path data/ads/references.parquet `
-  --output-dir outputs/ads_run_modal `
+  --publications-path path/to/publications.parquet `
+  --references-path path/to/references.parquet `
+  --output-dir path/to/output-dir `
   --backend modal `
   --runtime gpu `
   --modal-gpu l4
@@ -80,7 +80,7 @@ Configure
 Exact Modal costs are a separate official lookup:
 
 ```powershell
-ads-and cost --output-dir outputs/ads_run_modal
+ads-and cost --output-dir path/to/output-dir
 ```
 
 This is a follow-up lookup after the run, once the billing window has closed.
@@ -93,9 +93,9 @@ Local CPU/GPU:
 from author_name_disambiguation import disambiguate_sources
 
 result = disambiguate_sources(
-    publications_path="data/ads/publications.parquet",
-    references_path="data/ads/references.parquet",
-    output_dir="outputs/ads_run",
+    publications_path="path/to/publications.parquet",
+    references_path="path/to/references.parquet",
+    output_dir="path/to/output-dir",
     runtime="auto",
 )
 
@@ -109,16 +109,16 @@ Modal:
 from author_name_disambiguation import disambiguate_sources, resolve_modal_cost
 
 modal_result = disambiguate_sources(
-    publications_path="data/ads/publications.parquet",
-    references_path="data/ads/references.parquet",
-    output_dir="outputs/ads_run_modal",
+    publications_path="path/to/publications.parquet",
+    references_path="path/to/references.parquet",
+    output_dir="path/to/output-dir",
     backend="modal",
     runtime="gpu",
     modal_gpu="l4",
 )
 
 # later, after the billing interval closes
-cost_result = resolve_modal_cost("outputs/ads_run_modal")
+cost_result = resolve_modal_cost("path/to/output-dir")
 ```
 
 ## Input schema
