@@ -239,7 +239,12 @@ def resolve_infer_runtime_policy(
             if specter_runtime_backend_requested is not None
             else ""
         )
-        specter_runtime_backend_effective = requested_backend or "cpu_auto"
+        if requested_backend:
+            specter_runtime_backend_effective = requested_backend
+        elif onnx_available:
+            specter_runtime_backend_effective = "cpu_auto"
+        else:
+            specter_runtime_backend_effective = "transformers"
     elif runtime_mode_effective == "gpu":
         if str(specter_runtime_backend_requested or "").strip().lower() == "onnx_fp32":
             raise ValueError("runtime_mode='gpu' is incompatible with specter_runtime_backend='onnx_fp32'.")
@@ -299,7 +304,7 @@ def resolve_infer_runtime_policy(
             safety_fallbacks,
             component="specter",
             reason=str(onnx_reason or "onnx_cpu_unavailable"),
-            action="cpu_auto_transformers_fallback_if_needed",
+            action="cpu_transformers_backend_selected",
         )
 
     resolved_runtime_policy = {
