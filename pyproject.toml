@@ -70,9 +70,9 @@ research = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/raphschlatt/Author_Name_Disambiguation"
-Repository = "https://github.com/raphschlatt/Author_Name_Disambiguation"
-Issues = "https://github.com/raphschlatt/Author_Name_Disambiguation/issues"
+Homepage = "https://github.com/raphschlatt/ads-and"
+Repository = "https://github.com/raphschlatt/ads-and"
+Issues = "https://github.com/raphschlatt/ads-and/issues"
 "Original NAND Repository" = "https://github.com/deepthought-initiative/neural_name_dismabiguator"
 "Original NAND Paper" = "https://doi.org/10.1088/1538-3873/ae1e2d"
 "LSPO Dataset" = "https://doi.org/10.5281/zenodo.11489161"

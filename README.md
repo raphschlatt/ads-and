@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/ads-and.svg)](https://pypi.org/project/ads-and/)
 [![Python](https://img.shields.io/pypi/pyversions/ads-and.svg)](https://pypi.org/project/ads-and/)
-[![License](https://img.shields.io/pypi/l/ads-and.svg)](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/ads-and.svg)](https://github.com/raphschlatt/ads-and/blob/main/LICENSE)
 
 `ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs.
 
@@ -166,9 +166,9 @@ The bundled fixed model ships inside the package. Repo-only research workflows r
 from the original source release; both parquet and HDF5 inputs are supported
 for LSPO preparation and evaluation.
 
-- [Inference workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/inference_workflow.md)
-- [Training workflow](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/training_workflow.md)
-- [Project lineage and modifications](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/docs/lineage_and_modifications.md)
+- [Inference workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/inference_workflow.md)
+- [Training workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/training_workflow.md)
+- [Project lineage and modifications](https://github.com/raphschlatt/ads-and/blob/main/docs/lineage_and_modifications.md)
 
 ## Citation
 
