@@ -1,5 +1,10 @@
 # ads-and
 
+[![PyPI](https://img.shields.io/pypi/v/ads-and.svg)](https://pypi.org/project/ads-and/)
+[![Python](https://img.shields.io/pypi/pyversions/ads-and.svg)](https://pypi.org/project/ads-and/)
+[![License](https://img.shields.io/pypi/l/ads-and.svg)](https://github.com/raphschlatt/Author_Name_Disambiguation/blob/main/LICENSE)
+[![nightly smoke](https://github.com/raphschlatt/Author_Name_Disambiguation/actions/workflows/nightly-train-infer-smoke.yml/badge.svg)](https://github.com/raphschlatt/Author_Name_Disambiguation/actions/workflows/nightly-train-infer-smoke.yml)
+
 `ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. It is scoped to the ADS column schema and is not a general-purpose AND toolkit for arbitrary metadata.
 
 The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package, no external bundle is required.
@@ -65,7 +70,7 @@ ads-and infer `
   --modal-gpu l4
 ```
 
-Current repo default is `--backend modal --runtime gpu --modal-gpu l4`. The
+Current repo Modal config is `--backend modal --runtime gpu --modal-gpu l4`. The
 local client uploads the ADS parquet inputs, Modal runs the same bundled infer
 workflow remotely, and the finished outputs are copied back into `output-dir`.
 Current `L4` rule of thumb: about `$0.00085` and `~2.5s` per `1,000` ADS entries.
@@ -83,8 +88,10 @@ This is a follow-up lookup after the run, once the billing window has closed.
 
 **Python**
 
+Local CPU/GPU:
+
 ```python
-from author_name_disambiguation import disambiguate_sources, resolve_modal_cost
+from author_name_disambiguation import disambiguate_sources
 
 result = disambiguate_sources(
     publications_path="data/ads/publications.parquet",
@@ -95,13 +102,20 @@ result = disambiguate_sources(
 
 print(result.publications_disambiguated_path)
 print(result.summary_path)
+```
+
+Modal:
+
+```python
+from author_name_disambiguation import disambiguate_sources, resolve_modal_cost
 
 modal_result = disambiguate_sources(
     publications_path="data/ads/publications.parquet",
     references_path="data/ads/references.parquet",
     output_dir="outputs/ads_run_modal",
     backend="modal",
-    runtime="auto",
+    runtime="gpu",
+    modal_gpu="l4",
 )
 
 # later, after the billing interval closes
@@ -162,7 +176,7 @@ for LSPO preparation and evaluation.
 
 If you use `ads-and`, cite the software entry in [`CITATION.cff`](CITATION.cff) and the underlying NAND paper:
 
-Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
+> Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
 
 Resources:
 - NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>

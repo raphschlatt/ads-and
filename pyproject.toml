@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ads-and"
-version = "0.1.0"
+version = "0.1.1"
 description = "ADS author name disambiguation with a bundled NAND-based baseline model and automatic local CPU/GPU inference."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -73,8 +73,9 @@ research = [
 Homepage = "https://github.com/raphschlatt/Author_Name_Disambiguation"
 Repository = "https://github.com/raphschlatt/Author_Name_Disambiguation"
 Issues = "https://github.com/raphschlatt/Author_Name_Disambiguation/issues"
-Paper = "https://doi.org/10.1088/1538-3873/ae1e2d"
 "Original NAND Repository" = "https://github.com/deepthought-initiative/neural_name_dismabiguator"
+"Original NAND Paper" = "https://doi.org/10.1088/1538-3873/ae1e2d"
+"LSPO Dataset" = "https://doi.org/10.5281/zenodo.11489161"
 
 [project.scripts]
 ads-and = "author_name_disambiguation.public_cli:main"
