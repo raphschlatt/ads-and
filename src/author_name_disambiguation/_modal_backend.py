@@ -311,7 +311,22 @@ def _resolve_modal_progress(request) -> bool:
             RuntimeWarning,
             stacklevel=3,
         )
-    return caller_progress and caller_handler is None
+    if not caller_progress or caller_handler is not None:
+        return False
+    if sys.platform == "win32":
+        encodings = [
+            str(getattr(stream, "encoding", "") or "").strip().lower()
+            for stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None))
+        ]
+        if any(not (encoding.startswith("utf-8") or encoding == "utf8") for encoding in encodings):
+            warnings.warn(
+                "Modal progress output is disabled on Windows unless the active console uses UTF-8. "
+                "Run `chcp 65001` to enable it, or continue without progress output.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return False
+    return True
 
 
 def _existing_modal_gpu_type(output_root: Path) -> str | None:

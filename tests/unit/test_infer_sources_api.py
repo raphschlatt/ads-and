@@ -463,3 +463,28 @@ def test_resolve_modal_progress_warns_and_disables_when_handler_set(tmp_path: Pa
     request = _make_modal_request(tmp_path=tmp_path, progress=True, handler=_Handler())
     with pytest.warns(RuntimeWarning, match="progress_handler is ignored"):
         assert _modal_backend._resolve_modal_progress(request) is False
+
+
+def test_resolve_modal_progress_disables_on_windows_without_utf8_console(monkeypatch, tmp_path: Path):
+    class _Stream:
+        def __init__(self, encoding: str):
+            self.encoding = encoding
+
+    request = _make_modal_request(tmp_path=tmp_path, progress=True)
+    monkeypatch.setattr(_modal_backend.sys, "platform", "win32")
+    monkeypatch.setattr(_modal_backend.sys, "stdout", _Stream("cp1252"))
+    monkeypatch.setattr(_modal_backend.sys, "stderr", _Stream("cp1252"))
+    with pytest.warns(RuntimeWarning, match="active console uses UTF-8"):
+        assert _modal_backend._resolve_modal_progress(request) is False
+
+
+def test_resolve_modal_progress_keeps_windows_utf8_console_enabled(monkeypatch, tmp_path: Path):
+    class _Stream:
+        def __init__(self, encoding: str):
+            self.encoding = encoding
+
+    request = _make_modal_request(tmp_path=tmp_path, progress=True)
+    monkeypatch.setattr(_modal_backend.sys, "platform", "win32")
+    monkeypatch.setattr(_modal_backend.sys, "stdout", _Stream("utf-8"))
+    monkeypatch.setattr(_modal_backend.sys, "stderr", _Stream("utf-8"))
+    assert _modal_backend._resolve_modal_progress(request) is True
