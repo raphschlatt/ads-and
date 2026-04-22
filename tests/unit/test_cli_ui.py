@@ -5,12 +5,13 @@ class _FakeBar:
     def __init__(self, *args, disable=False, desc=None, leave=False, **kwargs):
         self.disable = bool(disable)
         self.desc = desc
+        self.last_desc = desc
         self.leave = bool(leave)
         self.lines = []
         self.updates = 0
 
-    def set_description_str(self, _desc: str) -> None:
-        return None
+    def set_description_str(self, desc: str) -> None:
+        self.last_desc = str(desc)
 
     def update(self, n: int = 1) -> None:
         self.updates += int(n)
@@ -74,15 +75,15 @@ def test_cli_ui_emits_start_line_when_progress_bar_active(monkeypatch):
     assert any(" DONE " in line for line in ui._bar.lines)
 
 
-def test_cli_ui_prints_start_line_when_progress_bar_disabled(capsys):
+def test_cli_ui_is_silent_when_progress_disabled(capsys):
     ui = cli_ui.CliUI(total_steps=1, progress=False)
     ui.start("Prepare")
+    ui.warn("Heads up")
     ui.done("Prepared.")
     ui.close()
 
     err = capsys.readouterr().err
-    assert "START Prepare" in err
-    assert "DONE Prepared." in err
+    assert err == ""
 
 
 def test_iter_progress_plain_mode_writes_plain_lines(monkeypatch, capsys):
@@ -126,7 +127,7 @@ def test_iter_progress_plain_mode_formats_small_progress_without_repeated_zero(m
     assert "progress=0% done=1/200" not in err
 
 
-def test_compact_mode_uses_persistent_stage_bar_without_global_step_bar(monkeypatch):
+def test_compact_mode_uses_single_top_level_bar_without_stage_lines(monkeypatch):
     bars = []
 
     def _fake_tqdm(*args, **kwargs):
@@ -139,20 +140,22 @@ def test_compact_mode_uses_persistent_stage_bar_without_global_step_bar(monkeypa
     monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: False)
 
     ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="compact")
-    assert ui._bar.disable is True
+    assert ui._bar.disable is False
     ui.start("Text embeddings")
     list(cli_ui.iter_progress(range(3), total=3, label="SPECTER texts", enabled=True, unit="text"))
     ui.done("Done.")
     ui.close()
 
     assert len(bars) == 1
-    assert bars[0].desc == "[01/01] Text embeddings"
+    assert bars[0].last_desc == "01/01 Text embeddings"
+    assert bars[0].updates == 1
+    assert bars[0].lines == []
     assert bars[0].leave is True
-    assert bars[0].updates == 3
 
 
-def test_compact_mode_can_hide_selected_nested_progress(monkeypatch):
+def test_compact_mode_buffers_warnings_until_close(monkeypatch):
     bars = []
+    fake_stderr = _FakeStderr()
 
     def _fake_tqdm(*args, **kwargs):
         bar = _FakeBar(*args, **kwargs)
@@ -160,25 +163,19 @@ def test_compact_mode_can_hide_selected_nested_progress(monkeypatch):
         return bar
 
     monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
-    monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
+    monkeypatch.setattr(cli_ui.sys, "stderr", fake_stderr)
     monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: False)
 
     ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="compact")
     ui.start("Pair inference")
-    list(
-        cli_ui.iter_progress(
-            range(3),
-            total=3,
-            label="Score batches",
-            enabled=True,
-            unit="batch",
-            compact_visible=False,
-        )
-    )
+    ui.warn("ONNX CPU SPECTER unavailable; falling back to transformers")
     ui.done("Done.")
     ui.close()
 
-    assert bars == []
+    err = "".join(fake_stderr.lines)
+    assert len(bars) == 1
+    assert "Warnings: ONNX CPU SPECTER unavailable; falling back to transformers" in err
+    assert " WARN " not in err
 
 
 def test_nested_progress_is_shown_in_verbose_mode(monkeypatch):
@@ -200,3 +197,73 @@ def test_nested_progress_is_shown_in_verbose_mode(monkeypatch):
 
     assert len(bars) == 2
     assert bars[1].updates == 2
+    assert bars[0].leave is False
+    assert bars[1].leave is False
+
+
+def test_verbose_mode_emits_warning_inline(monkeypatch):
+    bars = []
+
+    def _fake_tqdm(*args, **kwargs):
+        bar = _FakeBar(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
+    monkeypatch.setattr(cli_ui.sys, "stderr", _FakeStderr())
+
+    ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="verbose")
+    ui.start("Text embeddings")
+    ui.warn("ONNX CPU SPECTER unavailable; falling back to transformers")
+    ui.done("Done.")
+    ui.close()
+
+    assert any(" WARN " in line for line in bars[0].lines)
+
+
+def test_notebook_progress_uses_single_top_level_bar(monkeypatch):
+    bars = []
+    fake_stderr = _FakeNonTtyStderr()
+
+    def _fake_tqdm(*args, **kwargs):
+        bar = _FakeBar(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
+    monkeypatch.setattr(cli_ui.sys, "stderr", fake_stderr)
+    monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: True)
+
+    ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="compact")
+    ui.start("Text embeddings")
+    list(cli_ui.iter_progress(range(3), total=3, label="SPECTER texts", enabled=True, unit="text"))
+    ui.done("Done.")
+    ui.close()
+
+    assert len(bars) == 1
+    assert bars[0].updates == 1
+    assert bars[0].lines == []
+    assert bars[0].leave is True
+    assert fake_stderr.lines == []
+
+
+def test_notebook_verbose_progress_keeps_bars_visible(monkeypatch):
+    bars = []
+
+    def _fake_tqdm(*args, **kwargs):
+        bar = _FakeBar(*args, **kwargs)
+        bars.append(bar)
+        return bar
+
+    monkeypatch.setattr(cli_ui, "_tqdm", _fake_tqdm)
+    monkeypatch.setattr(cli_ui.sys, "stderr", _FakeNonTtyStderr())
+    monkeypatch.setattr(cli_ui, "_is_notebook_environment", lambda: True)
+
+    ui = cli_ui.CliUI(total_steps=1, progress=True, progress_style="verbose")
+    with cli_ui.loop_progress(total=2, label="Inner batches", enabled=True, unit="batch") as tracker:
+        tracker.update(2)
+    ui.close()
+
+    assert len(bars) == 2
+    assert bars[0].leave is True
+    assert bars[1].leave is True

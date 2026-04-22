@@ -5,6 +5,7 @@ from pathlib import Path
 
 import author_name_disambiguation
 from author_name_disambiguation import public_cli
+from author_name_disambiguation import public_api
 from author_name_disambiguation._modal_backend import ModalCostResult
 from author_name_disambiguation.infer_sources import InferSourcesResult
 
@@ -251,3 +252,46 @@ def test_public_cli_cost_emits_summary(monkeypatch, tmp_path: Path, capsys):
     output = capsys.readouterr().out
     assert "Modal cost lookup: complete" in output
     assert "0.1234" in output
+
+
+def test_public_api_disambiguate_sources_skips_ui_when_progress_false(monkeypatch, tmp_path: Path):
+    created = {"called": False}
+
+    def _fake_run(**kwargs):
+        return InferSourcesResult(
+            run_id="infer_sources_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=tmp_path / "summary.json",
+        )
+
+    class _FakeUi:
+        def __init__(self, *args, **kwargs):
+            created["called"] = True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("author_name_disambiguation.public_api.run_infer_sources", _fake_run)
+    monkeypatch.setattr(
+        "author_name_disambiguation.public_api.resolve_fixed_model_bundle_path",
+        lambda: tmp_path / "bundle",
+    )
+    monkeypatch.setattr("author_name_disambiguation.public_api.CliUI", _FakeUi)
+    monkeypatch.setattr("author_name_disambiguation.public_api.get_active_ui", lambda: None)
+
+    result = public_api.disambiguate_sources(
+        publications_path=tmp_path / "publications.parquet",
+        output_dir=tmp_path / "out",
+        progress=False,
+    )
+
+    assert result.summary_path == tmp_path / "summary.json"
+    assert created["called"] is False

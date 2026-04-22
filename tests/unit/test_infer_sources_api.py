@@ -111,7 +111,7 @@ def test_run_infer_sources_accepts_keyword_arguments(monkeypatch, tmp_path: Path
     assert captured_request.runtime_mode is None
 
 
-def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch, tmp_path: Path):
+def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle_with_ui(monkeypatch, tmp_path: Path):
     captured = {}
 
     def _fake_run(request=None, **kwargs):
@@ -160,7 +160,7 @@ def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch,
     result = disambiguate_sources(
         publications_path=tmp_path / "publications.parquet",
         output_dir=tmp_path / "out",
-        progress=False,
+        progress=True,
         progress_style="verbose",
     )
 
@@ -172,6 +172,50 @@ def test_disambiguate_sources_uses_auto_runtime_and_packaged_bundle(monkeypatch,
     assert kwargs["model_bundle"] == tmp_path / "bundle"
     assert created_ui["args"]["progress_style"] == "verbose"
     assert created_ui["closed"] is True
+
+
+def test_disambiguate_sources_skips_ui_when_progress_false(monkeypatch, tmp_path: Path):
+    captured = {}
+    created = {"called": False}
+
+    def _fake_run(request=None, **kwargs):
+        captured["kwargs"] = kwargs
+        return InferSourcesResult(
+            run_id="infer_sources_test",
+            go=True,
+            output_root=tmp_path,
+            publications_disambiguated_path=tmp_path / "publications_disambiguated.parquet",
+            references_disambiguated_path=None,
+            source_author_assignments_path=tmp_path / "source_author_assignments.parquet",
+            author_entities_path=tmp_path / "author_entities.parquet",
+            mention_clusters_path=tmp_path / "mention_clusters.parquet",
+            stage_metrics_path=tmp_path / "05_stage_metrics_infer_sources.json",
+            go_no_go_path=tmp_path / "05_go_no_go_infer_sources.json",
+            summary_path=tmp_path / "summary.json",
+        )
+
+    class _FakeUi:
+        def __init__(self, *args, **kwargs):
+            created["called"] = True
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("author_name_disambiguation.api.run_infer_sources", _fake_run)
+    monkeypatch.setattr("author_name_disambiguation.api.resolve_fixed_model_bundle_path", lambda: tmp_path / "bundle")
+    monkeypatch.setattr("author_name_disambiguation.api.CliUI", _FakeUi)
+    monkeypatch.setattr("author_name_disambiguation.api.get_active_ui", lambda: None)
+
+    result = disambiguate_sources(
+        publications_path=tmp_path / "publications.parquet",
+        output_dir=tmp_path / "out",
+        progress=False,
+        progress_style="verbose",
+    )
+
+    assert result.summary_path == tmp_path / "summary.json"
+    assert captured["kwargs"]["runtime_mode"] == "cpu"
+    assert created["called"] is False
 
 
 def test_run_infer_sources_dispatches_modal_backend(monkeypatch, tmp_path: Path):
