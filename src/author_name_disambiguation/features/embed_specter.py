@@ -393,7 +393,9 @@ def _load_specter_components(
             from adapters import AutoAdapterModel
         except Exception as exc:
             raise RuntimeError(
-                "Adapter backend requires the `adapters` package. Install with `pip install -U adapters`."
+                "Adapter backend requires the separate research adapters stack. The shared public compatibility line keeps "
+                "`transformers>=4.56,<4.57`, but current `adapters` releases still pin older transformers. "
+                "Use a separate research environment if you need `text_backend=\"adapters\"`."
             ) from exc
         model = AutoAdapterModel.from_pretrained(model_name)
         load_kwargs: dict[str, Any] = {"source": "hf", "set_active": True}

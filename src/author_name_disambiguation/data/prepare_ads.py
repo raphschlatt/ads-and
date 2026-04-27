@@ -31,6 +31,16 @@ _ADS_PARQUET_PROJECTION_CANDIDATES = [
     "Affilliation",
     "aff",
 ]
+_ADS_STRING_OUTPUT_COLUMNS = [
+    "bibcode",
+    "title",
+    "abstract",
+    "source_type",
+    "canonical_source_type",
+    "mention_id",
+    "block_key",
+    "author_name",
+]
 
 
 def _iter_jsonl(path: Path):
@@ -226,6 +236,13 @@ def _normalize_ads_parquet_frame(raw_frame: pd.DataFrame, source_type: str) -> p
     return out.reset_index(drop=True)
 
 
+def _coerce_ads_string_columns_to_object(frame: pd.DataFrame) -> pd.DataFrame:
+    for column in _ADS_STRING_OUTPUT_COLUMNS:
+        if column in frame.columns:
+            frame[column] = frame[column].astype(object)
+    return frame
+
+
 def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str, Any] | None:
     source_row_idx = int(record.get("_source_row_idx", 0))
     bibcode = str(record.get("Bibcode") or record.get("bibcode") or "").strip()
@@ -298,6 +315,8 @@ def load_ads_records(
             ],
         )
         mode = "record_iter"
+
+    out = _coerce_ads_string_columns_to_object(out)
 
     meta = {
         "mode": mode,
@@ -510,10 +529,10 @@ def prepare_ads_source_data(
         "references_mode": refs_meta["mode"],
     }
     result = {
-        "publications": publications,
-        "references": references,
-        "canonical_records": canonical_records,
-        "mentions": mentions,
+        "publications": _coerce_ads_string_columns_to_object(publications),
+        "references": _coerce_ads_string_columns_to_object(references),
+        "canonical_records": _coerce_ads_string_columns_to_object(canonical_records),
+        "mentions": _coerce_ads_string_columns_to_object(mentions),
     }
     if return_raw_sources:
         result["raw_publications"] = raw_publications

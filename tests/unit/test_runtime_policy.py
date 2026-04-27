@@ -10,7 +10,7 @@ def test_runtime_policy_cpu_only_host_prefers_cpu_safe_defaults(monkeypatch, tmp
         runtime_policy,
         "_probe_torch_host",
         lambda bootstrap_runtime=None: {
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "resolved_device": "cpu",
@@ -53,8 +53,8 @@ def test_runtime_policy_cuda_host_keeps_gpu_specter_but_cpu_chars(monkeypatch, t
         runtime_policy,
         "_probe_torch_host",
         lambda bootstrap_runtime=None: {
-            "torch_version": "2.10.0+cu126",
-            "torch_cuda_version": "12.6",
+            "torch_version": "2.6.0+cu124",
+            "torch_cuda_version": "12.4",
             "torch_cuda_available": True,
             "resolved_device": "cuda:0",
             "gpu_name": "RTX A6000",
@@ -94,7 +94,7 @@ def test_runtime_policy_low_ram_reduces_chars_batch_and_clamps_cpu_score_batch(m
         runtime_policy,
         "_probe_torch_host",
         lambda bootstrap_runtime=None: {
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "resolved_device": "cpu",
@@ -131,8 +131,8 @@ def test_runtime_policy_keeps_python_union_even_if_numba_could_exist(monkeypatch
         runtime_policy,
         "_probe_torch_host",
         lambda bootstrap_runtime=None: {
-            "torch_version": "2.10.0+cu126",
-            "torch_cuda_version": "12.6",
+            "torch_version": "2.6.0+cu124",
+            "torch_cuda_version": "12.4",
             "torch_cuda_available": True,
             "resolved_device": "cuda:0",
             "gpu_name": "RTX A6000",

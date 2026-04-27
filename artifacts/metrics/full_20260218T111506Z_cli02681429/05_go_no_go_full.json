@@ -1,0 +1,133 @@
+{
+  "go": true,
+  "checks": [
+    {
+      "name": "schema_valid",
+      "passed": true,
+      "detail": "All required schemas validated",
+      "severity": "blocker"
+    },
+    {
+      "name": "determinism_valid",
+      "passed": true,
+      "detail": "Determinism checks passed",
+      "severity": "blocker"
+    },
+    {
+      "name": "uid_uniqueness",
+      "passed": true,
+      "detail": "Each mention_id mapped to one author_uid",
+      "severity": "blocker"
+    },
+    {
+      "name": "run_id_consistent",
+      "passed": true,
+      "detail": "Run ID consistent across stage artifacts",
+      "severity": "blocker"
+    },
+    {
+      "name": "mention_coverage",
+      "passed": true,
+      "detail": "not applicable for train scope",
+      "severity": "blocker"
+    },
+    {
+      "name": "uid_uniqueness_max",
+      "passed": true,
+      "detail": "not applicable for train scope",
+      "severity": "blocker"
+    },
+    {
+      "name": "min_negatives_val",
+      "passed": true,
+      "detail": "Observed val neg=131172, required>=500",
+      "severity": "blocker"
+    },
+    {
+      "name": "min_negatives_test",
+      "passed": true,
+      "detail": "Observed test neg=108187, required>=500",
+      "severity": "blocker"
+    },
+    {
+      "name": "threshold_not_extreme",
+      "passed": true,
+      "detail": "Observed threshold=0.502, allowed_range=[-0.95, 0.95]",
+      "severity": "blocker"
+    },
+    {
+      "name": "threshold_selection_status",
+      "passed": true,
+      "detail": "status=ok, allowed=['fallback_no_labels', 'fallback_no_negatives', 'fallback_no_positives', 'ok']",
+      "severity": "blocker"
+    },
+    {
+      "name": "split_balance_status",
+      "passed": true,
+      "detail": "status=ok",
+      "severity": "blocker"
+    },
+    {
+      "name": "split_neg_feasible",
+      "passed": true,
+      "detail": "Observed max_possible_neg_total=2919543, required_neg_total=1000",
+      "severity": "blocker"
+    },
+    {
+      "name": "memory_feasible",
+      "passed": true,
+      "detail": "not available",
+      "severity": "blocker"
+    },
+    {
+      "name": "pair_score_range_ok",
+      "passed": true,
+      "detail": "not available",
+      "severity": "blocker"
+    },
+    {
+      "name": "singleton_ratio",
+      "passed": true,
+      "detail": "not available",
+      "severity": "blocker"
+    },
+    {
+      "name": "split_high_sim_rate_probe",
+      "passed": true,
+      "detail": "not available",
+      "severity": "blocker"
+    },
+    {
+      "name": "lspo_block_size_p95",
+      "passed": true,
+      "detail": "Observed lspo_block_size_p95=24.0000, required>=2.0000",
+      "severity": "blocker"
+    },
+    {
+      "name": "lspo_pairs",
+      "passed": true,
+      "detail": "Observed lspo_pairs=5567364, required>=300000",
+      "severity": "blocker"
+    },
+    {
+      "name": "eps_boundary_hit",
+      "passed": true,
+      "detail": "Observed boundary_hit=false",
+      "severity": "blocker"
+    },
+    {
+      "name": "eps_range_limited",
+      "passed": true,
+      "detail": "Observed range_limited=false",
+      "severity": "blocker"
+    },
+    {
+      "name": "lspo_pairwise_f1_sanity",
+      "passed": true,
+      "detail": "Observed F1=0.9763, required>=0.9000",
+      "severity": "blocker"
+    }
+  ],
+  "blockers": [],
+  "warnings": []
+}

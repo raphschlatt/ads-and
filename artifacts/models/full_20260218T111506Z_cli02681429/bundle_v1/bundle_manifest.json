@@ -1,0 +1,28 @@
+{
+  "bundle_schema_version": "v1",
+  "source_model_run_id": "full_20260218T111506Z_cli02681429",
+  "created_utc": "2026-02-18T20:46:02.084304+00:00",
+  "checkpoint_hash": "5042119c06e2",
+  "selected_eps": 0.35,
+  "best_threshold": 0.502,
+  "precision_mode": "fp32",
+  "best_test_f1": 0.976252414576076,
+  "best_val_f1": 0.974177854543771,
+  "best_val_class_counts": {
+    "pos": 1585504,
+    "neg": 131172
+  },
+  "best_test_class_counts": {
+    "pos": 1571517,
+    "neg": 108187
+  },
+  "max_pairs_per_block": null,
+  "pair_building": {
+    "exclude_same_bibcode": true
+  },
+  "paths": {
+    "checkpoint": "checkpoint.pt",
+    "model_config": "model_config.yaml",
+    "clustering_resolved": "clustering_resolved.json"
+  }
+}

@@ -3,6 +3,9 @@
 This is a repo-level runbook for ADS inference. Public package users normally
 only need the `README.md` usage examples.
 
+Public package support in this repo is pinned to Python 3.12. The validated
+public inference stack is Torch 2.6.x with Transformers 4.56.x.
+
 ## Public Path
 
 The public command uses the bundled Trained NAND Model:
@@ -22,6 +25,9 @@ from author_name_disambiguation import disambiguate_sources
 ```
 
 `--references-path` is optional. `--runtime` is `auto`, `gpu`, or `cpu`.
+The bundled public path uses the packaged fixed model and does not require the
+older adapter stack. Adapter experiments stay in a separate research env
+because current `adapters` releases still pin older `transformers` versions.
 
 Modal uses the same public path with `--backend modal`:
 

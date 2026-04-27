@@ -1,0 +1,30 @@
+name: nand_best
+representation:
+  name_embedding: chars2vec
+  text_embedding: specter
+  text_model_name: allenai/specter
+  max_length: 256
+training:
+  loss: infonce
+  input_dim: 818
+  hidden_dim: 1024
+  output_dim: 256
+  dropout: 0.2
+  activation: selu
+  learning_rate: 1.0e-05
+  batch_size: 2048
+  max_epochs: 250
+  early_stopping_patience: 25
+  temperature: 0.25
+  infonce_weight: 1.0
+  negative_loss_weight: 1.0
+  negative_margin: 0.65
+  require_hard_negatives: true
+  default_cosine_threshold: 0.35
+  precision_mode: fp32
+  seeds:
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5

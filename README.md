@@ -8,7 +8,8 @@
 
 The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package, no external bundle is required.
 
-The bundled package was re-evaluated on the same LSPO benchmark under a reproducible five-seed protocol. Clustering performance on LSPO (with constraints enabled):
+This implementation was re-evaluated on LSPO under a five-seed protocol.
+Clustering performance on LSPO (with constraints enabled):
 
 | | F1 | Precision | Recall |
 |---|---|---|---|
@@ -19,13 +20,14 @@ Python import path: `author_name_disambiguation`
 
 ## Install
 
-Use [uv](https://docs.astral.sh/uv/). Requires Python ≥ 3.11.
+Use [uv](https://docs.astral.sh/uv/). Requires Python 3.12.
 
 ```powershell
 uv pip install ads-and
 ```
 
-If you don't have a GPU: Optional faster CPU inference via ONNX (still much slower than GPU):
+If you don't have a GPU: optional ONNX CPU backend, which may be faster
+depending on host and workload:
 
 ```powershell
 uv pip install "ads-and[cpu_onnx]"
@@ -160,25 +162,32 @@ The two disambiguated parquets preserve all input columns and append:
 
 Both columns are parallel lists in the same order as the input `Author` column. Each UID is stable across runs for the same registry. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
 
-## Further Details
+## Reproducibility
 
-The bundled fixed model ships inside the package. Repo-only research workflows require user-supplied LSPO raw data
-from the original source release; both parquet and HDF5 inputs are supported
-for LSPO preparation and evaluation.
+The bundled inference model is the selected fixed model from
+`full_20260218T111506Z_cli02681429`. The five-seed LSPO result above is backed
+by tracked repo-level artifacts under `artifacts/`, including the five seed
+checkpoints and the canonical clustering report. Raw LSPO is not redistributed;
+download it separately from Zenodo to rerun the quality workflow.
+
+See [Training workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/training_workflow.md)
+for the exact LSPO reproduction and release-gate commands.
+
+### Further Details
 
 - [Inference workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/inference_workflow.md)
-- [Training workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/training_workflow.md)
+- [LSPO reproduction and training workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/training_workflow.md)
 - [Project lineage and modifications](https://github.com/raphschlatt/ads-and/blob/main/docs/lineage_and_modifications.md)
 
 ## Citation
 
-Cite `ads-and` as software via [`CITATION.cff`](CITATION.cff). Cite the original NAND paper if you discuss the underlying method or baseline
+Cite `ads-and` as software via [`CITATION.cff`](CITATION.cff). Cite the original NAND paper if you discuss the underlying method or baseline:
 
 > Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
 
-and cite LSPO separately if you discuss the benchmark or dataset.
+And cite LSPO separately if you discuss the benchmark or dataset:
 
->Amado Olivo, V. (2024). LSPO: A Large-Scale Physics ORCiD-Linked Dataset for Author Name Disambiguation (Version 1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.11489161
+> Vicente Amado Olivo (2024). *LSPO: A Large-Scale Physics ORCiD-Linked Dataset for Author Name Disambiguation.* Zenodo, Version 1. <https://doi.org/10.5281/zenodo.11489161>
 
 Resources:
 - Original NAND repository: <https://github.com/deepthought-initiative/neural_name_dismabiguator>

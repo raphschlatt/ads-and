@@ -240,7 +240,7 @@ def test_doctor_command_prints_checklist_and_json(tmp_path: Path, capsys):
         json.dumps(
             {
                 "best_threshold": 0.5,
-                "runs": [{"seed": 1, "checkpoint": str(tmp_path / "artifacts" / "checkpoints" / "full_demo" / "seed1.pt")}],
+                "runs": [{"seed": 1, "checkpoint": "artifacts/checkpoints/full_demo/seed1.pt"}],
             }
         ),
         encoding="utf-8",
@@ -261,6 +261,8 @@ def test_doctor_command_prints_checklist_and_json(tmp_path: Path, capsys):
             str(tmp_path / "data"),
             "--artifacts-root",
             str(tmp_path / "artifacts"),
+            "--raw-lspo-parquet",
+            str(tmp_path / "data" / "raw" / "lspo" / "missing.parquet"),
             "--raw-lspo-h5",
             str(raw_h5),
             "--model-run-id",

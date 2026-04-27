@@ -9,8 +9,8 @@ authors:
 repository-code: "https://github.com/raphschlatt/ads-and"
 url: "https://github.com/raphschlatt/ads-and"
 license: "BSD-3-Clause"
-version: "0.1.2"
-date-released: "2026-04-22"
+version: "0.1.3"
+date-released: "2026-04-27"
 references:
   - type: article
     title: "Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature"
@@ -31,3 +31,12 @@ references:
     doi: "10.1088/1538-3873/ae1e2d"
     url: "https://doi.org/10.1088/1538-3873/ae1e2d"
     year: 2025
+  - type: dataset
+    title: "LSPO: A Large-Scale Physics ORCiD-Linked Dataset for Author Name Disambiguation"
+    authors:
+      - family-names: "Amado Olivo"
+        given-names: "Vicente"
+    doi: "10.5281/zenodo.11489161"
+    url: "https://doi.org/10.5281/zenodo.11489161"
+    year: 2024
+    version: "1"

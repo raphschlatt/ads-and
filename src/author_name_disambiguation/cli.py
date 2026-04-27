@@ -85,6 +85,24 @@ def _resolved_path(value: str | Path | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _resolve_checkpoint_path(value: str | Path, *, artifacts_root: str | Path | None = None) -> Path:
+    checkpoint = Path(value).expanduser()
+    if checkpoint.is_absolute():
+        return checkpoint
+
+    candidates: list[Path] = []
+    if artifacts_root is not None:
+        resolved_artifacts_root = Path(artifacts_root).expanduser().resolve()
+        candidates.append(resolved_artifacts_root.parent / checkpoint)
+        candidates.append(resolved_artifacts_root / checkpoint)
+    candidates.append(Path.cwd() / checkpoint)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else checkpoint
+
+
 def _quality_train_artifact_help(*, model_run_id: str, metrics_dir: Path) -> str:
     return (
         f"Mandatory local train artifacts for model_run_id={model_run_id} live under {metrics_dir} and include "
@@ -226,7 +244,7 @@ def _inspect_quality_train_artifacts(*, model_run_id: str, artifacts_root: str |
 
     if train_manifest:
         try:
-            seed_runs = _resolve_train_seed_runs(train_manifest)
+            seed_runs = _resolve_train_seed_runs(train_manifest, artifacts_root=artifacts_root)
         except Exception as exc:
             invalid_required.append(f"03_train_manifest.json: {exc}")
             seed_runs = []
@@ -513,9 +531,12 @@ def _resolve_model_run_for_inference(
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Missing train manifest for model_run_id={model_run_id}: {manifest_path}"
-        )
+    )
     train_manifest = load_json(manifest_path)
-    best_checkpoint = Path(str(train_manifest.get("best_checkpoint", ""))).expanduser()
+    best_checkpoint = _resolve_checkpoint_path(
+        str(train_manifest.get("best_checkpoint", "")),
+        artifacts_root=artifacts_root,
+    )
     if not best_checkpoint.exists():
         raise FileNotFoundError(
             "Model run manifest does not reference an existing best checkpoint: "
@@ -877,7 +898,11 @@ def _apply_cluster_config_override(
     return merged, "train_plus_override", str(Path(resolved_override_path).resolve()), ignored
 
 
-def _resolve_train_seed_runs(train_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+def _resolve_train_seed_runs(
+    train_manifest: dict[str, Any],
+    *,
+    artifacts_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
     runs = train_manifest.get("runs")
     default_threshold = train_manifest.get("best_threshold")
     if default_threshold is None:
@@ -899,7 +924,7 @@ def _resolve_train_seed_runs(train_manifest: dict[str, Any]) -> list[dict[str, A
         return [
             {
                 "seed": best_seed,
-                "checkpoint": Path(str(best_checkpoint)).expanduser(),
+                "checkpoint": _resolve_checkpoint_path(best_checkpoint, artifacts_root=artifacts_root),
                 "threshold": default_threshold,
             }
         ]
@@ -913,7 +938,7 @@ def _resolve_train_seed_runs(train_manifest: dict[str, Any]) -> list[dict[str, A
         if row.get("checkpoint") is None:
             raise ValueError(f"Manifest run entry missing checkpoint: {row!r}")
         seed = int(row["seed"])
-        checkpoint = Path(str(row["checkpoint"])).expanduser()
+        checkpoint = _resolve_checkpoint_path(str(row["checkpoint"]), artifacts_root=artifacts_root)
         threshold = float(row.get("threshold", default_threshold))
         seed_runs.append(
             {

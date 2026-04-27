@@ -12,9 +12,71 @@ commands are not part of the public `ads-and` package contract.
 - `quality-lspo` is for real local research runs with local train metrics and
   checkpoints. The packaged fixed bundle used by public `ads-and infer` is
   infer-only and does not satisfy `quality-lspo` by itself.
+- The published baseline run `full_20260218T111506Z_cli02681429` has a small
+  tracked repository-level reproduction pack under `artifacts/metrics/`,
+  `artifacts/checkpoints/`, and `artifacts/models/`. Raw LSPO and large caches
+  are not redistributed.
 - Use `python -m author_name_disambiguation_research doctor --model-run-id <run_id>`
   to check whether the local LSPO source and mandatory train artifacts are in
   place before a quality run.
+
+## Reproduce Published LSPO Baseline
+
+The tracked baseline report behind the README LSPO row is:
+
+```text
+artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json
+```
+
+It evaluates seeds 1 through 5 and reports, for DBSCAN with constraints,
+F1 97.02%, precision 96.36%, and recall 97.70%. The five seed checkpoints are
+tracked under:
+
+```text
+artifacts/checkpoints/full_20260218T111506Z_cli02681429/
+```
+
+The single fixed inference bundle is tracked separately under:
+
+```text
+artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1/
+```
+
+That bundle is the public inference model, not the full five-seed quality
+protocol by itself.
+
+After downloading LSPO from Zenodo into `data/raw/lspo/`, inspect the local
+state:
+
+```bash
+uv run python -m author_name_disambiguation_research doctor \
+  --model-run-id full_20260218T111506Z_cli02681429
+```
+
+For a full release-quality rerun, use a GPU machine. A CPU rerun is possible
+but unnecessarily slow for normal release work:
+
+```bash
+uv run python -m author_name_disambiguation_research quality-lspo \
+  --model-run-id full_20260218T111506Z_cli02681429 \
+  --raw-lspo-parquet data/raw/lspo/LSPO_v1.parquet \
+  --report-tag release_0_1_3_py312_torch260_transformers4562
+```
+
+Compare the release candidate against the tracked baseline:
+
+```bash
+uv run python scripts/ops/compare_cluster_test_reports.py \
+  --baseline-report artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json \
+  --candidate-report artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__release_0_1_3_py312_torch260_transformers4562.json \
+  --min-delta-f1 -0.001 \
+  --max-precision-drop 0.001
+```
+
+If the gate passes, keep the generated `06_clustering_test_*__release_...`
+files and the matching `99_compare_cluster_report_to_baseline__release_...`
+JSON as release evidence. Do not commit Raw LSPO, `data/interim`, or
+`data/cache/_shared`.
 
 ## Inference-Only Experiment
 

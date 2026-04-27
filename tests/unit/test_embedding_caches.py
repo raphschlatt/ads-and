@@ -138,7 +138,7 @@ def _install_fake_tensorflow(
         def get_build_info():
             return {
                 "is_cuda_build": True,
-                "cuda_version": "12.6.1",
+                "cuda_version": "12.4.1",
                 "cudnn_version": "9",
             }
 
@@ -192,7 +192,7 @@ def test_get_or_create_specter_embeddings_rebuilds_invalid_cache(tmp_path: Path,
             "requested_device": "auto",
             "resolved_device": "cpu",
             "fallback_reason": "torch_cuda_unavailable",
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "cuda_probe_error": None,

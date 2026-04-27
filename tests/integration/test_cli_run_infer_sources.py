@@ -281,7 +281,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "requested_device": str(_kwargs.get("device", "auto")),
             "resolved_device": "cpu",
             "fallback_reason": "torch_cuda_unavailable",
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "cuda_probe_error": None,
@@ -318,7 +318,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "requested_device": str(_kwargs.get("device", "auto")),
             "resolved_device": "cpu",
             "fallback_reason": "torch_cuda_unavailable",
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "cuda_probe_error": None,
@@ -369,7 +369,7 @@ def _apply_fast_mocks(monkeypatch, *, empty_chunked_score_return: bool = False) 
             "requested_device": str(_kwargs.get("device", "auto")),
             "resolved_device": "cpu",
             "fallback_reason": "torch_cuda_unavailable",
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "cuda_probe_error": None,
@@ -609,8 +609,8 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
             "requested_device": "auto",
             "resolved_device": "cuda:0",
             "gpu_name": "NVIDIA A100 80GB PCIe",
-            "torch_version": "2.10.0+cu126",
-            "torch_cuda_version": "12.6",
+            "torch_version": "2.6.0+cu124",
+            "torch_cuda_version": "12.4",
             "torch_cuda_available": True,
             "fallback_reason": None,
             "cuda_probe_error": None,
@@ -632,6 +632,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
             "my_ads_2026",
             "--model-bundle",
             str(bundle_dir),
+            "--verbose-progress",
         ]
     )
     payload = args.func(args)
@@ -805,7 +806,7 @@ def test_cli_run_infer_sources_writes_artifacts(monkeypatch, tmp_path: Path, cap
     assert stage_metrics["runtime"]["export"]["source_reread_seconds"] >= 0.0
     assert stage_metrics["storage_mode"] == "out_of_core_exact"
     assert "START Bootstrap" in captured.err
-    assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.10.0+cu126" in captured.err
+    assert "INFO device=auto -> cuda:0 | gpu=NVIDIA A100 80GB PCIe | precision=fp32 | torch=2.6.0+cu124" in captured.err
     assert "START Load inputs" in captured.err
     assert "policy runtime_mode=gpu | specter_backend=transformers | device=cuda | chars2vec_batch_size=128 | score_batch_size=8,192 | cluster_backend=sklearn_cpu | union_impl=python" in captured.err
     assert "START Preflight" in captured.err
@@ -864,7 +865,7 @@ def test_run_infer_sources_emits_structured_progress_events(monkeypatch, tmp_pat
             "requested_device": "auto",
             "resolved_device": "cpu",
             "gpu_name": None,
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "fallback_reason": "torch_cuda_unavailable",
@@ -961,8 +962,8 @@ def test_run_infer_sources_warns_on_chars2vec_tensorflow_gpu_mismatch(monkeypatc
             "requested_device": "auto",
             "resolved_device": "cuda:0",
             "gpu_name": "Mock GPU",
-            "torch_version": "2.10.0+cu126",
-            "torch_cuda_version": "12.6",
+            "torch_version": "2.6.0+cu124",
+            "torch_cuda_version": "12.4",
             "torch_cuda_available": True,
             "fallback_reason": None,
             "cuda_probe_error": None,
@@ -984,6 +985,7 @@ def test_run_infer_sources_warns_on_chars2vec_tensorflow_gpu_mismatch(monkeypatc
             "my_ads_warn_2026",
             "--model-bundle",
             str(bundle_dir),
+            "--verbose-progress",
         ]
     )
     args.func(args)
@@ -1003,7 +1005,7 @@ def test_cli_run_infer_sources_passes_specter_overrides(monkeypatch, tmp_path: P
             "requested_device": "auto",
             "resolved_device": "cpu",
             "gpu_name": None,
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "fallback_reason": "torch_cuda_unavailable",
@@ -1139,7 +1141,7 @@ def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_
             "requested_device": "auto",
             "resolved_device": "cpu",
             "gpu_name": None,
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "fallback_reason": "torch_cuda_unavailable",
@@ -1205,7 +1207,7 @@ def test_cli_run_infer_sources_emits_single_aggregated_pair_clamp_warning(monkey
             "requested_device": "cpu",
             "resolved_device": "cpu",
             "fallback_reason": None,
-            "torch_version": "2.10.0+cpu",
+            "torch_version": "2.6.0+cpu",
             "torch_cuda_version": None,
             "torch_cuda_available": False,
             "cuda_probe_error": None,
@@ -1262,6 +1264,7 @@ def test_cli_run_infer_sources_emits_single_aggregated_pair_clamp_warning(monkey
             "my_ads_2026",
             "--model-bundle",
             str(bundle_dir),
+            "--verbose-progress",
         ]
     )
     args.func(args)

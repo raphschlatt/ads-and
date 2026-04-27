@@ -340,7 +340,7 @@ def _apply_fast_mocks(monkeypatch) -> None:
                 "requested_device": str(_kwargs.get("device", "cpu")),
                 "resolved_device": "cpu",
                 "fallback_reason": None,
-                "torch_version": "2.10.0+cpu",
+                "torch_version": "2.6.0+cpu",
                 "torch_cuda_version": None,
                 "torch_cuda_available": False,
                 "cuda_probe_error": None,

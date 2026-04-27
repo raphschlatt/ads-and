@@ -59,7 +59,7 @@ def test_cap_workers_by_ram_applies_limit():
 
 def test_detect_cpu_limit_prefers_smallest_source(monkeypatch):
     monkeypatch.setattr(cpu_runtime.os, "cpu_count", lambda: 16)
-    monkeypatch.setattr(cpu_runtime.os, "sched_getaffinity", lambda _pid: set(range(12)))
+    monkeypatch.setattr(cpu_runtime.os, "sched_getaffinity", lambda _pid: set(range(12)), raising=False)
     monkeypatch.setattr(cpu_runtime, "detect_cgroup_quota_cpus", lambda: (6.0, "mock"))
 
     out = cpu_runtime.detect_cpu_limit()

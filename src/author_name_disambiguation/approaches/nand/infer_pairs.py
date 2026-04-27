@@ -729,46 +729,62 @@ def encode_mentions_to_memmap(
             emit_events=False,
         )
         embeddings_mm = None
-        norms_mm = np.lib.format.open_memmap(norms_output, mode="w+", dtype=np.float32, shape=(len(chars),))
-        encode_started_at = perf_counter()
-        with torch.no_grad():
-            for start in starts:
-                end = min(start + int(active_batch_size), len(chars))
-                feature_batch = _build_feature_batch(
-                    chars2vec=chars,
-                    source_text_embeddings=source_emb,
-                    mention_source_index=mention_to_source,
-                    start=start,
-                    end=end,
-                )
-                batch_tensor = torch.from_numpy(np.asarray(feature_batch, dtype=np.float32)).to(active_device_name)
-                with _autocast_context(torch, effective_precision_mode):
-                    z = model(batch_tensor)
-                batch_embeddings = np.asarray(z.detach().cpu().numpy(), dtype=np.float32)
-                if embeddings_mm is None:
-                    if batch_embeddings.ndim != 2:
-                        raise ValueError(f"Unexpected encoder output shape: {batch_embeddings.shape}")
-                    embeddings_mm = np.lib.format.open_memmap(
-                        output,
-                        mode="w+",
-                        dtype=np.float32,
-                        shape=(len(chars), batch_embeddings.shape[1]),
+        norms_mm = None
+        try:
+            norms_mm = np.lib.format.open_memmap(norms_output, mode="w+", dtype=np.float32, shape=(len(chars),))
+            encode_started_at = perf_counter()
+            with torch.no_grad():
+                for start in starts:
+                    end = min(start + int(active_batch_size), len(chars))
+                    feature_batch = _build_feature_batch(
+                        chars2vec=chars,
+                        source_text_embeddings=source_emb,
+                        mention_source_index=mention_to_source,
+                        start=start,
+                        end=end,
                     )
-                embeddings_mm[start:end] = batch_embeddings
-                norms_mm[start:end] = np.linalg.norm(batch_embeddings, axis=1).astype(np.float32, copy=False)
-        active_runtime_meta["mention_encode_seconds"] = float(perf_counter() - encode_started_at)
-        if embeddings_mm is None:
-            _write_empty_npy(output, np.zeros((0, 0), dtype=np.float32))
-            active_runtime_meta["mention_embedding_shape"] = [0, 0]
-            active_runtime_meta["mention_embedding_bytes"] = 0
-            active_runtime_meta["mention_norm_bytes"] = int(norms_mm.nbytes)
-        else:
-            embeddings_mm.flush()
-            active_runtime_meta["mention_embedding_shape"] = [int(embeddings_mm.shape[0]), int(embeddings_mm.shape[1])]
-            active_runtime_meta["mention_embedding_bytes"] = int(embeddings_mm.nbytes)
-            active_runtime_meta["mention_norm_bytes"] = int(norms_mm.nbytes)
-        norms_mm.flush()
-        return active_runtime_meta
+                    batch_tensor = torch.from_numpy(np.asarray(feature_batch, dtype=np.float32)).to(active_device_name)
+                    with _autocast_context(torch, effective_precision_mode):
+                        z = model(batch_tensor)
+                    batch_embeddings = np.asarray(z.detach().cpu().numpy(), dtype=np.float32)
+                    if embeddings_mm is None:
+                        if batch_embeddings.ndim != 2:
+                            raise ValueError(f"Unexpected encoder output shape: {batch_embeddings.shape}")
+                        embeddings_mm = np.lib.format.open_memmap(
+                            output,
+                            mode="w+",
+                            dtype=np.float32,
+                            shape=(len(chars), batch_embeddings.shape[1]),
+                        )
+                    embeddings_mm[start:end] = batch_embeddings
+                    norms_mm[start:end] = np.linalg.norm(batch_embeddings, axis=1).astype(np.float32, copy=False)
+            active_runtime_meta["mention_encode_seconds"] = float(perf_counter() - encode_started_at)
+            if embeddings_mm is None:
+                _write_empty_npy(output, np.zeros((0, 0), dtype=np.float32))
+                active_runtime_meta["mention_embedding_shape"] = [0, 0]
+                active_runtime_meta["mention_embedding_bytes"] = 0
+                active_runtime_meta["mention_norm_bytes"] = int(norms_mm.nbytes)
+            else:
+                embeddings_mm.flush()
+                active_runtime_meta["mention_embedding_shape"] = [int(embeddings_mm.shape[0]), int(embeddings_mm.shape[1])]
+                active_runtime_meta["mention_embedding_bytes"] = int(embeddings_mm.nbytes)
+                active_runtime_meta["mention_norm_bytes"] = int(norms_mm.nbytes)
+            norms_mm.flush()
+            return active_runtime_meta
+        finally:
+            for mm in (embeddings_mm, norms_mm):
+                if mm is None:
+                    continue
+                try:
+                    mm.flush()
+                except Exception:
+                    pass
+                mmap_obj = getattr(mm, "_mmap", None)
+                if mmap_obj is not None:
+                    try:
+                        mmap_obj.close()
+                    except Exception:
+                        pass
 
     active_batch_size = int(batch_size)
     while True:
