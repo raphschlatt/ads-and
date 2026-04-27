@@ -85,6 +85,24 @@ def _resolved_path(value: str | Path | None) -> Path | None:
     return Path(value).expanduser().resolve()
 
 
+def _report_path(value: str | Path | None, *, base_dir: str | Path | None = None) -> str | None:
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return path.as_posix()
+
+    bases = [Path.cwd()]
+    if base_dir is not None:
+        bases.append(Path(base_dir))
+    for base in bases:
+        try:
+            return path.resolve().relative_to(base.expanduser().resolve()).as_posix()
+        except ValueError:
+            continue
+    return str(path)
+
+
 def _resolve_checkpoint_path(value: str | Path, *, artifacts_root: str | Path | None = None) -> Path:
     checkpoint = Path(value).expanduser()
     if checkpoint.is_absolute():
@@ -2779,7 +2797,7 @@ def cmd_run_cluster_test_report(args):
                 per_seed_rows.append(
                     {
                         "seed": seed,
-                        "checkpoint": str(checkpoint),
+                        "checkpoint": _report_path(checkpoint),
                         "threshold": threshold,
                         "variant": variant_name,
                         "accuracy": float(metrics["accuracy"]),
@@ -2819,19 +2837,19 @@ def cmd_run_cluster_test_report(args):
             "generated_utc": datetime.now(timezone.utc).isoformat(),
             "wall_seconds": None,
             "pipeline_scope": "train",
-            "source_context_path": str(context_path),
-            "train_manifest_path": str(train_manifest_path),
-            "cluster_config_used_path": str(cluster_used_path),
+            "source_context_path": _report_path(context_path),
+            "train_manifest_path": _report_path(train_manifest_path),
+            "cluster_config_used_path": _report_path(cluster_used_path),
             "cluster_config_source_mode": str(cluster_config_source_mode),
-            "cluster_config_override_path": cluster_config_override_path,
+            "cluster_config_override_path": _report_path(cluster_config_override_path),
             "override_ignored_fields": override_ignored_fields,
             "report_tag": report_tag,
             "lspo_source_paths": {
                 "selected_source": raw_lspo.selected_source,
-                "selected_path": None if raw_lspo.selected_path is None else str(raw_lspo.selected_path),
-                "raw_lspo_parquet": None if raw_lspo.parquet_path is None else str(raw_lspo.parquet_path),
-                "raw_lspo_h5": None if raw_lspo.h5_path is None else str(raw_lspo.h5_path),
-                "interim_lspo_mentions": str(lspo_mentions_path),
+                "selected_path": _report_path(raw_lspo.selected_path),
+                "raw_lspo_parquet": _report_path(raw_lspo.parquet_path),
+                "raw_lspo_h5": _report_path(raw_lspo.h5_path),
+                "interim_lspo_mentions": _report_path(lspo_mentions_path),
             },
             "lspo_source_fingerprint": subset_identity.source_fp,
             "lspo_source_fingerprint_scheme": LSPO_SOURCE_FP_SCHEME,

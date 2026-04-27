@@ -63,6 +63,12 @@ uv run python -m author_name_disambiguation_research quality-lspo \
   --report-tag release_0_1_3_py312_torch260_transformers4562
 ```
 
+In a fresh clone, this command should run without restoring legacy `configs/`
+paths or adding symlinks. The first full run rebuilds local LSPO caches and can
+take about an hour on a remote GPU host, mostly while writing the SPECTER
+embedding cache. A warm-cache rerun should be much faster. Do not commit the
+generated `data/interim` or `data/cache/_shared` files.
+
 Compare the release candidate against the tracked baseline:
 
 ```bash

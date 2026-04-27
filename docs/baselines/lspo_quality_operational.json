@@ -48,7 +48,12 @@
     "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1/bundle_manifest.json",
     "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1/checkpoint.pt",
     "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1/clustering_resolved.json",
-    "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1/model_config.yaml"
+    "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1/model_config.yaml",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__release_0_1_3_py312_torch260_transformers4562.json",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__release_0_1_3_py312_torch260_transformers4562.md",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_per_seed__release_0_1_3_py312_torch260_transformers4562.csv",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_summary__release_0_1_3_py312_torch260_transformers4562.csv",
+    "artifacts/metrics/full_20260218T111506Z_cli02681429/99_compare_cluster_report_to_baseline__release_0_1_3_py312_torch260_transformers4562.json"
   ],
   "external_required_paths": [
     "data/raw/lspo/LSPO_v1.parquet"
@@ -58,5 +63,52 @@
     "data/cache/_shared/subsets/*",
     "data/cache/_shared/embeddings/*",
     "data/cache/_shared/pairs/*"
-  ]
+  ],
+  "latest_release_gate": {
+    "release": "0.1.3",
+    "report_tag": "release_0_1_3_py312_torch260_transformers4562",
+    "generated_utc": "2026-04-27T12:47:35Z",
+    "report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__release_0_1_3_py312_torch260_transformers4562.json",
+    "compare_report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/99_compare_cluster_report_to_baseline__release_0_1_3_py312_torch260_transformers4562.json",
+    "passed": true,
+    "decision": "promote_candidate",
+    "wall_seconds": 3362.790466645034,
+    "seeds_expected": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "seeds_evaluated": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "subset_verification_mode": "legacy_compat",
+    "lspo_source_fingerprint": "b2c9203fe342",
+    "metrics": {
+      "baseline": {
+        "accuracy_mean": 0.9439470287622104,
+        "f1_mean": 0.9702453597377284,
+        "precision_mean": 0.9635797859580881,
+        "recall_mean": 0.9770145661803212
+      },
+      "candidate": {
+        "accuracy_mean": 0.9439470287622104,
+        "f1_mean": 0.9702453597377284,
+        "precision_mean": 0.9635797859580881,
+        "recall_mean": 0.9770145661803212
+      },
+      "delta": {
+        "accuracy_mean": 0.0,
+        "f1_mean": 0.0,
+        "precision_mean": 0.0,
+        "recall_mean": 0.0
+      }
+    }
+  },
+  "compare_report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/99_compare_cluster_report_to_baseline__release_0_1_3_py312_torch260_transformers4562.json"
 }

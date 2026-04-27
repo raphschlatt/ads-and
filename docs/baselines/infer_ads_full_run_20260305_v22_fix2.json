@@ -10,7 +10,7 @@
       "ads_clusters": 231355,
       "ads_mentions": 1322725
     },
-    "model_bundle": "/home/ubuntu/Author_Name_Disambiguation/artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1",
+    "model_bundle": "artifacts/models/full_20260218T111506Z_cli02681429/bundle_v1",
     "quality": {
       "blockers": [],
       "go": true,
