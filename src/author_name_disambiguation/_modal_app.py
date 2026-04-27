@@ -31,7 +31,7 @@ def _base_runtime_requirements() -> list[str]:
     return [entry for entry in declared if "extra ==" not in entry]
 
 
-image = modal.Image.debian_slim(python_version="3.11")
+image = modal.Image.debian_slim(python_version="3.12")
 if modal.is_local():
     image = (
         image.uv_pip_install(*_base_runtime_requirements(), "modal>=1.4,<2")

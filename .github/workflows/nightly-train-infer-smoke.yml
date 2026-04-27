@@ -8,22 +8,84 @@ on:
 jobs:
   train-infer-contract:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+          enable-cache: true
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --no-cache-dir -e . --no-deps
-          python -m pip install --no-cache-dir pytest numpy pandas pyarrow PyYAML scikit-learn tqdm duckdb
+          uv sync --frozen --extra dev --extra cpu_onnx
+          uv pip install build
 
       - name: Run train->bundle->infer contract smoke
         run: |
-          python -m pytest -s tests/e2e/test_train_bundle_infer_smoke.py -q
+          uv run pytest -s tests/e2e/test_train_bundle_infer_smoke.py -q
+
+      - name: Build wheel
+        run: |
+          uv run python -m build --wheel
+
+      - name: Wheel smoke (cpu_onnx)
+        run: |
+          uv venv /tmp/ads-and-wheel-smoke --python 3.12
+          WHEEL="$(ls dist/*.whl | head -n 1)"
+          uv pip install --python /tmp/ads-and-wheel-smoke/bin/python "$WHEEL[cpu_onnx]"
+          /tmp/ads-and-wheel-smoke/bin/python - <<'PY'
+          import json
+          import tempfile
+          from pathlib import Path
+
+          import pandas as pd
+
+          from author_name_disambiguation import disambiguate_sources
+
+          root = Path(tempfile.mkdtemp(prefix="ads_and_wheel_smoke_"))
+          publications_path = root / "publications.parquet"
+          output_dir = root / "out"
+
+          pd.DataFrame(
+              [
+                  {
+                      "Bibcode": "2000MNRAS.319..168C",
+                      "Author": ["Hawking, Stephen W.", "Cole, Shaun"],
+                      "Title_en": "Black hole evaporation and galaxy surveys",
+                      "Abstract_en": "A compact smoke test record for ADS author disambiguation.",
+                      "Affiliation": "AA(Cambridge); AB(Durham)",
+                      "Year": 2000,
+                  },
+                  {
+                      "Bibcode": "2001MNRAS.320..200H",
+                      "Author": ["Hawking, S. W.", "Lacey, Cedric G."],
+                      "Title_en": "Galaxy formation constraints on Hawking radiation",
+                      "Abstract_en": "A second compact ADS record for the ONNX wheel smoke test.",
+                      "Affiliation": "AA(Cambridge); AB(Durham)",
+                      "Year": 2001,
+                  },
+              ]
+          ).to_parquet(publications_path, index=False)
+
+          result = disambiguate_sources(
+              publications_path=publications_path,
+              output_dir=output_dir,
+              runtime="cpu",
+          )
+
+          summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+          assert summary["runtime_backend"] == "onnx_fp32", summary
+          assert Path(summary["outputs"]["publications_disambiguated_path"]).exists()
+          print(json.dumps({"summary_path": str(result.summary_path), "runtime_backend": summary["runtime_backend"]}))
+          PY
+
+      - name: Wheel smoke (modal import)
+        run: |
+          uv venv /tmp/ads-and-modal-smoke --python 3.12
+          WHEEL="$(ls dist/*.whl | head -n 1)"
+          uv pip install --python /tmp/ads-and-modal-smoke/bin/python "$WHEEL[modal]"
+          /tmp/ads-and-modal-smoke/bin/python -c "import author_name_disambiguation; import author_name_disambiguation._modal_app"

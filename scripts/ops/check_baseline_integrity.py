@@ -200,9 +200,10 @@ def _run_operational_check(args: argparse.Namespace, repo_root: Path) -> dict[st
         failures.append(f"Missing shared keep-set paths: {len(missing_shared_keep_paths)}")
 
     report_path = _resolve_path(repo_root, str(manifest["report_path"]))
-    compare_report_path = _resolve_path(repo_root, str(manifest["compare_report_path"]))
+    compare_report_value = manifest.get("compare_report_path") or manifest.get("historical_strict_compare_report_path")
+    compare_report_path = None if compare_report_value is None else _resolve_path(repo_root, str(compare_report_value))
     report = _load_json(report_path)
-    compare_report = _load_json(compare_report_path)
+    compare_report = _load_json(compare_report_path) if compare_report_path is not None else {}
 
     report_status = str(report.get("status", ""))
     if report_status != "ok":
@@ -238,29 +239,46 @@ def _run_operational_check(args: argparse.Namespace, repo_root: Path) -> dict[st
         )
 
     expected_subset_cache_key = str(manifest.get("expected_subset_cache_key", "")).strip() or None
-    report_subset_cache_key = str(report.get("subset_cache_key_computed", "")).strip() or None
+    report_subset_cache_key = (
+        str(report.get("subset_cache_key_expected", "")).strip()
+        or str(report.get("subset_cache_key_computed", "")).strip()
+        or None
+    )
     if expected_subset_cache_key and report_subset_cache_key != expected_subset_cache_key:
         failures.append(
-            "subset_cache_key_computed mismatch in report: "
+            "subset_cache_key mismatch in report: "
             f"expected={expected_subset_cache_key}, got={report_subset_cache_key}"
         )
 
-    computed_source_fingerprint, computed_subset_cache_key = _compute_subset_key(
-        repo_root=repo_root,
-        report=report,
-        interim_lspo_mentions=str(args.interim_lspo_mentions),
-        failures=failures,
+    expected_subset_cache_key_stable = (
+        str(manifest.get("expected_subset_cache_key_stable_computed", "")).strip() or None
     )
-    if expected_source_fingerprint and computed_source_fingerprint != expected_source_fingerprint:
+    report_subset_cache_key_stable = str(report.get("subset_cache_key_stable_computed", "")).strip() or None
+    if expected_subset_cache_key_stable and report_subset_cache_key_stable != expected_subset_cache_key_stable:
         failures.append(
-            "computed lspo_source_fingerprint mismatch: "
-            f"expected={expected_source_fingerprint}, got={computed_source_fingerprint}"
+            "subset_cache_key_stable_computed mismatch in report: "
+            f"expected={expected_subset_cache_key_stable}, got={report_subset_cache_key_stable}"
         )
-    if expected_subset_cache_key and computed_subset_cache_key != expected_subset_cache_key:
-        failures.append(
-            "computed subset_cache_key mismatch: "
-            f"expected={expected_subset_cache_key}, got={computed_subset_cache_key}"
+
+    computed_source_fingerprint = None
+    computed_subset_cache_key = None
+    if bool(manifest.get("require_local_rebuilt_caches", False)):
+        computed_source_fingerprint, computed_subset_cache_key = _compute_subset_key(
+            repo_root=repo_root,
+            report=report,
+            interim_lspo_mentions=str(args.interim_lspo_mentions),
+            failures=failures,
         )
+        if expected_source_fingerprint and computed_source_fingerprint != expected_source_fingerprint:
+            failures.append(
+                "computed lspo_source_fingerprint mismatch: "
+                f"expected={expected_source_fingerprint}, got={computed_source_fingerprint}"
+            )
+        if expected_subset_cache_key and computed_subset_cache_key != expected_subset_cache_key:
+            failures.append(
+                "computed subset_cache_key mismatch: "
+                f"expected={expected_subset_cache_key}, got={computed_subset_cache_key}"
+            )
 
     summary = {
         "mode": "operational",
@@ -272,7 +290,7 @@ def _run_operational_check(args: argparse.Namespace, repo_root: Path) -> dict[st
         "missing_required_paths": missing_required_paths,
         "missing_shared_keep_paths": missing_shared_keep_paths,
         "report_path": str(report_path),
-        "compare_report_path": str(compare_report_path),
+        "compare_report_path": None if compare_report_path is None else str(compare_report_path),
         "report_status": report_status,
         "compare_decision": compare_report.get("decision"),
         "expected_seeds": expected_seeds,

@@ -103,12 +103,19 @@ and pairwise `best_test_f1 = 0.976252414576076`. `clustering_resolved.json`
 records the validation eps-sweep selection, including F1
 `0.9737836575953416` at eps `0.35`.
 
-The README clustering row should therefore be treated as the package-reported
-LSPO clustering result for this implementation. The complete LSPO clustering
-report behind that README row is not redistributed as a tracked JSON artifact
-in this repository. Without a tracked ablation study, the higher package
-metrics should be described as consistent with the technical differences above,
-not as caused by any single change.
+The complete LSPO clustering report behind the README row is redistributed as a
+small repo-level reproduction artifact, not inside the public package wheel:
+`artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json`.
+It evaluates seeds 1 through 5 and reports, for DBSCAN with constraints,
+F1 `0.9702453597377284`, precision `0.9635797859580881`, and recall
+`0.9770145661803212`. The matching seed checkpoints are tracked under
+`artifacts/checkpoints/full_20260218T111506Z_cli02681429/`. Raw LSPO is not
+redistributed and must be supplied by the user from the original Zenodo release.
+
+The README clustering row should therefore be treated as the repo-reproducible
+LSPO clustering result for this implementation. Without a tracked ablation
+study, the higher package metrics should be described as consistent with the
+technical differences above, not as caused by any single change.
 
 ## What This Document Does Not Claim
 

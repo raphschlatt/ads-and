@@ -1,0 +1,28 @@
+{
+  "status": "ok",
+  "attempts": 1,
+  "min_neg_val": 500,
+  "min_neg_test": 500,
+  "required_neg_total": 1000,
+  "max_possible_neg_total": 2919543,
+  "train_ratio": 0.6,
+  "val_ratio": 0.2,
+  "test_ratio": 0.2,
+  "split_label_counts": {
+    "train": {
+      "pos": 5150007,
+      "neg": 1085492,
+      "labeled_pairs": 6235499
+    },
+    "val": {
+      "pos": 1585504,
+      "neg": 131172,
+      "labeled_pairs": 1716676
+    },
+    "test": {
+      "pos": 1571517,
+      "neg": 108187,
+      "labeled_pairs": 1679704
+    }
+  }
+}

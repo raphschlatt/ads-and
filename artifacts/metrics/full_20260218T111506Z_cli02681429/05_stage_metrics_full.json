@@ -1,0 +1,53 @@
+{
+  "run_id": "full_20260218T111506Z_cli02681429",
+  "stage": "full",
+  "metric_scope": "train",
+  "schema_valid": true,
+  "determinism_valid": true,
+  "uid_uniqueness_valid": true,
+  "uid_uniqueness_max": 1,
+  "mention_coverage": null,
+  "run_id_consistent": true,
+  "lspo_pairwise_f1": 0.976252414576076,
+  "lspo_pairwise_f1_source": "best_test_f1",
+  "lspo_pairwise_f1_val": 0.974177854543771,
+  "threshold": 0.502,
+  "threshold_selection_status": "ok",
+  "threshold_source": "val_f1_opt",
+  "precision_mode": "fp32",
+  "val_class_counts": {
+    "pos": 1585504,
+    "neg": 131172
+  },
+  "test_class_counts": {
+    "pos": 1571517,
+    "neg": 108187
+  },
+  "subset_cache_key": "full_seed11_targetfull_cfg0dbcdaf9_srcd52b159f766e",
+  "lspo_pairs": 5567364,
+  "lspo_block_size_p95": 24.0,
+  "max_possible_neg_total": 2919543,
+  "required_neg_total": 1000,
+  "split_balance_status": "ok",
+  "pair_score_range_ok": null,
+  "singleton_ratio": null,
+  "split_high_sim_rate": null,
+  "split_high_sim_rate_probe": null,
+  "merged_low_conf_rate": null,
+  "merged_low_conf_rate_probe": null,
+  "eps_boundary_hit": false,
+  "eps_boundary_side": null,
+  "eps_n_valid_candidates": 7,
+  "eps_f1_gap_best_second": 0.0010883057361766868,
+  "eps_diag_ran": false,
+  "eps_range_limited": false,
+  "eps_diag_delta_f1": null,
+  "counts": {
+    "lspo_mentions": 554962,
+    "lspo_blocks": 97936,
+    "ads_mentions": 0,
+    "ads_clusters": 0,
+    "ads_cluster_assignments": 0,
+    "ads_blocks": 0
+  }
+}

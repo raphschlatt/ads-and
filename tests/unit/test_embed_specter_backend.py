@@ -78,7 +78,7 @@ def test_load_specter_components_adapter_backend_raises_when_adapters_missing(mo
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", _raising_import)
-    with pytest.raises(RuntimeError, match="requires the `adapters` package"):
+    with pytest.raises(RuntimeError, match="separate research environment"):
         embed_specter._load_specter_components(
             model_name="any-model",
             reuse_model=False,

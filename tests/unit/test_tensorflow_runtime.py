@@ -23,8 +23,8 @@ def _install_fake_torch(monkeypatch: pytest.MonkeyPatch, *, cuda_available: bool
             return "Mock GPU"
 
     fake_torch = SimpleNamespace(
-        __version__="2.10.0+cu126",
-        version=SimpleNamespace(cuda="12.6"),
+        __version__="2.6.0+cu124",
+        version=SimpleNamespace(cuda="12.4"),
         cuda=_Cuda(),
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
