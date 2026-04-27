@@ -136,6 +136,53 @@ def _resolve_run_config_path(repo_root: Path, context: dict[str, Any]) -> Path |
     return _resolve_path(repo_root, run_cfg_ref)
 
 
+def _load_run_config_from_context(
+    *,
+    repo_root: Path,
+    context_path: Path,
+    context: dict[str, Any],
+    failures: list[str],
+) -> dict[str, Any] | None:
+    payload = context.get("run_config_payload")
+    if isinstance(payload, dict) and payload:
+        return dict(payload)
+
+    run_cfg_path = _resolve_run_config_path(repo_root, context)
+    if run_cfg_path is None:
+        failures.append(f"Missing run_config_payload and run_config in {context_path}.")
+        return None
+    if not run_cfg_path.exists():
+        failures.append(
+            "Missing run_config_payload and legacy run_config path not found: "
+            f"{run_cfg_path}"
+        )
+        return None
+    return _load_yaml(run_cfg_path)
+
+
+def _validate_operational_context_payloads(
+    *,
+    repo_root: Path,
+    report: dict[str, Any],
+    failures: list[str],
+) -> Path | None:
+    context_path_raw = str(report.get("source_context_path", "")).strip()
+    if not context_path_raw:
+        failures.append("Missing source_context_path in operational report.")
+        return None
+    context_path = _resolve_path(repo_root, context_path_raw)
+    if not context_path.exists():
+        failures.append(f"Operational context path not found: {context_path}")
+        return None
+
+    context = _load_json(context_path)
+    for key in ("run_config_payload", "model_config_payload", "cluster_config_payload"):
+        payload = context.get(key)
+        if not isinstance(payload, dict) or not payload:
+            failures.append(f"Missing non-empty {key} in {context_path}.")
+    return context_path
+
+
 def _compute_subset_key(
     *,
     repo_root: Path,
@@ -152,14 +199,14 @@ def _compute_subset_key(
         failures.append(f"Context path not found: {context_path}")
         return None, None
     context = _load_json(context_path)
-    run_cfg_path = _resolve_run_config_path(repo_root, context)
-    if run_cfg_path is None:
-        failures.append(f"Missing run_config in {context_path}.")
+    run_cfg = _load_run_config_from_context(
+        repo_root=repo_root,
+        context_path=context_path,
+        context=context,
+        failures=failures,
+    )
+    if run_cfg is None:
         return None, None
-    if not run_cfg_path.exists():
-        failures.append(f"Run config not found: {run_cfg_path}")
-        return None, None
-    run_cfg = _load_yaml(run_cfg_path)
     run_stage = str(report.get("run_stage") or context.get("run_stage") or run_cfg.get("stage") or "full")
     run_cfg["stage"] = run_stage
     interim_path = _resolve_interim_path(
@@ -204,6 +251,7 @@ def _run_operational_check(args: argparse.Namespace, repo_root: Path) -> dict[st
     compare_report_path = None if compare_report_value is None else _resolve_path(repo_root, str(compare_report_value))
     report = _load_json(report_path)
     compare_report = _load_json(compare_report_path) if compare_report_path is not None else {}
+    _validate_operational_context_payloads(repo_root=repo_root, report=report, failures=failures)
 
     report_status = str(report.get("status", ""))
     if report_status != "ok":

@@ -14,5 +14,98 @@
   "precision_mode": "fp32",
   "run_config": "configs/runs/full.yaml",
   "model_config": "configs/model/nand_best.yaml",
-  "cluster_config": "configs/clustering/dbscan_paper.yaml"
+  "cluster_config": "configs/clustering/dbscan_paper.yaml",
+  "run_config_payload": {
+    "stage": "full",
+    "subset_target_mentions": null,
+    "seed": 11,
+    "subset_sampling": {
+      "target_mean_block_size": 2
+    },
+    "split_assignment": {
+      "train_ratio": 0.6,
+      "val_ratio": 0.2
+    },
+    "pair_building": {
+      "exclude_same_bibcode": true
+    },
+    "max_pairs_per_block": null,
+    "split_balance": {
+      "min_neg_val": 500,
+      "min_neg_test": 500,
+      "max_attempts": 200
+    },
+    "train_seeds": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
+  },
+  "model_config_payload": {
+    "name": "nand_best",
+    "representation": {
+      "name_embedding": "chars2vec",
+      "text_embedding": "specter",
+      "text_model_name": "allenai/specter",
+      "max_length": 256
+    },
+    "training": {
+      "loss": "infonce",
+      "input_dim": 818,
+      "hidden_dim": 1024,
+      "output_dim": 256,
+      "dropout": 0.2,
+      "activation": "selu",
+      "learning_rate": 1e-05,
+      "batch_size": 2048,
+      "max_epochs": 250,
+      "early_stopping_patience": 25,
+      "temperature": 0.25,
+      "infonce_weight": 1.0,
+      "negative_loss_weight": 1.0,
+      "negative_margin": 0.65,
+      "require_hard_negatives": true,
+      "default_cosine_threshold": 0.35,
+      "precision_mode": "fp32",
+      "seeds": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ]
+    }
+  },
+  "cluster_config_payload": {
+    "method": "dbscan",
+    "eps_mode": "val_sweep",
+    "eps": 0.35,
+    "eps_fallback": 0.35,
+    "eps_sweep_min": 0.2,
+    "eps_sweep_max": 0.5,
+    "eps_sweep_step": 0.05,
+    "eps_min": 0.15,
+    "eps_max": 0.85,
+    "boundary_diagnostics": {
+      "diag_min": 0.55,
+      "diag_max": 0.7,
+      "diag_step": 0.05,
+      "delta_f1_threshold": 0.005
+    },
+    "min_samples": 1,
+    "metric": "precomputed",
+    "constraints": {
+      "enabled": true,
+      "constraint_mode": "soft",
+      "name_conflict_mode": "hard",
+      "year_gap_mode": "soft",
+      "max_year_gap": 30,
+      "enforce_name_conflict": true,
+      "name_conflict_min_distance": 0.75,
+      "year_gap_min_distance": 0.65
+    },
+    "selected_eps": 0.35
+  }
 }

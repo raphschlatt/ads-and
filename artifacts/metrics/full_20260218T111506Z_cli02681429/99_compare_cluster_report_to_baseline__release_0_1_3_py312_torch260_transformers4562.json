@@ -1,0 +1,52 @@
+{
+  "baseline_report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json",
+  "baseline_run_id": "full_20260218T111506Z_cli02681429",
+  "baseline_seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "baseline_status": "ok",
+  "candidate_report_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__release_0_1_3_py312_torch260_transformers4562.json",
+  "candidate_run_id": "full_20260218T111506Z_cli02681429",
+  "candidate_seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "candidate_status": "ok",
+  "decision": "promote_candidate",
+  "failures": [],
+  "gate": {
+    "max_precision_drop": 0.001,
+    "min_delta_f1": -0.001
+  },
+  "generated_utc": "2026-04-27T12:47:35Z",
+  "metrics": {
+    "baseline": {
+      "accuracy_mean": 0.9439470287622104,
+      "f1_mean": 0.9702453597377284,
+      "precision_mean": 0.9635797859580881,
+      "recall_mean": 0.9770145661803212
+    },
+    "candidate": {
+      "accuracy_mean": 0.9439470287622104,
+      "f1_mean": 0.9702453597377284,
+      "precision_mean": 0.9635797859580881,
+      "recall_mean": 0.9770145661803212
+    },
+    "delta": {
+      "accuracy_mean": 0.0,
+      "f1_mean": 0.0,
+      "precision_mean": 0.0,
+      "recall_mean": 0.0
+    }
+  },
+  "passed": true,
+  "seeds_match": true,
+  "variant": "dbscan_with_constraints"
+}

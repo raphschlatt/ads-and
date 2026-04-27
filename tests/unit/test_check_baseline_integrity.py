@@ -67,7 +67,17 @@ def test_operational_integrity_check_uses_manifest_and_current_srcb2_state(tmp_p
         encoding="utf-8",
     )
     context_path.write_text(
-        json.dumps({"run_config": str(run_config_path), "run_stage": "full"}),
+        json.dumps(
+            {
+                "run_config": "configs/runs/full.yaml",
+                "run_config_payload": {"stage": "full"},
+                "model_config": "configs/model/nand_best.yaml",
+                "model_config_payload": {"name": "nand_best"},
+                "cluster_config": "configs/clustering/dbscan_paper.yaml",
+                "cluster_config_payload": {"method": "dbscan"},
+                "run_stage": "full",
+            }
+        ),
         encoding="utf-8",
     )
     run_config_path.write_text("stage: full\n", encoding="utf-8")
@@ -122,3 +132,65 @@ def test_operational_integrity_check_uses_manifest_and_current_srcb2_state(tmp_p
         sys.argv = old_argv
 
     assert rc == 0
+
+
+def test_operational_integrity_check_requires_embedded_context_payloads(tmp_path, monkeypatch):
+    module = _load_script_module()
+    repo_root = tmp_path / "repo"
+    metrics_dir = repo_root / "artifacts" / "metrics" / "run"
+    report_path = metrics_dir / "06_report.json"
+    context_path = metrics_dir / "00_context.json"
+    manifest_path = repo_root / "docs" / "baselines" / "lspo_quality_operational.json"
+    for path in (report_path, context_path, manifest_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "source_context_path": str(context_path.relative_to(repo_root)),
+                "seeds_expected": [1, 2, 3, 4, 5],
+                "seeds_evaluated": [1, 2, 3, 4, 5],
+            }
+        ),
+        encoding="utf-8",
+    )
+    context_path.write_text(
+        json.dumps(
+            {
+                "run_config": "configs/runs/full.yaml",
+                "model_config": "configs/model/nand_best.yaml",
+                "cluster_config": "configs/clustering/dbscan_paper.yaml",
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "report_path": str(report_path.relative_to(repo_root)),
+                "expected_seeds": [1, 2, 3, 4, 5],
+                "required_paths": [
+                    str(report_path.relative_to(repo_root)),
+                    str(context_path.relative_to(repo_root)),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "_repo_root", lambda: repo_root)
+
+    summary = module._run_operational_check(
+        SimpleNamespace(
+            manifest=str(manifest_path),
+            expected_seeds="1,2,3,4,5",
+            interim_lspo_mentions="data/interim/lspo_mentions.parquet",
+        ),
+        repo_root,
+    )
+
+    assert summary["ok"] is False
+    assert any("run_config_payload" in failure for failure in summary["failures"])
+    assert any("model_config_payload" in failure for failure in summary["failures"])
+    assert any("cluster_config_payload" in failure for failure in summary["failures"])

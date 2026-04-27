@@ -1,0 +1,224 @@
+{
+  "model_run_id": "full_20260218T111506Z_cli02681429",
+  "run_stage": "full",
+  "generated_utc": "2026-04-27T12:47:31.352724+00:00",
+  "wall_seconds": 3362.790466645034,
+  "pipeline_scope": "train",
+  "source_context_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/00_context.json",
+  "train_manifest_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/03_train_manifest.json",
+  "cluster_config_used_path": "artifacts/metrics/full_20260218T111506Z_cli02681429/04_clustering_config_used.json",
+  "cluster_config_source_mode": "train_only",
+  "cluster_config_override_path": null,
+  "override_ignored_fields": [],
+  "report_tag": "release_0_1_3_py312_torch260_transformers4562",
+  "lspo_source_paths": {
+    "selected_source": "parquet",
+    "selected_path": "data/raw/lspo/LSPO_v1.parquet",
+    "raw_lspo_parquet": "data/raw/lspo/LSPO_v1.parquet",
+    "raw_lspo_h5": null,
+    "interim_lspo_mentions": "data/interim/lspo_mentions.parquet"
+  },
+  "lspo_source_fingerprint": "b2c9203fe342",
+  "lspo_source_fingerprint_scheme": "prepared_mentions_content_v1",
+  "lspo_source_fingerprint_expected": null,
+  "lspo_source_fingerprint_scheme_expected": null,
+  "subset_verification_mode": "legacy_compat",
+  "subset_cache_key_expected": "full_seed11_targetfull_cfg0dbcdaf9_srcd52b159f766e",
+  "subset_cache_key_computed": "full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342",
+  "subset_cache_key_stable_computed": "full_seed11_targetfull_cfg0dbcdaf9_srcb2c9203fe342",
+  "subset_cache_key_legacy_computed": "full_seed11_targetfull_cfg0dbcdaf9_src0c6c1c950a7b",
+  "seeds_expected": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "seeds_evaluated": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "selected_eps": 0.35,
+  "min_samples": 1,
+  "metric": "precomputed",
+  "cluster_config_effective": {
+    "method": "dbscan",
+    "eps_mode": "fixed",
+    "eps": 0.35,
+    "eps_fallback": 0.35,
+    "eps_sweep_min": 0.2,
+    "eps_sweep_max": 0.5,
+    "eps_sweep_step": 0.05,
+    "eps_min": 0.15,
+    "eps_max": 0.85,
+    "boundary_diagnostics": {
+      "diag_min": 0.55,
+      "diag_max": 0.7,
+      "diag_step": 0.05,
+      "delta_f1_threshold": 0.005
+    },
+    "min_samples": 1,
+    "metric": "precomputed",
+    "constraints": {
+      "enabled": true,
+      "constraint_mode": "soft",
+      "name_conflict_mode": "hard",
+      "year_gap_mode": "soft",
+      "max_year_gap": 30,
+      "enforce_name_conflict": true,
+      "name_conflict_min_distance": 0.75,
+      "year_gap_min_distance": 0.65
+    },
+    "selected_eps": 0.35
+  },
+  "variants": {
+    "dbscan_no_constraints": {
+      "seed_count": 5,
+      "accuracy_mean": 0.9317008234784223,
+      "accuracy_sem": 0.002224197395994709,
+      "precision_mean": 0.9503507463726463,
+      "precision_sem": 0.000539886698821454,
+      "recall_mean": 0.9780988688000193,
+      "recall_sem": 0.0023985362884425495,
+      "f1_mean": 0.9640192312580277,
+      "f1_sem": 0.0012079334540730654,
+      "n_pairs_mean": 1679704.0,
+      "n_pairs_total": 8398520
+    },
+    "dbscan_with_constraints": {
+      "seed_count": 5,
+      "accuracy_mean": 0.9439470287622104,
+      "accuracy_sem": 0.0024943932071525648,
+      "precision_mean": 0.9635797859580881,
+      "precision_sem": 0.0004268176202308482,
+      "recall_mean": 0.9770145661803212,
+      "recall_sem": 0.0024918941191961488,
+      "f1_mean": 0.9702453597377284,
+      "f1_sem": 0.0013528854516883005,
+      "n_pairs_mean": 1679704.0,
+      "n_pairs_total": 8398520
+    }
+  },
+  "per_seed_rows": [
+    {
+      "seed": 1,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed1.pt",
+      "threshold": 0.4830000000000001,
+      "variant": "dbscan_no_constraints",
+      "accuracy": 0.9284236984611575,
+      "precision": 0.9501782361998776,
+      "recall": 0.9745984294156538,
+      "f1": 0.9622334198125728,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 1,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed1.pt",
+      "threshold": 0.4830000000000001,
+      "variant": "dbscan_with_constraints",
+      "accuracy": 0.9401948200397213,
+      "precision": 0.9631393162576143,
+      "recall": 0.973328319070045,
+      "f1": 0.9682070122123938,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 2,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed2.pt",
+      "threshold": 0.516,
+      "variant": "dbscan_no_constraints",
+      "accuracy": 0.9286600496277916,
+      "precision": 0.9486361548907248,
+      "recall": 0.9766283151884453,
+      "f1": 0.9624287406495128,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 2,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed2.pt",
+      "threshold": 0.516,
+      "variant": "dbscan_with_constraints",
+      "accuracy": 0.9408407671827893,
+      "precision": 0.9621466830159845,
+      "recall": 0.9751323084637328,
+      "f1": 0.9685959742674711,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 3,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed3.pt",
+      "threshold": 0.484,
+      "variant": "dbscan_no_constraints",
+      "accuracy": 0.9316022346794435,
+      "precision": 0.9520320555908295,
+      "recall": 0.9760728009941986,
+      "f1": 0.963902551215659,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 3,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed3.pt",
+      "threshold": 0.484,
+      "variant": "dbscan_with_constraints",
+      "accuracy": 0.942881007606102,
+      "precision": 0.964286793079752,
+      "recall": 0.9750610397469451,
+      "f1": 0.9696439876947143,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 4,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed4.pt",
+      "threshold": 0.516,
+      "variant": "dbscan_no_constraints",
+      "accuracy": 0.9403109119225769,
+      "precision": 0.9505310806018852,
+      "recall": 0.9875998796067749,
+      "f1": 0.9687109901632796,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 4,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed4.pt",
+      "threshold": 0.516,
+      "variant": "dbscan_with_constraints",
+      "accuracy": 0.9537478031843706,
+      "precision": 0.9644912237060991,
+      "recall": 0.9868973736841536,
+      "f1": 0.975565663230742,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 5,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed5.pt",
+      "threshold": 0.502,
+      "variant": "dbscan_no_constraints",
+      "accuracy": 0.9295072227011426,
+      "precision": 0.9503762045799142,
+      "recall": 0.9755949187950241,
+      "f1": 0.9628204544491142,
+      "n_pairs": 1679704
+    },
+    {
+      "seed": 5,
+      "checkpoint": "artifacts/checkpoints/full_20260218T111506Z_cli02681429/full_20260218T111506Z_cli02681429_seed5.pt",
+      "threshold": 0.502,
+      "variant": "dbscan_with_constraints",
+      "accuracy": 0.9420707457980692,
+      "precision": 0.9638349137309907,
+      "recall": 0.9746537899367299,
+      "f1": 0.9692141612833212,
+      "n_pairs": 1679704
+    }
+  ],
+  "delta_with_constraints_minus_no_constraints": {
+    "accuracy": 0.012246205283788059,
+    "precision": 0.01322903958544186,
+    "recall": -0.001084302619698052,
+    "f1": 0.006226128479700721
+  },
+  "status": "ok"
+}
