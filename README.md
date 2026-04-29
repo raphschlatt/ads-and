@@ -16,26 +16,24 @@ Clustering performance on LSPO (with constraints enabled):
 | NAND — Amado Olivo et al. 2025 | 95.93% | 96.15% | 96.21% |
 | `ads-and` (this package) | **97.02%** | **96.36%** | **97.70%** |
 
-Python import path: `author_name_disambiguation`
-
 ## Install
 
 Use [uv](https://docs.astral.sh/uv/). Requires Python 3.12.
 
-```powershell
+```bash
 uv pip install ads-and
 ```
 
 If you don't have a GPU: optional ONNX CPU backend, which may be faster
 depending on host and workload:
 
-```powershell
+```bash
 uv pip install "ads-and[cpu_onnx]"
 ```
 
-Optional [Modal](https://modal.com/) backend (you need a modal account):
+Optional [Modal](https://modal.com/) backend for remote GPU inference:
 
-```powershell
+```bash
 uv pip install "ads-and[modal]"
 ```
 
@@ -43,11 +41,11 @@ uv pip install "ads-and[modal]"
 
 **CLI**
 
-```powershell
-ads-and infer `
-  --publications-path path/to/publications.parquet `
-  --references-path path/to/references.parquet `
-  --output-dir path/to/output-dir `
+```bash
+ads-and infer \
+  --publications-path path/to/publications.parquet \
+  --references-path path/to/references.parquet \
+  --output-dir path/to/output-dir \
   --runtime auto
 ```
 
@@ -59,29 +57,26 @@ Advanced infer flags such as `--infer-stage`, `--dataset-id`, and
 [`docs/inference_workflow.md`](docs/inference_workflow.md).
 
 Modal uses the same command surface with [Modal](https://modal.com/) as a
-managed remote GPU backend (you need a modal account):
+managed remote GPU backend. Before using `--backend modal`, create a Modal
+account and put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` in your environment
+or in a project-root `.env` file.
 
-```powershell
-ads-and infer `
-  --publications-path path/to/publications.parquet `
-  --references-path path/to/references.parquet `
-  --output-dir path/to/output-dir `
-  --backend modal `
-  --runtime gpu `
+```bash
+ads-and infer \
+  --publications-path path/to/publications.parquet \
+  --references-path path/to/references.parquet \
+  --output-dir path/to/output-dir \
+  --backend modal \
+  --runtime gpu \
   --modal-gpu l4
 ```
-
-Current repo Modal config is `--backend modal --runtime gpu --modal-gpu l4`. The
-local client uploads the ADS parquet inputs, Modal runs the same bundled infer
+The example uses `--backend modal --runtime gpu --modal-gpu l4`. The local
+client uploads the ADS parquet inputs, Modal runs the same bundled infer
 workflow remotely, and the finished outputs are copied back into `output-dir`.
 Current `L4` rule of thumb: about `$0.00085` and `~2.5s` per `1,000` ADS entries.
-Configure
-`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` in your environment or a repo-root
-`.env` before using `--backend modal`.
-
 Exact Modal costs are a separate official lookup:
 
-```powershell
+```bash
 ads-and cost --output-dir path/to/output-dir
 ```
 
