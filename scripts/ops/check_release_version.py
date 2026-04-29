@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tomllib
@@ -19,6 +20,14 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         payload = yaml.safe_load(f) or {}
     if not isinstance(payload, dict):
         _fail(f"expected YAML mapping in {path}")
+    return payload
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        _fail(f"expected JSON object in {path}")
     return payload
 
 
@@ -44,6 +53,20 @@ def main(argv: list[str] | None = None) -> int:
         _fail(f"CITATION.cff version {citation_version!r} does not match tag {tag!r}")
     if not str(citation.get("date-released", "")).strip():
         _fail("CITATION.cff date-released is missing")
+    citation_date = str(citation.get("date-released", "")).strip()
+
+    zenodo_path = repo_root / ".zenodo.json"
+    if zenodo_path.exists():
+        zenodo = _load_json(zenodo_path)
+        zenodo_version = str(zenodo.get("version", "")).strip()
+        if zenodo_version != version:
+            _fail(f".zenodo.json version {zenodo_version!r} does not match tag {tag!r}")
+        zenodo_date = str(zenodo.get("publication_date", "")).strip()
+        if zenodo_date != citation_date:
+            _fail(
+                f".zenodo.json publication_date {zenodo_date!r} does not match "
+                f"CITATION.cff date-released {citation_date!r}"
+            )
 
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
     if "img.shields.io/pypi/v/ads_and" in readme or "img.shields.io/pypi/pyversions/ads_and" in readme:

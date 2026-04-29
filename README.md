@@ -176,7 +176,7 @@ for the exact LSPO reproduction and release-gate commands.
 
 ## Citation
 
-Cite `ads-and` as software via [`CITATION.cff`](CITATION.cff). Cite the original NAND paper if you discuss the underlying method or baseline:
+Cite `ads-and` as software via [`CITATION.cff`](CITATION.cff) or the Zenodo concept DOI <https://doi.org/10.5281/zenodo.19820779>. Cite the original NAND paper if you discuss the underlying method or baseline:
 
 > Vicente Amado Olivo, Wolfgang Kerzendorf, Bangjing Lu, Joshua V. Shields, Andreas Flörs, and Nutan Chen (2025). *Practical Author Name Disambiguation under Metadata Constraints: A Contrastive Learning Approach for Astronomy Literature.* Publications of the Astronomical Society of the Pacific, 137(12), 124503. <https://doi.org/10.1088/1538-3873/ae1e2d>
 

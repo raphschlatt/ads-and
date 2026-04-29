@@ -1,0 +1,45 @@
+{
+  "title": "ads-and: NAND-based author name disambiguation for SAO/NASA ADS publication metadata",
+  "upload_type": "software",
+  "description": "ads-and is a Python package and command-line tool for author name disambiguation on SAO/NASA ADS publication metadata. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. The bundled model is a packaged and refined version of NAND (Neural Author Name Disambiguator), evaluated on the LSPO benchmark for physics and astronomy author name disambiguation.",
+  "creators": [
+    {
+      "name": "Schlattmann, Raphael"
+    }
+  ],
+  "version": "0.1.3",
+  "publication_date": "2026-04-27",
+  "license": "bsd-3-clause",
+  "language": "eng",
+  "access_right": "open",
+  "keywords": [
+    "author-name-disambiguation",
+    "bibliometrics",
+    "astronomy",
+    "publication-metadata",
+    "NASA-ADS",
+    "LSPO",
+    "entity-resolution"   
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.1088/1538-3873/ae1e2d",
+      "relation": "isDocumentedBy",
+      "scheme": "doi",
+      "resource_type": "publication-article"
+    },
+    {
+      "identifier": "10.5281/zenodo.11489161",
+      "relation": "references",
+      "scheme": "doi",
+      "resource_type": "dataset"
+    },
+    {
+      "identifier": "https://github.com/deepthought-initiative/neural_name_dismabiguator",
+      "relation": "isDerivedFrom",
+      "scheme": "url",
+      "resource_type": "software"
+    }
+  ],
+  "notes": "Cite the original NAND paper when discussing the underlying method, and cite LSPO separately when discussing the benchmark or dataset."
+}
