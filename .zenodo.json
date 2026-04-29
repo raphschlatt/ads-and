@@ -41,5 +41,5 @@
       "resource_type": "software"
     }
   ],
-  "notes": "Cite the original NAND paper when discussing the underlying method, and cite LSPO separately when discussing the benchmark or dataset."
+  "notes": "Cite the original NAND paper when discussing the underlying method, and cite LSPO separately when discussing the benchmark or dataset (see related works below)."
 }
