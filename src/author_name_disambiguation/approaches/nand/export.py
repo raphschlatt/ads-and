@@ -11,6 +11,7 @@ import pandas as pd
 
 from author_name_disambiguation.common.io_schema import save_parquet
 from author_name_disambiguation.data.build_mentions import split_author_field
+from author_name_disambiguation.data.prepare_ads import _coalesce_text_columns, _pick_bibcode
 
 
 ASSIGNMENT_COLUMNS = [
@@ -360,15 +361,21 @@ def _export_source_file_json(
         for row_idx, record in _iter_raw_records_with_index(input_path):
             authors = _get_record_authors(record)
             group = grouped.get(row_idx)
-            author_uids, display_names, authors_fallback = _resolve_export_row_assignments(
-                source_type=source_type,
-                row_idx=int(row_idx),
-                authors=authors,
-                group=group,
-            )
+            if group is None and authors and not _pick_bibcode(record):
+                # Records without a Bibcode are skipped when loading, so they carry no assignments.
+                author_uids, display_names, authors_fallback = [], [], 0
+                stats["authors_total"] += len(authors)
+                stats["authors_unmapped"] += len(authors)
+            else:
+                author_uids, display_names, authors_fallback = _resolve_export_row_assignments(
+                    source_type=source_type,
+                    row_idx=int(row_idx),
+                    authors=authors,
+                    group=group,
+                )
+                stats["authors_total"] += len(author_uids)
+                stats["authors_mapped"] += len(author_uids)
             stats["rows_total"] += 1
-            stats["authors_total"] += len(author_uids)
-            stats["authors_mapped"] += len(author_uids)
             stats["authors_fallback"] += authors_fallback
 
             out_row = dict(record)
@@ -413,11 +420,14 @@ def _export_source_file_parquet(
     else:
         out["__authors"] = out[author_col].map(_normalize_source_authors)
     out["__expected_author_count"] = out["__authors"].map(len).astype(np.int64)
+    out["__has_bibcode"] = _coalesce_text_columns(out, ["Bibcode", "bibcode"]).ne("")
     out = out.merge(assignments_agg, on="source_row_idx", how="left")
     out["mapped_count"] = pd.to_numeric(out["mapped_count"], errors="coerce").fillna(0).astype(np.int64)
     out["authors_fallback"] = pd.to_numeric(out["authors_fallback"], errors="coerce").fillna(0).astype(np.int64)
 
-    authored_mask = out["__expected_author_count"] > 0
+    # Records without a Bibcode are skipped when loading, so they carry no assignments.
+    skipped_mask = (out["__expected_author_count"] > 0) & ~out["__has_bibcode"]
+    authored_mask = (out["__expected_author_count"] > 0) & out["__has_bibcode"]
     missing_mask = authored_mask & out["AuthorUID"].isna()
     if bool(missing_mask.any()):
         row_idx = int(out.loc[missing_mask, "source_row_idx"].iloc[0])
@@ -442,9 +452,19 @@ def _export_source_file_parquet(
     stats["rows_total"] = int(len(out))
     stats["authors_total"] = int(out["__expected_author_count"].sum())
     stats["authors_mapped"] = int(out["mapped_count"].sum())
+    stats["authors_unmapped"] = int(out.loc[skipped_mask, "__expected_author_count"].sum())
     stats["authors_fallback"] = int(out["authors_fallback"].sum())
 
-    out = out.drop(columns=["source_row_idx", "__authors", "__expected_author_count", "mapped_count", "authors_fallback"])
+    out = out.drop(
+        columns=[
+            "source_row_idx",
+            "__authors",
+            "__expected_author_count",
+            "__has_bibcode",
+            "mapped_count",
+            "authors_fallback",
+        ]
+    )
     save_parquet(out, output_path, index=False)
     return _finalize_source_stats(stats), {
         "mirror_seconds": float(perf_counter() - mirror_started_at),

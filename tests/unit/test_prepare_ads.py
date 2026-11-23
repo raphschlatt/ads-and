@@ -180,6 +180,26 @@ def test_prepare_ads_source_data_propagates_canonical_record_id_to_mentions(tmp_
     }
 
 
+def test_prepare_ads_source_data_splits_author_strings_only_at_semicolons(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    pd.DataFrame(
+        [
+            {
+                "Bibcode": "2000MNRAS.319..168C",
+                "Author": "Cole, Shaun; Lacey, Cedric G.",
+                "Title_en": "Paper 1",
+                "Abstract_en": "Abstract 1",
+                "Year": 2000,
+            }
+        ]
+    ).to_parquet(pubs_path, index=False)
+
+    mentions = prepare_ads_source_data(pubs_path)["mentions"]
+
+    assert mentions["author_raw"].tolist() == ["Cole, Shaun", "Lacey, Cedric G."]
+    assert mentions["block_key"].tolist() == ["s.cole", "c.lacey"]
+
+
 def _legacy_deduplicate_ads_records(publications: pd.DataFrame, references: pd.DataFrame) -> pd.DataFrame:
     def _is_present_value(value) -> bool:
         if value is None:

@@ -243,9 +243,13 @@ def _coerce_ads_string_columns_to_object(frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+def _pick_bibcode(record: dict[str, Any]) -> str:
+    return str(record.get("Bibcode") or record.get("bibcode") or "").strip()
+
+
 def _normalize_ads_record(record: dict[str, Any], source_type: str) -> dict[str, Any] | None:
     source_row_idx = int(record.get("_source_row_idx", 0))
-    bibcode = str(record.get("Bibcode") or record.get("bibcode") or "").strip()
+    bibcode = _pick_bibcode(record)
     if not bibcode:
         return None
 

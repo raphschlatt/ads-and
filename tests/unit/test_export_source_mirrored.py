@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from author_name_disambiguation.approaches.nand.export import (
     build_author_entities,
     build_source_author_assignments,
     export_source_mirrored_outputs,
 )
+from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -322,6 +324,94 @@ def test_export_source_mirrored_outputs_keeps_authorless_rows_with_empty_lists(t
     assert list(pubs_out_df.loc[0, "AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
     assert list(pubs_out_df.loc[1, "AuthorUID"]) == []
     assert list(pubs_out_df.loc[1, "AuthorDisplayName"]) == []
+
+
+@pytest.mark.parametrize("suffix", [".parquet", ".jsonl"])
+def test_source_rows_with_authors_but_without_bibcode_are_skipped(tmp_path: Path, suffix: str):
+    pubs_path = tmp_path / f"publications{suffix}"
+    pubs_out = tmp_path / f"publications_disambiguated{suffix}"
+    rows = [
+        {"Bibcode": "bib1", "Author": ["Doe J", "Roe A"], "Title_en": "T1"},
+        {"Bibcode": None, "Author": ["Lost A"], "Title_en": "T2"},
+        {"Bibcode": "bib3", "Author": ["Doe J."], "Title_en": "T3"},
+    ]
+    if suffix == ".parquet":
+        pd.DataFrame(rows).to_parquet(pubs_path, index=False)
+    else:
+        _write_jsonl(pubs_path, rows)
+
+    prepared = prepare_ads_source_data(pubs_path)
+    clusters = prepared["mentions"][["mention_id"]].copy()
+    clusters["author_uid_local"] = ["blk.a.0", "blk.a.1", "blk.a.0"]
+    clusters["author_uid"] = "set::" + clusters["author_uid_local"]
+    assignments = build_source_author_assignments(
+        publications=prepared["publications"],
+        references=prepared["references"],
+        canonical_records=prepared["canonical_records"],
+        clusters=clusters,
+        uid_scope="dataset",
+        uid_namespace="set",
+    )
+
+    qc = export_source_mirrored_outputs(
+        assignments=assignments,
+        publications_path=pubs_path,
+        references_path=None,
+        publications_output_path=pubs_out,
+        references_output_path=None,
+    )
+
+    if suffix == ".parquet":
+        out_rows = pd.read_parquet(pubs_out).to_dict("records")
+    else:
+        out_rows = [json.loads(line) for line in pubs_out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [row["Title_en"] for row in out_rows] == ["T1", "T2", "T3"]
+    assert list(out_rows[0]["AuthorUID"]) == ["set::blk.a.0", "set::blk.a.1"]
+    assert list(out_rows[1]["AuthorUID"]) == []
+    assert list(out_rows[1]["AuthorDisplayName"]) == []
+    assert list(out_rows[2]["AuthorUID"]) == ["set::blk.a.0"]
+    assert qc["authors_total"] == 4
+    assert qc["authors_mapped"] == 3
+    assert qc["authors_unmapped"] == 1
+
+
+def test_string_author_column_with_missing_values_is_skipped(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    pubs_out = tmp_path / "publications_disambiguated.parquet"
+    pd.DataFrame(
+        [
+            {"Bibcode": "bib1", "Author": "Cole, Shaun; Lacey, Cedric", "Title_en": "T1"},
+            {"Bibcode": "bib2", "Author": None, "Title_en": "T2"},
+            {"Bibcode": None, "Author": None, "Title_en": "T3"},
+        ]
+    ).to_parquet(pubs_path, index=False)
+
+    prepared = prepare_ads_source_data(pubs_path)
+    clusters = prepared["mentions"][["mention_id"]].copy()
+    clusters["author_uid_local"] = ["s.cole::0", "c.lacey::0"]
+    clusters["author_uid"] = "set::" + clusters["author_uid_local"]
+    assignments = build_source_author_assignments(
+        publications=prepared["publications"],
+        references=prepared["references"],
+        canonical_records=prepared["canonical_records"],
+        clusters=clusters,
+        uid_scope="dataset",
+        uid_namespace="set",
+    )
+    qc = export_source_mirrored_outputs(
+        assignments=assignments,
+        publications_path=pubs_path,
+        references_path=None,
+        publications_output_path=pubs_out,
+        references_output_path=None,
+    )
+
+    out = pd.read_parquet(pubs_out)
+    assert list(out.loc[0, "AuthorUID"]) == ["set::s.cole::0", "set::c.lacey::0"]
+    assert list(out.loc[1, "AuthorUID"]) == []
+    assert list(out.loc[2, "AuthorUID"]) == []
+    assert qc["authors_total"] == 2
+    assert qc["authors_unmapped"] == 0
 
 
 def test_export_source_mirrored_outputs_still_fails_when_authored_row_lacks_assignments(tmp_path: Path):

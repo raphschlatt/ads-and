@@ -131,7 +131,7 @@ cost_result = resolve_modal_cost("path/to/output-dir")
 | `Affiliation` | no | `str` (ADS format) or `list[str]` (per-author) | `"AA(Durham Univ, Dept of Physics); AB(...)"` |
 | `Year` | no | `int` | `2000` |
 
-Records missing `Bibcode` or `Author` are skipped. Records missing both `Title` and `Abstract` will be processed but with meaningfully reduced disambiguation quality, since the model relies heavily on textual context to distinguish authors.
+Records missing `Bibcode` or `Author` are skipped: they stay in the output with empty `AuthorUID` and `AuthorDisplayName` lists. Records missing both `Title` and `Abstract` will be processed but with meaningfully reduced disambiguation quality, since the model relies heavily on textual context to distinguish authors.
 
 ## Output
 
