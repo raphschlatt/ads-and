@@ -29,6 +29,24 @@ The bundled public path uses the packaged fixed model and does not require the
 older adapter stack. Adapter experiments stay in a separate research env
 because current `adapters` releases still pin older `transformers` versions.
 
+Advanced flags of `ads-and infer`:
+
+- `--infer-stage` sets how much of the input is processed. `full` (default)
+  takes every author mention. `smoke`, `mini`, and `mid` take a sample of about
+  5,000, 10,000, and 100,000 mentions for quick checks; mentions outside the
+  sample stay unclustered. `incremental` is an alias of `full`.
+- `--dataset-id` sets the prefix of the author UIDs
+  (`<dataset id>::<name block>::<number>`). The default is the name of the
+  output directory.
+- `--modal-gpu` selects the GPU type for `--backend modal`: `l4` (default) or
+  `t4`.
+- `--force` recomputes and overwrites whatever the output directory holds.
+  Without it, finished outputs are reused only if the request fingerprint in
+  `summary.json` matches (publications, references, stage, model, dataset id);
+  finished outputs of another request stop the run. The fingerprint does not
+  include the package version: after an upgrade that changes results, use
+  `--force` or a new output directory.
+
 Modal uses the same public path with `--backend modal`:
 
 ```powershell

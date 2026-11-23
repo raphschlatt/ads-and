@@ -11,6 +11,8 @@ Improve the real one-shot `run-infer-sources` user path for ADS full inference:
 
 This document records the accepted and rejected changes from the 2026-04-07 to 2026-04-08 optimization session.
 
+The paths under `artifacts/exports/` below name local run directories. They are not tracked in Git and are not part of the repository; the figures in this note are the record. The same holds for the LSPO report `06_clustering_test_report__arrow_fastpath_20260408_v1.json` cited under Quality Outcome. The export frame reuse described below was replaced on 2026-04-13: parquet inputs are read again for the export, so that columns the loader does not use are preserved.
+
 ## Kept Changes
 
 ### 1. `chars2vec` runtime repair and CPU default

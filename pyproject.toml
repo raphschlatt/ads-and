@@ -38,7 +38,9 @@ dependencies = [
   "pandas>=2.0",
   "pyarrow>=14.0",
   "PyYAML>=6.0",
+  "psutil>=5.9",
   "scikit-learn>=1.3",
+  "scipy>=1.11",
   "tqdm>=4.66",
   "duckdb>=1.1",
   "chars2vec==0.1.7",
@@ -52,6 +54,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "tables>=3.10",
 ]
 modal = [
   "modal>=1.4,<2",
@@ -66,12 +69,14 @@ cpu_onnx = [
 research = [
   "jupyter>=1.0",
   "notebook>=7.0",
+  "tables>=3.10",
 ]
 
 [project.urls]
 Homepage = "https://github.com/raphschlatt/ads-and"
 Repository = "https://github.com/raphschlatt/ads-and"
 Issues = "https://github.com/raphschlatt/ads-and/issues"
+Changelog = "https://github.com/raphschlatt/ads-and/blob/main/CHANGELOG.md"
 "Original NAND Repository" = "https://github.com/deepthought-initiative/neural_name_dismabiguator"
 "Original NAND Paper" = "https://doi.org/10.1088/1538-3873/ae1e2d"
 "LSPO Dataset" = "https://doi.org/10.5281/zenodo.11489161"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from author_name_disambiguation.common import cpu_runtime
@@ -55,6 +57,29 @@ def test_sharding_enabled_modes():
 def test_cap_workers_by_ram_applies_limit():
     capped = cpu_runtime.cap_workers_by_ram(workers=8, ram_budget_bytes=3_000, per_worker_bytes=1_000)
     assert capped == 3
+
+
+def test_detect_available_ram_bytes_knows_the_host_memory():
+    # psutil is a declared dependency, so the amount is known on every platform.
+    assert cpu_runtime.detect_available_ram_bytes() > 0
+
+
+def test_detect_available_ram_bytes_is_none_when_memory_is_unknown(monkeypatch):
+    def _unsupported(_name):
+        raise OSError("unsupported")
+
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(cpu_runtime, "_read_text", lambda _path: None)
+    monkeypatch.setattr(cpu_runtime.os, "sysconf", _unsupported, raising=False)
+
+    assert cpu_runtime.detect_available_ram_bytes() is None
+    assert cpu_runtime.compute_ram_budget_bytes(target_fraction=0.6) is None
+
+
+def test_compute_ram_budget_bytes_scales_known_memory():
+    budget = cpu_runtime.compute_ram_budget_bytes(target_fraction=0.5, available_ram_bytes=8 * 1024**3)
+
+    assert budget == 4 * 1024**3
 
 
 def test_detect_cpu_limit_prefers_smallest_source(monkeypatch):

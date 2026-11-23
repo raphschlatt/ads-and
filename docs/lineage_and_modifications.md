@@ -336,10 +336,11 @@ inference path:
 - preencoded mention embeddings for pair scoring
 - chunked parquet pair-score output
 - exact connected-components clustering for the `min_samples=1` threshold graph
-- export frame reuse instead of rereading source parquets
 - Modal remote GPU execution for users without local GPU hardware
 
-One tracked ADS Modal L4 run provides an operational scale reference:
+One ADS Modal L4 run provides an operational scale reference. Its run directory
+is kept locally and is not tracked in Git (`artifacts/exports/` is ignored), so
+the figures below cannot be checked from the repository:
 
 ```text
 artifact: artifacts/exports/ads_prod_current_modal_full_l4_v1/
@@ -350,8 +351,8 @@ stage total: 1,445.5 seconds
 actual Modal cost: $0.53310679
 ```
 
-This supports the README rule of thumb of roughly 2.5 seconds and $0.00085 per
-1,000 ADS source records on that L4-backed run. Exact cost remains a Modal
+This single run is the basis of the README rule of thumb of roughly 2.5 seconds
+and $0.00085 per 1,000 ADS source records on an L4. Exact cost remains a Modal
 billing lookup, not a static package guarantee.
 
 Runtime changes are not all "runtime-only" from a quality perspective. In

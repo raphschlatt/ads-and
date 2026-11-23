@@ -17,7 +17,10 @@ fallback.
 1. Apply code/docs/artifact changes and run local checks.
 2. If outputs may change, run the LSPO quality gate on a GPU host and commit the
    small release evidence files.
-3. Update `pyproject.toml`, `uv.lock`, `CITATION.cff`, and `.zenodo.json`.
+3. Set the new version in `pyproject.toml`, `uv.lock` (`uv lock`),
+   `CITATION.cff`, and `.zenodo.json`, and the same release date in
+   `CITATION.cff` (`date-released`) and `.zenodo.json` (`publication_date`).
+   In `CHANGELOG.md`, move the `Unreleased` entries under the new version.
    Keep `CITATION.cff` on the Zenodo concept DOI; do not replace it with a
    version-specific Zenodo DOI.
 4. Commit to `main`, then tag and push:

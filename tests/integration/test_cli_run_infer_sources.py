@@ -1271,6 +1271,25 @@ def test_run_infer_sources_names_the_missing_model_bundle_file(monkeypatch, tmp_
         _run_into(tmp_path / "out_broken_bundle", publications_path, bundle_dir)
 
 
+def test_run_infer_sources_runs_without_ram_budget_when_memory_is_unknown(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    seen = _apply_fast_mocks(monkeypatch)
+    monkeypatch.setattr("author_name_disambiguation.source_inference.compute_ram_budget_bytes", lambda **_kwargs: None)
+    monkeypatch.setattr("author_name_disambiguation.source_inference._estimate_ram_total_bytes", lambda: None)
+    output_root = tmp_path / "out_unknown_memory"
+
+    result = _run_into(output_root, publications_path, bundle_dir)
+
+    context = json.loads((output_root / "00_context.json").read_text(encoding="utf-8"))
+    preflight = json.loads((output_root / "02_preflight_infer.json").read_text(encoding="utf-8"))
+    assert result.go is True
+    assert seen["pair_kwargs"]["ram_budget_bytes"] is None
+    assert context["cpu_runtime_policy"]["cpu_ram_budget_bytes"] is None
+    assert preflight["ram_total_bytes"] is None
+    assert preflight["memory_feasible"] is None
+
+
 def test_run_infer_sources_warns_about_duplicate_records_with_other_authors(monkeypatch, tmp_path: Path):
     publications_path = tmp_path / "publications.parquet"
     references_path = tmp_path / "references.parquet"
