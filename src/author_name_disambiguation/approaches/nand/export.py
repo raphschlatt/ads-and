@@ -9,7 +9,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from author_name_disambiguation.approaches.nand.cluster import _name_conflict
 from author_name_disambiguation.common.io_schema import save_parquet
+from author_name_disambiguation.data.build_blocks import create_block_key
 from author_name_disambiguation.data.build_mentions import split_author_field
 from author_name_disambiguation.data.prepare_ads import _coalesce_text_columns, _pick_bibcode
 
@@ -26,6 +28,10 @@ ASSIGNMENT_COLUMNS = [
     "assignment_kind",
     "canonical_mention_id",
 ]
+
+# Authors without a clustered identity: no canonical mention at their position, or a
+# duplicate record that names someone else at that position.
+FALLBACK_ASSIGNMENT_KINDS = ("fallback_unmatched", "fallback_name_mismatch")
 
 AUTHOR_ENTITY_COLUMNS = [
     "author_uid",
@@ -79,6 +85,15 @@ def _apply_uid_scope_to_local_uid(local_uid: str, uid_scope: str, uid_namespace:
     if uid_namespace is None:
         raise ValueError(f"uid_namespace is required when uid_scope={uid_scope!r}.")
     return f"{uid_namespace}::{local_uid}"
+
+
+def _names_disagree(author: str, canonical_author: str) -> bool:
+    """Whether a duplicate record names someone else than the canonical record at one position.
+
+    Names from different name blocks are never the same person for this package; inside
+    one block the name rule of the clustering decides.
+    """
+    return create_block_key(author) != create_block_key(canonical_author) or _name_conflict(author, canonical_author)
 
 
 def _explode_source_authors(frame: pd.DataFrame) -> pd.DataFrame:
@@ -189,8 +204,26 @@ def build_source_author_assignments(
     )
     out = out.merge(canonical_lookup, on="bibcode", how="left")
 
-    fallback_mask = out["author_uid"].isna() | out["author_uid_local"].isna()
     source_type_series = out["source_type"].astype(str)
+    canonical_row_idx = pd.to_numeric(out["canonical_source_row_idx"], errors="coerce").fillna(-1).astype("int64")
+    is_canonical_row = (
+        (source_type_series == out["canonical_source_type"].fillna("").astype(str))
+        & (out["source_row_idx"].astype("int64") == canonical_row_idx)
+    )
+
+    # A duplicate record inherits the identity of the canonical author at the same position.
+    # That is only right if both records name the same person there.
+    canonical_names = out.loc[is_canonical_row].drop_duplicates(subset=["mention_id"]).set_index("mention_id")["author_raw"]
+    expected_name = out["mention_id"].map(canonical_names)
+    name_mismatch_mask = pd.Series(False, index=out.index)
+    differing = ~is_canonical_row & out["author_uid"].notna() & expected_name.notna() & (expected_name != out["author_raw"])
+    if bool(differing.any()):
+        name_mismatch_mask.loc[differing] = [
+            _names_disagree(str(author), str(expected))
+            for author, expected in zip(out.loc[differing, "author_raw"], expected_name.loc[differing])
+        ]
+
+    fallback_mask = out["author_uid"].isna() | out["author_uid_local"].isna() | name_mismatch_mask
     source_row_idx_series = out["source_row_idx"].astype("int64").astype(str)
     author_idx_series = out["author_idx"].astype("int64").astype(str)
     fallback_uid_local = "src." + source_type_series + "." + source_row_idx_series + "." + author_idx_series
@@ -205,13 +238,9 @@ def build_source_author_assignments(
     out["author_uid_local"] = out["author_uid_local"].where(~fallback_mask, fallback_uid_local)
     out["author_uid"] = out["author_uid"].where(~fallback_mask, fallback_uid)
 
-    canonical_row_idx = pd.to_numeric(out["canonical_source_row_idx"], errors="coerce").fillna(-1).astype("int64")
-    is_canonical_row = (
-        (source_type_series == out["canonical_source_type"].fillna("").astype(str))
-        & (out["source_row_idx"].astype("int64") == canonical_row_idx)
-    )
     out["assignment_kind"] = "projected_duplicate"
     out.loc[fallback_mask, "assignment_kind"] = "fallback_unmatched"
+    out.loc[name_mismatch_mask, "assignment_kind"] = "fallback_name_mismatch"
     out.loc[~fallback_mask & is_canonical_row, "assignment_kind"] = "canonical"
     out["canonical_mention_id"] = out["mention_id"].where(~fallback_mask, fallback_canonical_id)
 
@@ -288,7 +317,8 @@ def _aggregate_assignments_for_source(assignments: pd.DataFrame, source_type: st
     )
     mapped_count = subset.groupby("source_row_idx", sort=False).size().rename("mapped_count")
     fallback_count = (
-        (subset["assignment_kind"] == "fallback_unmatched")
+        subset["assignment_kind"]
+        .isin(FALLBACK_ASSIGNMENT_KINDS)
         .groupby(subset["source_row_idx"], sort=False)
         .sum()
         .astype(np.int64)
@@ -344,7 +374,7 @@ def _resolve_export_row_assignments(
             f"Assignment length mismatch for {source_type}[{row_idx}]: "
             f"expected {len(authors)} authors, got {len(author_uids)}."
         )
-    return author_uids, display_names, int((group["assignment_kind"] == "fallback_unmatched").sum())
+    return author_uids, display_names, int(group["assignment_kind"].isin(FALLBACK_ASSIGNMENT_KINDS).sum())
 
 
 def _export_source_file_json(
@@ -558,6 +588,7 @@ def export_source_mirrored_outputs(
         "authors_mapped": authors_mapped,
         "authors_unmapped": authors_unmapped,
         "authors_fallback": authors_fallback,
+        "authors_name_mismatch": int((assignments["assignment_kind"] == "fallback_name_mismatch").sum()),
         "coverage_rate": float(authors_mapped / max(1, authors_total)),
     }
     if return_runtime_meta:

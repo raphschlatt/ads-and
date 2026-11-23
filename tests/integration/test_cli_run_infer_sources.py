@@ -1271,6 +1271,41 @@ def test_run_infer_sources_names_the_missing_model_bundle_file(monkeypatch, tmp_
         _run_into(tmp_path / "out_broken_bundle", publications_path, bundle_dir)
 
 
+def test_run_infer_sources_warns_about_duplicate_records_with_other_authors(monkeypatch, tmp_path: Path):
+    publications_path = tmp_path / "publications.parquet"
+    references_path = tmp_path / "references.parquet"
+    record = {"Bibcode": "bib1", "Title_en": "Paper 1", "Abstract_en": "Abstract 1", "Year": 2020}
+    other = {"Bibcode": "bib2", "Title_en": "Paper 2", "Abstract_en": "Abstract 2", "Year": 2021}
+    pd.DataFrame(
+        [{**record, "Author": ["Doe, John", "Roe, Anna"]}, {**other, "Author": ["Doe, J."]}]
+    ).to_parquet(publications_path, index=False)
+    # The same work again, with the two authors in reverse order.
+    pd.DataFrame([{**record, "Author": ["Roe, Anna", "Doe, John"]}]).to_parquet(references_path, index=False)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+
+    events = []
+    result = _run_into(
+        tmp_path / "out_duplicates",
+        publications_path,
+        bundle_dir,
+        references_path=references_path,
+        progress_handler=events.append,
+    )
+
+    warnings = [event.message for event in events if event.kind == "stage_warning"]
+    assert any("2 authors in duplicate records" in message for message in warnings)
+    # The count is also in the summary, where a run without progress output still shows it.
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert summary["counts"]["authors_name_mismatch"] == 2
+    assert "duplicate_name_mismatch" in summary["warnings"]
+    references = pd.read_parquet(result.references_disambiguated_path)
+    assert list(references.loc[0, "AuthorUID"]) == [
+        "my_ads_2026::src.reference.0.0",
+        "my_ads_2026::src.reference.0.1",
+    ]
+
+
 def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_path: Path):
     publications_path, references_path = _write_dataset(tmp_path, with_references=True)
     bundle_dir = _write_bundle(tmp_path)

@@ -1854,6 +1854,13 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         export_runtime_meta.update(dict(export_mirror_runtime))
     else:
         source_export_qc = source_export_result
+    name_mismatch_count = int(source_export_qc.get("authors_name_mismatch", 0))
+    if name_mismatch_count:
+        _stage_warn(
+            f"{_format_count(name_mismatch_count)} authors in duplicate records do not match the author at the "
+            "same position in the first record of their work; they get no shared identity "
+            "(assignment_kind=fallback_name_mismatch)."
+        )
     export_elapsed = perf_counter() - export_started_at
     export_runtime_meta["wall_seconds"] = float(export_elapsed)
     write_json(source_export_qc, source_export_qc_path)
@@ -2027,6 +2034,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "authors_total": int(source_export_qc.get("authors_total", 0)),
             "authors_mapped": int(source_export_qc.get("authors_mapped", 0)),
             "authors_unmapped": int(source_export_qc.get("authors_unmapped", 0)),
+            "authors_name_mismatch": name_mismatch_count,
         },
         "stage_seconds": {
             "bootstrap": float(bootstrap_elapsed),
@@ -2039,7 +2047,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "export": float(export_elapsed),
             "total": float(total_elapsed),
         },
-        "warnings": list(go.get("warnings", []) or []),
+        "warnings": list(go.get("warnings", []) or []) + (["duplicate_name_mismatch"] if name_mismatch_count else []),
         "blockers": list(go.get("blockers", []) or []),
         "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
         "references_disambiguated_path": (

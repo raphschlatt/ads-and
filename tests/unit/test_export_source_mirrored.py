@@ -414,6 +414,83 @@ def test_string_author_column_with_missing_values_is_skipped(tmp_path: Path):
     assert qc["authors_unmapped"] == 0
 
 
+def test_duplicate_record_with_reordered_authors_does_not_inherit_wrong_identities(tmp_path: Path):
+    pubs_path = tmp_path / "publications.parquet"
+    refs_path = tmp_path / "references.parquet"
+    refs_out = tmp_path / "references_disambiguated.parquet"
+    pd.DataFrame(
+        [{"Bibcode": "bib1", "Author": ["Doe, John", "Roe, Anna"], "Title_en": "T1"}]
+    ).to_parquet(pubs_path, index=False)
+    pd.DataFrame(
+        [
+            {"Bibcode": "bib1", "Author": ["Roe, Anna", "Doe, John"], "Title_en": "T1"},
+            {"Bibcode": "bib1", "Author": ["Doe, J.", "Roe, A."], "Title_en": "T1"},
+        ]
+    ).to_parquet(refs_path, index=False)
+
+    prepared = prepare_ads_source_data(pubs_path, refs_path)
+    uid_by_mention = {"bib1::0": "j.doe::0", "bib1::1": "a.roe::0"}
+    clusters = prepared["mentions"][["mention_id"]].copy()
+    clusters["author_uid_local"] = clusters["mention_id"].map(uid_by_mention)
+    clusters["author_uid"] = "set::" + clusters["author_uid_local"]
+    assignments = build_source_author_assignments(
+        publications=prepared["publications"],
+        references=prepared["references"],
+        canonical_records=prepared["canonical_records"],
+        clusters=clusters,
+        uid_scope="dataset",
+        uid_namespace="set",
+    )
+    qc = export_source_mirrored_outputs(
+        assignments=assignments,
+        publications_path=pubs_path,
+        references_path=refs_path,
+        publications_output_path=tmp_path / "publications_disambiguated.parquet",
+        references_output_path=refs_out,
+    )
+
+    refs_out_df = pd.read_parquet(refs_out)
+    # Same order with abbreviated names: the identities of the first record carry over.
+    assert list(refs_out_df.loc[1, "AuthorUID"]) == ["set::j.doe::0", "set::a.roe::0"]
+    # Reversed order: position alone would swap the two people, so both stay unresolved.
+    assert list(refs_out_df.loc[0, "AuthorUID"]) == ["set::src.reference.0.0", "set::src.reference.0.1"]
+    reversed_rows = assignments[(assignments["source_type"] == "reference") & (assignments["source_row_idx"] == 0)]
+    assert set(reversed_rows["assignment_kind"]) == {"fallback_name_mismatch"}
+    assert qc["references"]["authors_fallback"] == 2
+    assert qc["authors_name_mismatch"] == 2
+
+
+def test_reordered_duplicate_with_two_letter_surnames_does_not_inherit_wrong_identities():
+    publications = pd.DataFrame(
+        [{"bibcode": "bib1", "source_type": "publication", "source_row_idx": 0, "authors": ["Li, W.", "Wu, W."]}]
+    )
+    references = pd.DataFrame(
+        [{"bibcode": "bib1", "source_type": "reference", "source_row_idx": 0, "authors": ["Wu, W.", "Li, W."]}]
+    )
+    canonical_records = pd.DataFrame(
+        [{"bibcode": "bib1", "canonical_source_type": "publication", "canonical_source_row_idx": 0}]
+    )
+    clusters = pd.DataFrame(
+        [
+            {"mention_id": "bib1::0", "author_uid": "set::w.li::0", "author_uid_local": "w.li::0"},
+            {"mention_id": "bib1::1", "author_uid": "set::w.wu::0", "author_uid_local": "w.wu::0"},
+        ]
+    )
+
+    assignments = build_source_author_assignments(
+        publications=publications,
+        references=references,
+        canonical_records=canonical_records,
+        clusters=clusters,
+        uid_scope="dataset",
+        uid_namespace="set",
+    )
+
+    reference_rows = assignments[assignments["source_type"] == "reference"]
+    assert reference_rows["assignment_kind"].tolist() == ["fallback_name_mismatch", "fallback_name_mismatch"]
+    assert reference_rows["author_uid"].tolist() == ["set::src.reference.0.0", "set::src.reference.0.1"]
+
+
 def test_export_source_mirrored_outputs_still_fails_when_authored_row_lacks_assignments(tmp_path: Path):
     pubs_path = tmp_path / "publications.parquet"
     pubs_out = tmp_path / "publications_disambiguated.parquet"
