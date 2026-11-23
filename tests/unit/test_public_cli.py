@@ -191,7 +191,7 @@ def test_public_cli_infer_summary_includes_modal_block(tmp_path: Path):
         },
         "summary_path": str(tmp_path / "summary.json"),
         "modal": {
-            "app_id": "ap-uM9ApHoH8Be0F6Ydvofw7A",
+            "app_id": "ap-example",
             "app_name": "ads-and-modal",
             "gpu_type": "L4",
             "mode": "ephemeral_app_run",
@@ -205,7 +205,7 @@ def test_public_cli_infer_summary_includes_modal_block(tmp_path: Path):
     }
     rendered = public_cli._build_infer_human_summary(summary)
     assert "Modal: app=ads-and-modal (ephemeral_app_run) | gpu=L4" in rendered
-    assert "app_id=ap-uM9ApHoH8Be0F6Ydvofw7A" in rendered
+    assert "app_id=ap-example" in rendered
     assert "staging=pubs " in rendered
     assert "refs " in rendered
     assert "billing window=2026-04-13T14:00:00Z → 2026-04-13T15:00:00Z (resolution h)" in rendered
