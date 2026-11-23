@@ -24,6 +24,7 @@ from author_name_disambiguation.approaches.nand.infer_pairs import (
     score_pairs_from_mention_embeddings,
     score_pairs_with_checkpoint,
 )
+from author_name_disambiguation.common.cache_ops import hash_file, stable_hash
 from author_name_disambiguation.common.cli_ui import CliProgressHandler, get_active_ui, loop_progress
 from author_name_disambiguation.common.cpu_runtime import compute_ram_budget_bytes, normalize_workers_request
 from author_name_disambiguation.common.io_schema import (
@@ -53,6 +54,7 @@ from author_name_disambiguation.common.tensorflow_runtime import (
 )
 from author_name_disambiguation.common.uid_registry import assign_registry_uids, load_uid_registry, save_uid_registry
 from author_name_disambiguation.data.prepare_ads import prepare_ads_source_data
+from author_name_disambiguation.defaults import resolve_fixed_model_bundle_path
 from author_name_disambiguation.embedding_contract import build_bundle_embedding_contract
 from author_name_disambiguation.features.embed_chars2vec import get_or_create_chars2vec_embeddings
 from author_name_disambiguation.features.embed_specter import get_or_create_specter_embeddings
@@ -63,6 +65,7 @@ if TYPE_CHECKING:
 
 
 MODEL_BUNDLE_SCHEMA_VERSION = "v1"
+_MODEL_BUNDLE_FILES = ("bundle_manifest.json", "checkpoint.pt", "model_config.yaml", "clustering_resolved.json")
 UID_SCOPE_VALUES = {"dataset", "local", "registry"}
 INFER_STAGE_VALUES = {"smoke", "mini", "mid", "full", "incremental"}
 INFER_STAGE_ALIASES = {"incremental": "full"}
@@ -382,17 +385,22 @@ def _apply_uid_mode_to_clusters(
     }
 
 
-def _resolve_model_bundle(model_bundle: str | Path) -> dict[str, Any]:
-    raw = Path(model_bundle).expanduser()
+def _model_bundle_dir(model_bundle: str | Path | None) -> Path:
+    """Directory of a model bundle (default: the packaged one), with its files checked."""
+    raw = Path(resolve_fixed_model_bundle_path() if model_bundle is None else model_bundle).expanduser()
     bundle_dir = raw.parent.resolve() if raw.is_file() else raw.resolve()
+    for name in _MODEL_BUNDLE_FILES:
+        if not (bundle_dir / name).exists():
+            raise FileNotFoundError(f"Model bundle is missing required file: {bundle_dir / name}")
+    return bundle_dir
+
+
+def _resolve_model_bundle(model_bundle: str | Path) -> dict[str, Any]:
+    bundle_dir = _model_bundle_dir(model_bundle)
     manifest_path = bundle_dir / "bundle_manifest.json"
     checkpoint_path = bundle_dir / "checkpoint.pt"
     model_cfg_path = bundle_dir / "model_config.yaml"
     clustering_path = bundle_dir / "clustering_resolved.json"
-
-    for path in [manifest_path, checkpoint_path, model_cfg_path, clustering_path]:
-        if not path.exists():
-            raise FileNotFoundError(f"Model bundle is missing required file: {path}")
 
     manifest = load_json(manifest_path)
     schema_version = str(manifest.get("bundle_schema_version", "")).strip()
@@ -572,17 +580,95 @@ def _build_output_dirs(output_root: Path) -> dict[str, Path]:
     }
 
 
-def _required_outputs_exist(output_root: Path, references_present: bool) -> bool:
-    required = [
-        output_root / "mention_clusters.parquet",
-        output_root / "source_author_assignments.parquet",
-        output_root / "author_entities.parquet",
-        output_root / "05_stage_metrics_infer_sources.json",
-        output_root / "05_go_no_go_infer_sources.json",
-    ]
-    if references_present:
-        required.append(output_root / "references_disambiguated.parquet")
-    return all(path.exists() for path in required)
+def _build_request_fingerprint(request: InferSourcesRequest) -> dict[str, Any]:
+    """Checksums of what one infer request computes: inputs, stage, model, UID naming and configs.
+
+    The fingerprint is stored in summary.json and compared before existing outputs are reused.
+    How a run is executed (device, precision, backends) is deliberately not part of it.
+    """
+    _requested_stage, infer_stage = _normalize_infer_stage(getattr(request, "infer_stage", None))
+    uid_scope = str(request.uid_scope).strip().lower()
+    bundle_dir = _model_bundle_dir(request.model_bundle)
+    cluster_cfg = load_yaml_like(
+        request.cluster_config,
+        default_resource="resources/clustering/default.yaml",
+        param_name="cluster_config",
+    )
+    gate_cfg = load_yaml_like(
+        request.gates_config,
+        default_resource="resources/gates.yaml",
+        param_name="gates_config",
+    )
+    return {
+        "publications": hash_file(Path(request.publications_path).expanduser(), length=40),
+        "references": (
+            None
+            if request.references_path is None
+            else hash_file(Path(request.references_path).expanduser(), length=40)
+        ),
+        "infer_stage": infer_stage,
+        "model_bundle": stable_hash(
+            {name: hash_file(bundle_dir / name, length=40) for name in _MODEL_BUNDLE_FILES},
+            length=40,
+        ),
+        "dataset_id": str(request.dataset_id),
+        "uid_scope": uid_scope,
+        "uid_namespace": _resolve_uid_namespace(
+            uid_scope=uid_scope,
+            uid_namespace=request.uid_namespace,
+            dataset_id=str(request.dataset_id),
+        ),
+        "cluster_config": stable_hash(cluster_cfg, length=40),
+        "gates_config": stable_hash(gate_cfg, length=40),
+    }
+
+
+def _existing_outputs_match(
+    *,
+    output_root: Path,
+    result_paths: Mapping[str, Path | None],
+    summary_path: Path,
+    request_fingerprint: Mapping[str, Any],
+) -> bool:
+    """Whether the finished outputs of this very request are already in the output directory.
+
+    Incomplete outputs do not count and are recomputed. Complete outputs of another request,
+    or of a request that cannot be identified, are neither returned nor overwritten: that
+    raises, and only ``force`` overwrites them.
+    """
+    if not all(path.exists() for path in result_paths.values() if path is not None):
+        return False
+    try:
+        stored = load_json(summary_path).get("request_fingerprint")
+    except Exception:
+        stored = None
+    if not isinstance(stored, Mapping):
+        reason = "they carry no request fingerprint (written by an older version or by an interrupted run)"
+    else:
+        changed = sorted(key for key, value in request_fingerprint.items() if stored.get(key) != value)
+        if not changed:
+            return True
+        reason = f"they belong to a different request (changed: {', '.join(changed)})"
+    raise FileExistsError(
+        f"{output_root} already holds complete results, and {reason}. "
+        "Use a new output directory, or pass --force (force=True) to recompute and overwrite them."
+    )
+
+
+def _invalidate_previous_results(output_root: Path, result_paths: Mapping[str, Path | None]) -> None:
+    """Call right before result files are overwritten.
+
+    The summary vouches for finished results, so it goes first and is rewritten last.
+    Mirrored outputs that this request does not produce (other file format, or references
+    of an earlier request) are removed, so the directory holds one request only.
+    """
+    (output_root / "summary.json").unlink(missing_ok=True)
+    keep = {result_paths["publications_disambiguated"], result_paths["references_disambiguated"]}
+    for base_name in ("publications_disambiguated", "references_disambiguated"):
+        for suffix in (".parquet", ".jsonl"):
+            candidate = output_root / f"{base_name}{suffix}"
+            if candidate not in keep:
+                candidate.unlink(missing_ok=True)
 
 
 def _format_count(value: int | float) -> str:
@@ -799,32 +885,18 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "go_no_go": output_root / "05_go_no_go_infer_sources.json",
     }
 
-    if not request.force and _required_outputs_exist(output_root, references_present=references_present):
+    summary_path = output_root / "summary.json"
+    request_fingerprint = _build_request_fingerprint(request)
+    if not request.force and _existing_outputs_match(
+        output_root=output_root,
+        result_paths=result_paths,
+        summary_path=summary_path,
+        request_fingerprint=request_fingerprint,
+    ):
         go_payload = load_json(result_paths["go_no_go"])
         _stage_start("load_inputs")
         _stage_skip("Reused existing infer outputs.")
-        summary_path = output_root / "summary.json"
-        summary_payload = (
-            load_json(summary_path)
-            if summary_path.exists()
-            else {
-                "run_id": run_id,
-                "dataset_id": str(request.dataset_id),
-                "go": go_payload.get("go"),
-                "summary_path": str(summary_path),
-                "publications_disambiguated_path": str(result_paths["publications_disambiguated"]),
-                "references_disambiguated_path": (
-                    None
-                    if result_paths["references_disambiguated"] is None
-                    else str(result_paths["references_disambiguated"])
-                ),
-                "author_entities_path": str(result_paths["author_entities"]),
-                "source_author_assignments_path": str(result_paths["source_author_assignments"]),
-                "mention_clusters_path": str(result_paths["mention_clusters"]),
-                "stage_metrics_path": str(result_paths["stage_metrics"]),
-                "go_no_go_path": str(result_paths["go_no_go"]),
-            }
-        )
+        summary_payload = load_json(summary_path)
         reporter.run_done(payload=summary_payload, message=f"Run complete | run_id={run_id}")
         return InferSourcesResult(
             run_id=run_id,
@@ -837,7 +909,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             mention_clusters_path=result_paths["mention_clusters"],
             stage_metrics_path=result_paths["stage_metrics"],
             go_no_go_path=result_paths["go_no_go"],
-            summary_path=output_root / "summary.json",
+            summary_path=summary_path,
         )
 
     load_started_at = perf_counter()
@@ -1102,6 +1174,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             quiet_libraries=True,
             show_progress=progress_enabled,
             return_meta=True,
+            verify_cache_content=True,
         )
     if isinstance(chars_result, tuple) and len(chars_result) == 2:
         chars, chars_meta = chars_result
@@ -1169,6 +1242,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
                 quiet_libraries=True,
                 reuse_model=False,
                 return_meta=True,
+                verify_cache_content=True,
             )
 
     resolved_specter_runtime_backend = specter_runtime_backend
@@ -1729,6 +1803,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
     if result_paths["references_disambiguated"] is not None:
         _stage_info(f"writing {result_paths['references_disambiguated'].name}")
     export_runtime_meta: dict[str, Any] = {}
+    _invalidate_previous_results(output_root, result_paths)
     assignments_result = build_source_author_assignments(
         publications=publications,
         references=references,
@@ -1931,8 +2006,9 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
         "run_id": run_id,
         "dataset_id": str(request.dataset_id),
         "output_root": str(output_root),
-        "summary_path": str(output_root / "summary.json"),
+        "summary_path": str(summary_path),
         "go": go.get("go"),
+        "request_fingerprint": request_fingerprint,
         "infer_stage_requested": infer_stage_requested,
         "infer_stage_effective": infer_stage,
         "runtime_mode": runtime_mode,
@@ -1990,7 +2066,7 @@ def run_source_inference(request: InferSourcesRequest) -> InferSourcesResult:
             "go_no_go_path": str(result_paths["go_no_go"]),
         },
     }
-    summary_path = write_json(summary_payload, output_root / "summary.json")
+    write_json(summary_payload, summary_path)
     _stage_done(
         f"GO={go.get('go')} | blockers={len(go.get('blockers', []))} "
         f"in {_format_elapsed(export_elapsed)}",

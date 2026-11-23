@@ -157,6 +157,8 @@ The two disambiguated parquets preserve all input columns and append:
 
 Both columns are parallel lists in the same order as the input `Author` column. Each UID is stable across runs for the same registry. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
 
+A rerun into the same `output_dir` returns the existing outputs only if publications, references, `--infer-stage`, model and `--dataset-id` are unchanged (checked against a fingerprint in `summary.json`). Finished outputs of another request, or of an earlier version without fingerprint, are not overwritten: the run stops and asks for a new `output_dir` or `--force`.
+
 ## Reproducibility
 
 The bundled inference model is the selected fixed model from

@@ -215,6 +215,71 @@ def test_get_or_create_specter_embeddings_rebuilds_invalid_cache(tmp_path: Path,
     assert np.load(cache_path).shape == (2, 768)
 
 
+def test_get_or_create_chars2vec_embeddings_verifies_cache_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache_path = tmp_path / "chars2vec.npy"
+    # A cache of the right shape whose origin is unknown (written by an older version).
+    np.save(cache_path, np.zeros((2, 50), dtype=np.float32))
+    generated_for: list[list[str]] = []
+
+    def _generate(names, **_kwargs):
+        generated_for.append(list(names))
+        return np.full((len(names), 50), float(len(generated_for)), dtype=np.float32)
+
+    monkeypatch.setattr(embed_chars2vec, "generate_chars2vec_embeddings", _generate)
+
+    def _embed(names: list[str]) -> np.ndarray:
+        return embed_chars2vec.get_or_create_chars2vec_embeddings(
+            mentions=pd.DataFrame({"author_raw": names}),
+            output_path=cache_path,
+            verify_cache_content=True,
+        )
+
+    first = _embed(["Doe J", "Roe A"])
+    again = _embed(["Doe J", "Roe A"])
+    other = _embed(["Poe J", "Roe A"])
+
+    assert generated_for == [["Doe J", "Roe A"], ["Poe J", "Roe A"]]
+    np.testing.assert_allclose(again, first)
+    assert float(first[0, 0]) == 1.0
+    assert float(other[0, 0]) == 2.0
+
+
+def test_get_or_create_specter_embeddings_verifies_cache_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cache_path = tmp_path / "specter.npy"
+    # A cache of the right shape whose origin is unknown (written by an older version).
+    np.save(cache_path, np.zeros((2, 768), dtype=np.float32))
+    generated_for: list[tuple[list[str], str]] = []
+
+    def _generate(*, mentions, model_name, return_meta=False, **_kwargs):
+        generated_for.append((mentions["title"].tolist(), model_name))
+        arr = np.full((len(mentions), 768), float(len(generated_for)), dtype=np.float32)
+        return (arr, {"generation_mode": "model_only"}) if return_meta else arr
+
+    monkeypatch.setattr(embed_specter, "generate_specter_embeddings", _generate)
+
+    def _embed(titles: list[str], model_name: str = "allenai/specter") -> np.ndarray:
+        return embed_specter.get_or_create_specter_embeddings(
+            mentions=pd.DataFrame({"title": titles, "abstract": ["Abstract 1", "Abstract 2"]}),
+            output_path=cache_path,
+            model_name=model_name,
+            verify_cache_content=True,
+        )
+
+    first = _embed(["Paper 1", "Paper 2"])
+    again = _embed(["Paper 1", "Paper 2"])
+    other_text = _embed(["Paper 1", "Paper 3"])
+    other_model = _embed(["Paper 1", "Paper 3"], model_name="other/model")
+
+    assert generated_for == [
+        (["Paper 1", "Paper 2"], "allenai/specter"),
+        (["Paper 1", "Paper 3"], "allenai/specter"),
+        (["Paper 1", "Paper 3"], "other/model"),
+    ]
+    np.testing.assert_allclose(again, first)
+    assert float(other_text[0, 0]) == 2.0
+    assert float(other_model[0, 0]) == 3.0
+
+
 def test_generate_specter_embeddings_ignores_precomputed_columns(monkeypatch: pytest.MonkeyPatch):
     mentions_with_extra = pd.DataFrame(
         {

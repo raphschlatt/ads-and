@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from author_name_disambiguation import cli
@@ -1129,6 +1130,145 @@ def test_run_infer_sources_accepts_incremental_alias_and_writes_summary(monkeypa
     assert summary["counts"]["publications"] == 2
     assert summary["counts"]["mentions"] >= 2
     assert summary["stage_seconds"]["total"] >= 0.0
+
+
+def _run_into(output_root: Path, publications_path: Path, bundle_dir: Path, **overrides):
+    request = {
+        "publications_path": publications_path,
+        "output_root": output_root,
+        "dataset_id": "my_ads_2026",
+        "model_bundle": bundle_dir,
+        "progress": False,
+    }
+    request.update(overrides)
+    return run_infer_sources(**request)
+
+
+def test_run_infer_sources_reuses_outputs_of_identical_request(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    seen = _apply_fast_mocks(monkeypatch)
+    output_root = tmp_path / "out_reuse"
+
+    first = _run_into(output_root, publications_path, bundle_dir)
+    seen.clear()
+    second = _run_into(output_root, publications_path, bundle_dir)
+
+    assert seen == {}
+    assert second.publications_disambiguated_path == first.publications_disambiguated_path
+    assert second.summary_path == first.summary_path
+
+
+@pytest.mark.parametrize("change", ["publications", "infer_stage", "model_bundle", "dataset_id"])
+def test_run_infer_sources_refuses_outputs_of_another_request(monkeypatch, tmp_path: Path, change: str):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    seen = _apply_fast_mocks(monkeypatch)
+    output_root = tmp_path / "out_changed"
+    _run_into(output_root, publications_path, bundle_dir)
+    summary_before = (output_root / "summary.json").read_text(encoding="utf-8")
+    seen.clear()
+
+    overrides = {}
+    if change == "publications":
+        frame = pd.read_parquet(publications_path)
+        frame.loc[0, "Title_en"] = "Another paper"
+        frame.to_parquet(publications_path, index=False)
+    elif change == "infer_stage":
+        overrides["infer_stage"] = "smoke"
+    elif change == "model_bundle":
+        (bundle_dir / "checkpoint.pt").write_text("another checkpoint", encoding="utf-8")
+    else:
+        overrides["dataset_id"] = "another_dataset"
+
+    # Finished results of another request are neither returned nor overwritten.
+    with pytest.raises(FileExistsError, match=change):
+        _run_into(output_root, publications_path, bundle_dir, **overrides)
+    assert seen == {}
+    assert (output_root / "summary.json").read_text(encoding="utf-8") == summary_before
+
+    _run_into(output_root, publications_path, bundle_dir, force=True, **overrides)
+    assert "pair_kwargs" in seen
+    assert seen["chars_kwargs"]["verify_cache_content"] is True
+    assert seen["specter_kwargs"]["verify_cache_content"] is True
+
+
+def test_run_infer_sources_recomputes_when_publications_output_is_missing(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    output_root = tmp_path / "out_incomplete"
+
+    first = _run_into(output_root, publications_path, bundle_dir)
+    first.publications_disambiguated_path.unlink()
+    second = _run_into(output_root, publications_path, bundle_dir)
+
+    assert second.publications_disambiguated_path.exists()
+
+
+def test_run_infer_sources_refuses_outputs_without_request_fingerprint(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    seen = _apply_fast_mocks(monkeypatch)
+    output_root = tmp_path / "out_legacy"
+    _run_into(output_root, publications_path, bundle_dir)
+
+    # Outputs written before the fingerprint existed cannot be matched to a request.
+    summary_path = output_root / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary.pop("request_fingerprint", None)
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    seen.clear()
+
+    with pytest.raises(FileExistsError, match="no request fingerprint"):
+        _run_into(output_root, publications_path, bundle_dir)
+    assert seen == {}
+
+    _run_into(output_root, publications_path, bundle_dir, force=True)
+    assert "pair_kwargs" in seen
+
+
+def test_run_infer_sources_keeps_old_results_when_a_forced_rerun_fails_early(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    output_root = tmp_path / "out_failed_rerun"
+    _run_into(output_root, publications_path, bundle_dir)
+    summary_before = (output_root / "summary.json").read_text(encoding="utf-8")
+
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("pair building failed")
+
+    monkeypatch.setattr("author_name_disambiguation.source_inference.build_pairs_within_blocks", _fail)
+    with pytest.raises(RuntimeError, match="pair building failed"):
+        _run_into(output_root, publications_path, bundle_dir, force=True)
+
+    # No result file has been touched yet, so the summary still vouches for them.
+    assert (output_root / "summary.json").read_text(encoding="utf-8") == summary_before
+
+
+def test_run_infer_sources_removes_results_that_the_new_request_does_not_produce(monkeypatch, tmp_path: Path):
+    publications_path, references_path = _write_dataset(tmp_path, with_references=True)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    output_root = tmp_path / "out_without_references"
+
+    with_references = _run_into(output_root, publications_path, bundle_dir, references_path=references_path)
+    assert with_references.references_disambiguated_path.exists()
+    without_references = _run_into(output_root, publications_path, bundle_dir, force=True)
+
+    assert without_references.references_disambiguated_path is None
+    assert not (output_root / "references_disambiguated.parquet").exists()
+
+
+def test_run_infer_sources_names_the_missing_model_bundle_file(monkeypatch, tmp_path: Path):
+    publications_path, _references_path = _write_dataset(tmp_path, with_references=False)
+    bundle_dir = _write_bundle(tmp_path)
+    _apply_fast_mocks(monkeypatch)
+    (bundle_dir / "clustering_resolved.json").unlink()
+
+    with pytest.raises(FileNotFoundError, match="Model bundle is missing required file"):
+        _run_into(tmp_path / "out_broken_bundle", publications_path, bundle_dir)
 
 
 def test_cli_run_infer_sources_reloads_file_backed_pair_scores(monkeypatch, tmp_path: Path):

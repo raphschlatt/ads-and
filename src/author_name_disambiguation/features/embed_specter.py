@@ -14,7 +14,7 @@ import pandas as pd
 
 from author_name_disambiguation.common.cli_ui import loop_progress
 from author_name_disambiguation.embedding_contract import TEXT_EMBEDDING_DIM, build_source_text
-from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
+from author_name_disambiguation.common.npy_cache import atomic_save_npy, fingerprint_texts, load_validated_npy
 from author_name_disambiguation.common.torch_runtime import apply_auto_cuda_move_fallback, resolve_torch_device
 from author_name_disambiguation.features.specter_runtime import (
     build_onnx_cache_path,
@@ -770,13 +770,34 @@ def get_or_create_specter_embeddings(
     quiet_libraries: bool = False,
     reuse_model: bool = True,
     return_meta: bool = False,
+    verify_cache_content: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+    """Return cached SPECTER embeddings or compute and cache them.
+
+    A cache is always checked for its shape. With ``verify_cache_content`` it is reused
+    only if it was built from the same titles and abstracts with the same model settings;
+    use this whenever the cache path does not already identify its inputs.
+    """
     output = Path(output_path)
+    cache_fingerprint = None
+    if verify_cache_content:
+        titles = mentions["title"].fillna("").astype(str)
+        abstracts = mentions["abstract"].fillna("").astype(str)
+        cache_fingerprint = fingerprint_texts(
+            (part for record in zip(titles, abstracts) for part in record),
+            model_name=model_name,
+            text_backend=text_backend,
+            text_adapter_name=text_adapter_name,
+            text_adapter_alias=text_adapter_alias,
+            runtime_backend=runtime_backend,
+            max_length=int(max_length),
+        )
     if output.exists() and not force_recompute:
         cached = load_validated_npy(
             output,
             validator=lambda arr: arr.ndim == 2 and arr.shape == (len(mentions), _SPECTER_DIM),
             description="SPECTER embedding cache",
+            fingerprint=cache_fingerprint,
         )
         if cached is not None:
             meta = {
@@ -817,5 +838,5 @@ def get_or_create_specter_embeddings(
         return_meta=True,
     )
     emb, meta = emb_result
-    atomic_save_npy(output, emb)
+    atomic_save_npy(output, emb, fingerprint=cache_fingerprint)
     return (emb, meta) if return_meta else emb

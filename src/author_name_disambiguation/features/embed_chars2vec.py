@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from author_name_disambiguation.common.cli_ui import loop_progress
-from author_name_disambiguation.common.npy_cache import atomic_save_npy, load_validated_npy
+from author_name_disambiguation.common.npy_cache import atomic_save_npy, fingerprint_texts, load_validated_npy
 from author_name_disambiguation.common.tensorflow_runtime import (
     probe_tensorflow_runtime,
     tensorflow_runtime_backend_label,
@@ -587,10 +587,18 @@ def get_or_create_chars2vec_embeddings(
     quiet_libraries: bool = False,
     show_progress: bool = False,
     return_meta: bool = False,
+    verify_cache_content: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, object]]:
+    """Return cached chars2vec embeddings or compute and cache them.
+
+    A cache is always checked for its shape. With ``verify_cache_content`` it is reused
+    only if it was built from the same names with the same model; use this whenever the
+    cache path does not already identify its inputs.
+    """
     execution_mode = _normalize_execution_mode(execution_mode)
     output = Path(output_path)
     names = mentions["author_raw"].fillna("").astype(str).tolist()
+    cache_fingerprint = fingerprint_texts(names, model_name=model_name) if verify_cache_content else None
     call_started_at = perf_counter()
     if output.exists() and not force_recompute:
         cache_load_started_at = perf_counter()
@@ -598,6 +606,7 @@ def get_or_create_chars2vec_embeddings(
             output,
             validator=lambda arr: arr.ndim == 2 and arr.shape == (len(names), 50),
             description="chars2vec embedding cache",
+            fingerprint=cache_fingerprint,
         )
         if cached is not None:
             meta = {
@@ -645,7 +654,7 @@ def get_or_create_chars2vec_embeddings(
     emb, meta = result if isinstance(result, tuple) else (result, {"cache_hit": False})
 
     cache_write_started_at = perf_counter()
-    atomic_save_npy(output, emb)
+    atomic_save_npy(output, emb, fingerprint=cache_fingerprint)
     meta = dict(meta)
     meta["cache_write_seconds"] = float(perf_counter() - cache_write_started_at)
     meta["wall_seconds"] = float(perf_counter() - call_started_at)

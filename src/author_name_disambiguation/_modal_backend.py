@@ -19,7 +19,11 @@ from author_name_disambiguation.common.io_schema import save_parquet
 from author_name_disambiguation.common.pipeline_reports import load_json
 from author_name_disambiguation.data.prepare_ads import _read_ads_parquet_minimal
 from author_name_disambiguation.defaults import resolve_fixed_model_bundle_path
-from author_name_disambiguation.source_inference import _required_outputs_exist
+from author_name_disambiguation.source_inference import (
+    _build_request_fingerprint,
+    _existing_outputs_match,
+    _invalidate_previous_results,
+)
 
 
 BILLING_RESOLUTION = "h"
@@ -188,15 +192,7 @@ def _existing_result(request, *, result_paths: dict[str, Path | None]):
 
     go_payload = load_json(result_paths["go_no_go"])
     summary_path = Path(request.output_root).expanduser().resolve() / SUMMARY_FILENAME
-    summary_payload = (
-        load_json(summary_path)
-        if summary_path.exists()
-        else {
-            "dataset_id": str(request.dataset_id),
-            "go": go_payload.get("go"),
-            "summary_path": str(summary_path),
-        }
-    )
+    summary_payload = load_json(summary_path)
     return InferSourcesResult(
         run_id=str(summary_payload.get("run_id") or ""),
         go=go_payload.get("go"),
@@ -379,7 +375,14 @@ def run_modal_infer_sources(request):
 
     remote_progress = _resolve_modal_progress(request)
 
-    if not request.force and _required_outputs_exist(output_root, references_present=references_present):
+    summary_path = output_root / SUMMARY_FILENAME
+    request_fingerprint = _build_request_fingerprint(request)
+    if not request.force and _existing_outputs_match(
+        output_root=output_root,
+        result_paths=result_paths,
+        summary_path=summary_path,
+        request_fingerprint=request_fingerprint,
+    ):
         existing_gpu_type = _existing_modal_gpu_type(output_root)
         if existing_gpu_type == requested_gpu_type:
             if remote_progress:
@@ -450,6 +453,7 @@ def run_modal_infer_sources(request):
                 app_id = str(getattr(running_app, "app_id", "") or "")
         run_finished_at = _utc_now()
 
+    _invalidate_previous_results(output_root, result_paths)
     assignments_path = _write_bytes(result_paths["source_author_assignments"], remote_result.get("source_author_assignments"))
     author_entities_path = _write_bytes(result_paths["author_entities"], remote_result.get("author_entities"))
     mention_clusters_path = _write_bytes(result_paths["mention_clusters"], remote_result.get("mention_clusters"))
@@ -493,7 +497,9 @@ def run_modal_infer_sources(request):
         },
         modal_lookup=modal_lookup,
     )
-    summary_path = _write_json(output_root / SUMMARY_FILENAME, summary)
+    # The remote run saw staged copies of the inputs; reuse is decided against the local files.
+    summary["request_fingerprint"] = request_fingerprint
+    _write_json(summary_path, summary)
 
     return InferSourcesResult(
         run_id=str(summary.get("run_id") or remote_result.get("run_id") or ""),
