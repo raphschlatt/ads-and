@@ -22,15 +22,16 @@ commands are not part of the public `ads-and` package contract.
 
 ## Reproduce Published LSPO Baseline
 
-The tracked baseline report behind the README LSPO row is:
+The tracked baseline report behind the README LSPO rows is:
 
 ```text
 artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json
 ```
 
-It evaluates seeds 1 through 5 and reports, for DBSCAN with constraints,
-F1 97.02%, precision 96.36%, and recall 97.70%. The five seed checkpoints are
-tracked under:
+It evaluates seeds 1 through 5 and reports, for DBSCAN with constraints, a
+mean of F1 97.02%, precision 96.36%, and recall 97.70%; its per-seed row for
+seed 5, the bundled model, is F1 96.92%, precision 96.38%, and recall 97.47%.
+The five seed checkpoints are tracked under:
 
 ```text
 artifacts/checkpoints/full_20260218T111506Z_cli02681429/

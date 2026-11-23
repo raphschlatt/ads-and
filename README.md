@@ -4,17 +4,21 @@
 [![Python](https://img.shields.io/pypi/pyversions/ads-and.svg)](https://pypi.org/project/ads-and/)
 [![License](https://img.shields.io/pypi/l/ads-and.svg)](https://github.com/raphschlatt/ads-and/blob/main/LICENSE)
 
-`ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs.
+`ads-and` is a Python package for author name disambiguation (AND) on [SAO/NASA ADS](https://ui.adsabs.harvard.edu/) records. Given publications and optionally references in ADS parquet format, it groups author mentions into author entities, assigns identifiers that are valid within one run, and writes disambiguated outputs.
 
 The bundled model is a packaged and slightly refined version of [NAND](https://github.com/deepthought-initiative/neural_name_dismabiguator) (Neural Author Name Disambiguator), described in [Amado Olivo et al. 2025](https://doi.org/10.1088/1538-3873/ae1e2d). NAND was trained and evaluated on [LSPO](https://doi.org/10.5281/zenodo.11489161), a large-scale physics and astronomy AND benchmark built from ~553k NASA/ADS publications linked to ORCID identities (~125k researchers). The model ships inside the package, no external bundle is required.
 
-This implementation was re-evaluated on LSPO under a five-seed protocol.
-Clustering performance on LSPO (with constraints enabled):
+This implementation was re-evaluated on LSPO with five training runs that use different random seeds.
+Clustering performance on the LSPO test split (pairwise metrics, constraints enabled):
 
 | | F1 | Precision | Recall |
 |---|---|---|---|
 | NAND — Amado Olivo et al. 2025 | 95.93% | 96.15% | 96.21% |
-| `ads-and` (this package) | **97.02%** | **96.36%** | **97.70%** |
+| Trivial baseline: every name block is one person | 96.67% | 93.56% | 100.00% |
+| `ads-and`, mean of the five training runs | 97.02% | 96.36% | 97.70% |
+| `ads-and`, bundled model (the run with seed 5) | 96.92% | 96.38% | 97.47% |
+
+The bundled model is one of the five runs, not their mean. The trivial baseline treats all mentions with the same surname and first initial as one person. In the test split, 93.56% of the pairs within such a name block belong to the same person, so the baseline reaches 96.67% F1 without any model; what the model adds is precision (93.56% → 96.38%). The NAND row is quoted from the paper; the other rows were computed with this repository.
 
 ## Install
 
@@ -155,17 +159,22 @@ The two disambiguated parquets preserve all input columns and append:
 | `AuthorUID` | `list[str]` | `["ads_run::s.cole::1", "ads_run::c.lacey::0", "ads_run::c.baugh::0"]` |
 | `AuthorDisplayName` | `list[str]` | `["Cole, Shaun", "Lacey, C. G.", "Baugh, C. M."]` |
 
-Both columns are parallel lists in the same order as the input `Author` column. Each UID is stable across runs for the same registry. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
+Both columns are parallel lists in the same order as the input `Author` column. A UID has the form `<dataset id>::<name block>::<number>`; the dataset id is `--dataset-id` or, if omitted, the name of the output directory. A UID labels an author entity within one run and is not a persistent identifier: after a change to the input data, the dataset id or the settings, the same person can get another number. An author without a clustered identity gets a placeholder UID of the form `<dataset id>::src.<publication|reference>.<row>.<position>`; `assignment_kind` in `source_author_assignments.parquet` says why. Each author entity gets exactly one display name — the most frequently occurring form of their name in the data (could be full-name or abbreviated depending on the entity). The same UID always carries the same display name string.
 
 A rerun into the same `output_dir` returns the existing outputs only if publications, references, `--infer-stage`, model and `--dataset-id` are unchanged (checked against a fingerprint in `summary.json`). Finished outputs of another request, or of an earlier version without fingerprint, are not overwritten: the run stops and asks for a new `output_dir` or `--force`.
 
 ## Reproducibility
 
 The bundled inference model is the selected fixed model from
-`full_20260218T111506Z_cli02681429`. The five-seed LSPO result above is backed
-by tracked repo-level artifacts under `artifacts/`, including the five seed
-checkpoints and the canonical clustering report. Raw LSPO is not redistributed;
-download it separately from Zenodo to rerun the quality workflow.
+`full_20260218T111506Z_cli02681429` (seed 5). The LSPO rows above are backed
+by tracked repo-level artifacts under `artifacts/`: the five seed checkpoints,
+the clustering report with the mean and the per-seed values, and the test-pair
+counts behind the trivial baseline (`02_pairs_qc.json`: 1,571,517 of 1,679,704
+pairs are positive). They were measured with the repo-level quality workflow,
+which clusters with DBSCAN. `ads-and infer` uses an exact connected-components
+implementation of the same rule; the LSPO numbers were not re-measured through
+it. Raw LSPO is not redistributed; download it separately from Zenodo to rerun
+the quality workflow.
 
 See [Training workflow](https://github.com/raphschlatt/ads-and/blob/main/docs/training_workflow.md)
 for the exact LSPO reproduction and release-gate commands.

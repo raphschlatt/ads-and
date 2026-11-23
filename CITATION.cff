@@ -2,7 +2,7 @@ cff-version: 1.2.0
 title: "ads-and: NAND-based author name disambiguation for SAO/NASA ADS publication metadata"
 message: "If you use ads-and, cite the software entry below. Cite the original NAND paper and LSPO dataset separately when you discuss the underlying method or benchmark."
 type: software
-abstract: "ads-and is a Python package and command-line tool for author name disambiguation on SAO/NASA ADS publication metadata. Given publications and optionally references in ADS parquet format, it assigns stable author identifiers and writes disambiguated outputs. The bundled model is a packaged and refined version of NAND (Neural Author Name Disambiguator), evaluated on the LSPO benchmark for physics and astronomy author name disambiguation."
+abstract: "ads-and is a Python package and command-line tool for author name disambiguation on SAO/NASA ADS publication metadata. Given publications and optionally references in ADS parquet format, it groups author mentions into author entities, assigns identifiers that are valid within one run, and writes disambiguated outputs. The bundled model is a packaged and refined version of NAND (Neural Author Name Disambiguator), evaluated on the LSPO benchmark for physics and astronomy author name disambiguation."
 authors:
   - family-names: "Schlattmann"
     given-names: "Raphael"

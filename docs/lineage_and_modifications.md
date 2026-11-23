@@ -31,7 +31,7 @@ The short version:
 | Current package source: `src/author_name_disambiguation/` | The public package and its internal implementation. |
 | Current research surface: `author_name_disambiguation_research/` plus excluded repo modules | Repo-only training, quality, and benchmark workflows. |
 | Fixed model bundle: `src/author_name_disambiguation/resources/model_bundles/fixed_model_baseline/bundle_v1/` | The public inference bundle shipped with the package. |
-| LSPO metric artifact: `artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json` | The five-seed LSPO clustering report behind the README metric row. |
+| LSPO metric artifact: `artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json` | The five-seed LSPO clustering report behind the README metric rows. |
 
 ## What NAND Does
 
@@ -229,7 +229,7 @@ the README.
 | Area | Original paper / snapshot | Current package | Why it matters |
 | --- | --- | --- | --- |
 | Repository shape | Paper method plus flat scripts. | Installable package under `src/author_name_disambiguation`, with a small public CLI/API and a separate repo-only research surface. | Users can run inference without editing research scripts. |
-| Public scope | LSPO research workflow. | ADS parquet inference with source-preserving outputs and stable IDs. | Turns the method into a usable ADS disambiguation tool. |
+| Public scope | LSPO research workflow. | ADS parquet inference with source-preserving outputs and author IDs that are valid within one run. | Turns the method into a usable ADS disambiguation tool. |
 | Data ingestion | Local LSPO files and manually prepared embeddings. | ADS parquet normalization, publication/reference deduplication, mention fanout, and source-output projection. | Makes input/output behavior explicit and reproducible. |
 | Splits | Paper describes ORCID-level splits before pair construction. Snapshot scripts are manual and path-bound. | ORCID-aware splits, split feasibility checks, split-balance metadata, deterministic seeding, and manifests. | Reduces leakage risk and makes train/eval conditions auditable. |
 | Pair construction | Within-block pairs, then class balancing. | Within-block pairs with `exclude_same_bibcode`, optional block caps, train balancing, chunked parquet output, and CPU sharding. | Pair construction is both quality-sensitive and runtime-sensitive. |
@@ -244,14 +244,16 @@ the README.
 
 ## Metric Provenance
 
-Two metric rows should be kept separate:
+These metric rows should be kept separate:
 
 | Source | LSPO clustering setting | F1 | Precision | Recall |
 | --- | --- | ---: | ---: | ---: |
 | NAND paper | DBSCAN + constraints | 95.93% | 96.15% | 96.21% |
-| `ads-and` tracked report | DBSCAN + constraints, five seeds | 97.02% | 96.36% | 97.70% |
+| Trivial baseline | every name block is one person | 96.67% | 93.56% | 100.00% |
+| `ads-and` tracked report | DBSCAN + constraints, mean of five seeds | 97.02% | 96.36% | 97.70% |
+| `ads-and` tracked report | DBSCAN + constraints, bundled model (seed 5) | 96.92% | 96.38% | 97.47% |
 
-The `ads-and` row comes from:
+The `ads-and` rows come from:
 
 ```text
 artifacts/metrics/full_20260218T111506Z_cli02681429/06_clustering_test_report__chars_cpu_20260407_v1.json
@@ -264,6 +266,20 @@ f1_mean        0.9702453597377284
 precision_mean 0.9635797859580881
 recall_mean    0.9770145661803212
 ```
+
+The bundled model is the run with seed 5 (`best_seed` in `03_train_manifest.json`).
+Its per-seed row in the same report records:
+
+```text
+f1        0.9692141612833212
+precision 0.9638349137309907
+recall    0.9746537899367299
+```
+
+The trivial baseline follows from the test-pair label counts in
+`02_pairs_qc.json` (1,571,517 positive and 108,187 negative pairs within name
+blocks): calling every pair a match gives precision 0.935592, recall 1 and
+F1 0.966724.
 
 The matching seed checkpoints are tracked under:
 
