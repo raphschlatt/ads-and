@@ -28,6 +28,9 @@ Notable changes to `ads-and`. The format follows
   or a conflicting given name) stays unresolved
   (`assignment_kind=fallback_name_mismatch`). The run warns about it and
   reports the number as `authors_name_mismatch`.
+- A `.json` input with one record per line was loaded but made the export fail
+  at the end of the run (`JSONDecodeError`). The export now reads JSON inputs
+  with the loader's reader.
 - `psutil` and `scipy` are declared dependencies. Without `psutil`, Windows
   hosts had no RAM budget.
 

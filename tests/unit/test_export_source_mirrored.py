@@ -414,6 +414,44 @@ def test_string_author_column_with_missing_values_is_skipped(tmp_path: Path):
     assert qc["authors_unmapped"] == 0
 
 
+@pytest.mark.parametrize("layout", ["one_record_per_line", "array_with_a_non_record_entry"])
+def test_json_input_is_exported_the_way_it_is_loaded(tmp_path: Path, layout: str):
+    pubs_path = tmp_path / "publications.json"
+    pubs_out = tmp_path / "publications_disambiguated.jsonl"
+    records = [
+        {"Bibcode": "bib1", "Author": ["Doe J", "Roe A"], "Title_en": "T1"},
+        {"Bibcode": "bib2", "Author": ["Doe J."], "Title_en": "T2"},
+    ]
+    if layout == "one_record_per_line":
+        _write_jsonl(pubs_path, records)
+    else:
+        pubs_path.write_text(json.dumps([records[0], "not a record", records[1]]), encoding="utf-8")
+
+    prepared = prepare_ads_source_data(pubs_path)
+    clusters = prepared["mentions"][["mention_id"]].copy()
+    clusters["author_uid_local"] = ["blk.a.0", "blk.a.1", "blk.a.0"]
+    clusters["author_uid"] = "set::" + clusters["author_uid_local"]
+    assignments = build_source_author_assignments(
+        publications=prepared["publications"],
+        references=prepared["references"],
+        canonical_records=prepared["canonical_records"],
+        clusters=clusters,
+        uid_scope="dataset",
+        uid_namespace="set",
+    )
+    export_source_mirrored_outputs(
+        assignments=assignments,
+        publications_path=pubs_path,
+        references_path=None,
+        publications_output_path=pubs_out,
+        references_output_path=None,
+    )
+
+    out_rows = [json.loads(line) for line in pubs_out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [row["AuthorUID"] for row in out_rows] == [["set::blk.a.0", "set::blk.a.1"], ["set::blk.a.0"]]
+    assert [sorted(row) for row in out_rows] == [["Author", "AuthorDisplayName", "AuthorUID", "Bibcode", "Title_en"]] * 2
+
+
 def test_duplicate_record_with_reordered_authors_does_not_inherit_wrong_identities(tmp_path: Path):
     pubs_path = tmp_path / "publications.parquet"
     refs_path = tmp_path / "references.parquet"

@@ -13,7 +13,7 @@ from author_name_disambiguation.approaches.nand.cluster import _name_conflict
 from author_name_disambiguation.common.io_schema import save_parquet
 from author_name_disambiguation.data.build_blocks import create_block_key
 from author_name_disambiguation.data.build_mentions import split_author_field
-from author_name_disambiguation.data.prepare_ads import _coalesce_text_columns, _pick_bibcode
+from author_name_disambiguation.data.prepare_ads import _coalesce_text_columns, _iter_ads_records, _pick_bibcode
 
 
 ASSIGNMENT_COLUMNS = [
@@ -43,36 +43,6 @@ AUTHOR_ENTITY_COLUMNS = [
     "unique_mention_count",
     "display_name_method",
 ]
-
-
-def _iter_json_records(path: Path) -> Iterator[dict[str, Any]]:
-    if path.suffix.lower() == ".jsonl":
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                text = line.strip()
-                if not text:
-                    continue
-                yield json.loads(text)
-        return
-
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict):
-                yield item
-        return
-    if isinstance(payload, dict):
-        if "Bibcode" in payload or "bibcode" in payload:
-            yield payload
-            return
-        for value in payload.values():
-            if isinstance(value, dict):
-                yield value
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        yield item
 
 
 def _clean_alias(value: Any) -> str:
@@ -341,13 +311,10 @@ def _assignment_rows_by_source(assignments: pd.DataFrame, source_type: str) -> d
 
 
 def _iter_raw_records_with_index(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
-    if path.suffix.lower() == ".parquet":
-        frame = pd.read_parquet(path)
-        for row_idx, row in enumerate(frame.itertuples(index=False)):
-            yield int(row_idx), row._asdict()
-        return
-    for row_idx, payload in enumerate(_iter_json_records(path)):
-        yield int(row_idx), payload
+    # The loader's reader, so that export and loading agree on what a record is and which row it has.
+    for payload in _iter_ads_records(path):
+        record = dict(payload)
+        yield int(record.pop("_source_row_idx")), record
 
 
 def _get_record_authors(record: dict[str, Any]) -> list[str]:
