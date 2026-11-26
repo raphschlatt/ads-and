@@ -5,6 +5,8 @@ Notable changes to `ads-and`. The format follows
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-26
+
 ### Fixed
 
 - Author strings are split only at semicolons. They were also split at commas,
@@ -61,5 +63,6 @@ Notable changes to `ads-and`. The format follows
 Releases up to 0.1.3 predate this changelog; see the Git tags `v0.1.1` to
 `v0.1.3`.
 
-[Unreleased]: https://github.com/raphschlatt/ads-and/compare/v0.1.3..HEAD
+[Unreleased]: https://github.com/raphschlatt/ads-and/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/raphschlatt/ads-and/releases/tag/v0.1.4
 [0.1.3]: https://github.com/raphschlatt/ads-and/releases/tag/v0.1.3

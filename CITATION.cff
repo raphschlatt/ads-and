@@ -10,8 +10,8 @@ authors:
 repository-code: "https://github.com/raphschlatt/ads-and"
 url: "https://github.com/raphschlatt/ads-and"
 license: "BSD-3-Clause"
-version: "0.1.3"
-date-released: "2026-04-27"
+version: "0.1.4"
+date-released: "2026-11-26"
 doi: "10.5281/zenodo.19820779"
 keywords:
   - author-name-disambiguation
